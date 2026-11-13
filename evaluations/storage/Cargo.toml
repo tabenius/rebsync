@@ -8,10 +8,16 @@ edition = "2024"
 publish = false
 license = "MIT"
 
+# Keep the experiment economical on small laptops; no production profile change.
+[profile.dev]
+debug = 0
+incremental = false
+
 [features]
 default = []
 object-store = ["dep:object_store", "dep:futures"]
 opendal = ["dep:opendal"]
+cloud-build = ["object_store?/aws", "opendal?/services-s3", "opendal?/http-transport-reqwest"]
 
 [dependencies]
 anyhow = "1"
@@ -19,8 +25,8 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = { version = "0.3", optional = true }
-object_store = { version = "=0.14.2", default-features = false, features = ["fs", "aws"], optional = true }
-opendal = { version = "=0.59.5", default-features = false, features = ["services-fs", "services-s3", "executors-tokio", "http-transport-reqwest"], optional = true }
+object_store = { version = "=0.14.2", default-features = false, features = ["fs"], optional = true }
+opendal = { version = "=0.59.5", default-features = false, features = ["services-fs", "executors-tokio"], optional = true }
 
 [[bin]]
 name = "object-store-probe"

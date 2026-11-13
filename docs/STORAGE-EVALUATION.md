@@ -39,9 +39,10 @@ The opendal 0.59.5 docs.rs API build was unavailable during inspection. The
 published 0.59.5 crate sources, rather than silently substituted older API docs,
 were used for its current behavior and build probes.
 
-The isolated features enable only FS and S3 provider functionality, with the
-runtime/TLS pieces needed to construct clients. They do not enable every backend
-or import both abstractions into production.
+The isolated baseline features enable only FS functionality. An optional
+`cloud-build` feature adds S3 and the runtime/TLS pieces needed to construct
+clients. They do not enable every backend or import either abstraction into
+production.
 
 ## Contract and selection gates
 
@@ -118,7 +119,7 @@ The probes use real temporary local filesystems and exercise:
 2. Directory-prefix listing and deletion.
 3. Visibility before writer completion and abort cleanup.
 4. Publication-time create-if-absent exclusion under competing writers.
-5. AWS S3 and R2 client construction with explicit dummy credentials.
+5. With `--cloud-build`, AWS S3 and R2 client construction with explicit dummy credentials.
 
 No provider requests are made by the probes. Client construction is not evidence
 of AWS/R2 authentication, request compatibility or recovery. Downloads of Rust
@@ -138,6 +139,26 @@ compiler. An unexpected semantic observation is a finding, not an assertion that
 the backend meets Rebsync's contract. Execution failures stop the runner.
 
 ### Findings and recommendation
+
+The first completed `object_store` filesystem probe passed put/get/head, range
+read, directory-prefix listing, deletion, multipart publication and abort. There
+was exactly **one successful competing create-if-absent writer**, and an
+unfinished upload was not visible. Its high-level listing with the prefix
+`data/item` returned no entries in this filesystem experiment, despite
+`data/item` and `data/item-extra` being stored: a concrete warning against using
+this API as a raw S3 prefix implementation.
+
+That run also constructed AWS S3 and R2 clients with dummy credentials; it sent no
+provider requests. The report, original manifest snapshot and source revision are
+in `evaluations/storage/results/object-store-cloud-initial.*`. It is evidence for
+that recipe, not a completed provider conformance test.
+
+The first OpenDAL build was blocked by a full 1.4 GiB memory-backed `/tmp`, before
+its executable ran. This is **not** an OpenDAL semantic failure or a fair footprint
+comparison: both candidates shared that cache. The memory-backed cache was freed,
+and subsequent filesystem-only probes use a disk-backed cache with one build job.
+Cloud client construction is now a separate opt-in build. Pending probes must not
+be reported as passing.
 
 Source review identifies important issues to verify with the local probes:
 

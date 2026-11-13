@@ -6,7 +6,7 @@ use serde_json::json;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Default features (including constructor-based registration) are disabled.
-    // Explicitly install the selected Rustls HTTP transport for S3 clients.
+    // With cloud-build, explicitly install the selected Rustls HTTP transport.
     opendal::install_default();
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("objects");
@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
     ensure!(op.stat("uploads/abort").await.is_err());
     op.delete("data/item").await?;
     ensure!(op.stat("data/item").await.is_err());
+    #[cfg(feature = "cloud-build")]
     for (endpoint, region) in [
         ("https://s3.us-east-1.amazonaws.com", "us-east-1"),
         ("https://evaluation-only.r2.cloudflarestorage.com", "auto"),
@@ -80,7 +81,7 @@ async fn main() -> Result<()> {
             "create_if_absent_winners":winners,
             "create_if_absent_meets_rebsync_atomic_requirement":winners == 1,
             "visible_before_close":visible_before_close,
-            "s3_and_r2_builders":"constructed with dummy credentials; provider behavior untested",
+        "s3_and_r2_builders":if cfg!(feature = "cloud-build") { "constructed with dummy credentials; provider behavior untested" } else { "not enabled; use cloud-build for construction-only checks" },
             "durability":"file sync_all in source; directory durability not demonstrated",
             "unverified":["cloud I/O", "restart-resumable multipart", "S3 wire server", "restic REST server", "Android target"]
         }))?

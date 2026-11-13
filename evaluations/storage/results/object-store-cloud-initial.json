@@ -1,0 +1,31 @@
+{
+  "backend": "LocalFileSystem",
+  "baseline_checks": [
+    "put/get/head",
+    "range",
+    "directory-prefix list",
+    "delete",
+    "multipart publish",
+    "multipart abort"
+  ],
+  "candidate": "object_store",
+  "manifest_snapshot": "object-store-cloud-initial.toml",
+  "probe_source_git_revision": "d98a698",
+  "create_if_absent_winners": 1,
+  "durability": "fsync option enabled and source reviewed; no power-loss test",
+  "fsync_enabled": true,
+  "network_requests": false,
+  "path_segment_prefix_result": [],
+  "probe_inputs_sha256": "7a5a1aee7b2c5215272a72db919eb0539f63e0e5ab2b2108421967892ff48559",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "s3_and_r2_builders": "constructed with dummy credentials; provider behavior untested",
+  "unverified": [
+    "cloud I/O",
+    "restart-resumable multipart",
+    "S3 wire server",
+    "restic REST server",
+    "Android target"
+  ],
+  "version": "0.14.2",
+  "visible_before_complete": false
+}

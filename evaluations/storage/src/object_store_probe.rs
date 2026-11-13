@@ -1,9 +1,10 @@
 //! Local semantic probe, not an S3 server or a cloud conformance test.
 use anyhow::{Result, ensure};
 use futures::TryStreamExt;
+#[cfg(feature = "cloud-build")]
+use object_store::aws::AmazonS3Builder;
 use object_store::{
-    ObjectStore, ObjectStoreExt, PutMode, PutOptions, aws::AmazonS3Builder, local::LocalFileSystem,
-    path::Path,
+    ObjectStore, ObjectStoreExt, PutMode, PutOptions, local::LocalFileSystem, path::Path,
 };
 use serde_json::json;
 
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
 
     // Construct only; explicit dummy keys prevent environment/metadata credentials.
     // No request is sent. Do not confuse builder success with provider validation.
+    #[cfg(feature = "cloud-build")]
     for (endpoint, region) in [
         ("https://s3.us-east-1.amazonaws.com", "us-east-1"),
         ("https://evaluation-only.r2.cloudflarestorage.com", "auto"),
@@ -89,7 +91,7 @@ async fn main() -> Result<()> {
             "create_if_absent_winners":winners,
             "visible_before_complete":visible_before_complete,
             "path_segment_prefix_result":prefix_listing.iter().map(|m| m.location.to_string()).collect::<Vec<_>>(),
-            "s3_and_r2_builders":"constructed with dummy credentials; provider behavior untested",
+        "s3_and_r2_builders":if cfg!(feature = "cloud-build") { "constructed with dummy credentials; provider behavior untested" } else { "not enabled; use cloud-build for construction-only checks" },
             "durability":"fsync option enabled and source reviewed; no power-loss test",
             "unverified":["cloud I/O", "restart-resumable multipart", "S3 wire server", "restic REST server", "Android target"]
         }))?
