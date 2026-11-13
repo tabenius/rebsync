@@ -142,6 +142,11 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
 
 ## Current boundaries / next work
 
+- The revised [storage-stack plan](docs/plan.html#r2) covers S3/R2 client profiles,
+  early restic REST serving, resumable multipart and peer capability negotiation.
+  The [Rust abstraction evaluation](docs/STORAGE-EVALUATION.md) compares pinned
+  object_store/OpenDAL candidates in an isolated workspace; no candidate has been
+  added to the production crates.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, consistent remote

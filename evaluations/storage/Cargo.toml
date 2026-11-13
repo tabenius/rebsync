@@ -1,0 +1,33 @@
+# Deliberately isolated from the two production crates: no dependency choice yet.
+[workspace]
+
+[package]
+name = "rebsync-storage-evaluation"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[features]
+default = []
+object-store = ["dep:object_store", "dep:futures"]
+opendal = ["dep:opendal"]
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures = { version = "0.3", optional = true }
+object_store = { version = "=0.14.2", default-features = false, features = ["fs", "aws"], optional = true }
+opendal = { version = "=0.59.5", default-features = false, features = ["services-fs", "services-s3", "executors-tokio", "http-transport-reqwest"], optional = true }
+
+[[bin]]
+name = "object-store-probe"
+path = "src/object_store_probe.rs"
+required-features = ["object-store"]
+
+[[bin]]
+name = "opendal-probe"
+path = "src/opendal_probe.rs"
+required-features = ["opendal"]

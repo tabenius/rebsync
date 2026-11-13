@@ -13,13 +13,13 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <body>
 <article>
 <header>
-<p class="kicker">Rebekah · engineering plan · 13 November 2026</p>
+<p class="kicker">Rebekah · engineering plan · 13 November 2026 · revision 2</p>
 <h1>Rebsync</h1>
 <p class="subtitle">Preserving work across uncertain connections</p>
 <p>A preservation-first synchronization command, growing into a network of intermittently connected Rebekah peers.</p>
-<p class="status">This is the proposed design, not a claim that every feature has shipped. Implementation starts with inventory, explicit execution, recovery snapshots and safe Git exchange.</p>
+<p class="status">Revision 2 adds the storage stack, S3/R2 client and server roles, early restic REST interoperability, resumable uploads and authenticated capability discovery. The initial command is implemented; the storage milestones below are planned. See the <a href="#evaluation">storage evaluation</a> and repository README for evidence and current limits.</p>
 </header>
-<nav aria-label="Contents"><a href="#purpose">Purpose</a><a href="#existing">Existing foundations</a><a href="#architecture">Architecture</a><a href="#config">Configuration</a><a href="#git">Git safety</a><a href="#journal">Journaling</a><a href="#ai">Reconciliation</a><a href="#r2">R2 recovery</a><a href="#datasets">Frog &amp; agenda</a><a href="#peers">Peers &amp; hops</a><a href="#delivery">Delivery</a></nav>
+<nav aria-label="Contents"><a href="#purpose">Purpose</a><a href="#existing">Existing foundations</a><a href="#architecture">Architecture</a><a href="#config">Configuration</a><a href="#git">Git safety</a><a href="#journal">Journaling</a><a href="#ai">Reconciliation</a><a href="#r2">Storage stack · S3 · R2 · restic</a><a href="#datasets">Frog &amp; agenda</a><a href="#peers">Peers &amp; hops</a><a href="#delivery">Delivery</a><a href="#evaluation">Rust storage evaluation</a></nav>
 <section id="purpose">
 <h2>1. Preserve first, synchronize second</h2>
 <p><span class="newthought">The first useful command</span> should answer four questions: what work exists here, where else it has been safely preserved, what can be synchronized without risking that work, and what needs reconciliation.</p>
@@ -59,6 +59,7 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <p>The core owns configuration loading, discovery, subprocesses, files, API calls, policy, planning, execution and structured events. It knows nothing about terminal rendering or interactive prompts.</p>
 <p>The clap-based CLI parses terminal input, passes explicit overrides, displays results and maps outcomes to exit codes. A later Tauri or Dioxus interface imports the same core.</p>
 <p>Use ordinary tools first: Git, GitHub CLI, SSH and established backup utilities. Pass arguments directly rather than interpolating shell commands; construct explicit pipelines only when necessary.</p>
+<p>Keep storage providers behind a narrow Rebsync-owned interface inside the core. Client adapters, incoming server protocols and synchronization policy are separate responsibilities. The experimental storage comparison is a standalone, unpublished workspace under <code>evaluations/storage/</code>; it adds no dependency or third crate to the production workspace.</p>
 </section>
 <section id="config">
 <h2>4. Predictable configuration</h2>
@@ -128,9 +129,48 @@ encrypt_private_data = true</code></pre>
 <p><strong>AI reconciliation must never be required for backup success.</strong></p>
 </section>
 <section id="r2">
-<h2>8. R2 as an independent recovery layer</h2>
-<p>Implement this early, before mesh networking. A private R2 bucket should hold encrypted repository recovery material, dirty-work snapshots, consistent Frog backups, Daily Agenda editions, journals and recovery inventories.</p>
-<p><label for="n-r2" class="margin-toggle sidenote-number"></label><input id="n-r2" type="checkbox" class="margin-toggle"><span class="sidenote">R2 is object storage, not an ordinary Git remote. Store encrypted backups or bundles; do not pretend it accepts <code>git push</code>. See <a href="https://developers.cloudflare.com/r2/">Cloudflare R2 documentation</a>.</span>Prefer an established encrypted backup engine such as restic, invoked by the Rust core, instead of inventing cryptography or a backup format. Validate R2 endpoint configuration through an actual restore.</p>
+<h2>8. A storage stack: filesystem, S3, R2 and restic</h2>
+<p><span class="newthought">Storage saves bytes.</span> Protocol adapters expose access. Rebsync decides what the bytes mean, where they should travel, and whether they are sufficiently protected. Build the lower stack early, before mesh networking or autonomous merging.</p>
+<pre><code>Rebsync orchestration
+  Git · datasets · preservation · reconciliation · routing
+                         │
+              Storage interface + policies
+                         │
+          ┌──────────────┼────────────────┐
+     Filesystem     S3 backend       REST backend
+     USB / disk     AWS S3 / R2      restic REST server
+
+Incoming clients
+  restic REST API · S3 API subset · Rebsync peer API
+                         │
+              Authorization + quotas
+                         │
+                Storage interface</code></pre>
+<p>A node may act as a client, a server, or both. Serving a protocol and storing through a backend are independent capabilities. A phone might expose a restic REST endpoint backed by local storage, then relay completed backups to R2 when the internet returns.</p>
+<p><label for="n-r2" class="margin-toggle sidenote-number"></label><input id="n-r2" type="checkbox" class="margin-toggle"><span class="sidenote">R2 implements a subset of the S3 API. Prefer “S3-compatible endpoint, Rebsync object profile, tested against AWS S3 and R2” over claiming to reproduce Cloudflare’s entire service. See <a href="https://developers.cloudflare.com/r2/api/s3/api/">R2 S3 compatibility</a>.</span>Use one S3 client family with provider profiles for AWS S3, Cloudflare R2 and other compatible endpoints. Set endpoint, region, addressing, authentication and feature support explicitly; test each provider. R2 is not an ordinary Git remote and does not accept <code>git push</code>.</p>
+<p>The existing command delegates encrypted backup to restic and can configure its S3 backend. That is not yet a native Rust S3 adapter or a storage server. Retain restic’s encryption, repository format and restore tooling rather than inventing cryptography or a backup format.</p>
+<h3>Storage milestone 1 · reliable objects and restic REST</h3>
+<table><thead><tr><th>Operation</th><th>Minimum contract</th></tr></thead><tbody>
+<tr><td>PutObject</td><td>Bounded-memory upload; atomic publication; declared durability; create-if-absent and conditional replacement where supported.</td></tr>
+<tr><td>GetObject</td><td>Streaming and byte-range reads, with explicit integrity checks.</td></tr>
+<tr><td>HeadObject</td><td>Size and relevant metadata without reading the entire object.</td></tr>
+<tr><td>ListObjectsV2</td><td>Correct raw-prefix, delimiter and continuation-token behavior; use V2 rather than legacy listing.</td></tr>
+<tr><td>DeleteObject</td><td>Available internally but restricted by authorization and retention policy; no automatic cross-peer deletion propagation.</td></tr>
+</tbody></table>
+<p>Distinguish not-found, forbidden, unavailable, corrupt and unsupported operations. Record consistency guarantees, checksums, limits and atomicity, not just method names. ETags are opaque validators, not universal content hashes. Do not emulate atomic create-if-absent with a separate HEAD followed by PUT.</p>
+<p>A filesystem adapter must use a dedicated object namespace with safe key mapping. Arbitrary S3 keys are not safe filesystem paths. Handle traversal, symlinks, case sensitivity and file/directory collisions; publish temporary files atomically and synchronize files and directory entries before claiming local durability.</p>
+<p>Bring <a href="https://restic.readthedocs.io/en/stable/100_references.html#rest-backend">restic REST API</a> interoperability into this milestone, before a broad S3 server. Initially, a future <code>rebsync serve</code> may supervise the established <a href="https://github.com/restic/rest-server">rest-server</a>; a native Rust adapter can follow. Repository-format compatibility is distinct from REST-protocol compatibility. Store encrypted repository objects opaquely.</p>
+<p>Validate repository creation, config access, typed object lists, HEAD, byte ranges, writes, errors and API-version negotiation against real restic. Normal backup needs lock deletion. Append-only policy protects existing backup objects while allowing the narrowly authorized lock lifecycle; pruning remains a separate administrative operation. Do not expose a listener without authentication, namespace isolation, quotas and TLS or an authenticated encrypted tunnel.</p>
+<h3>Storage milestone 2 · resumable transfer and an S3 server profile</h3>
+<pre><code>CreateMultipartUpload · UploadPart · CompleteMultipartUpload
+AbortMultipartUpload  · ListParts  · ListMultipartUploads</code></pre>
+<p>Persist upload IDs and part receipts across process restarts. Validate part order and sizes, handle retry and uncertain completion safely, publish the completed object atomically, and expire abandoned uploads under explicit policy. Respect provider-specific part limits. Multipart is a transport mechanism, not a requirement that all Rebsync datasets use the same chunk format.</p>
+<p>Implement an explicitly tested S3 wire profile: Signature Version 4 verification, HTTP/XML errors, ranges, conditional requests, pagination, supported addressing and required bucket probes such as HeadBucket. Return an explicit unsupported-operation error outside that profile. A client SDK or storage abstraction is not itself an S3 server.</p>
+<h3>Storage milestone 3 · authenticated capability discovery</h3>
+<p>Design the capability schema in milestone 1, then implement negotiation and discovery in milestone 3. Advertise software capability, currently available endpoints, caller authorization and storage guarantees separately. Report provider connections separately from incoming server protocols: “I can upload to R2” does not mean “I expose an S3 endpoint.”</p>
+<p>Each protocol advertisement includes a version/profile, endpoint, client/server role, permitted operations and limits. A hop additionally advertises its Rebsync routing role. Keep anonymous discovery minimal; bind authenticated capability responses to an enrolled identity, check freshness, and verify compatibility with conformance tests and bounded probes. Self-description alone is not proof.</p>
+<h3>Independent recovery, not just successful transfer</h3>
+<p>A private S3 or R2 location should hold encrypted repository recovery material, dirty-work snapshots, consistent Frog backups, Daily Agenda editions, journals and recovery inventories. Validate each real endpoint through an off-machine restore. Passing a local filesystem probe is not evidence of cloud compatibility or protection against losing the laptop.</p>
 <p>Use rclone where broad transport support helps, including a later Google Drive copy. Destructive bidirectional file synchronization is not the default backup policy.</p>
 <ul><li>Use bucket-scoped credentials and separate deletion privileges where practical.</li><li>Start with conservative retention and no automatic pruning.</li><li>Set storage, request and large-file budgets.</li><li>Keep recovery keys outside both the laptop and the backups they unlock.</li><li>Test retention locks before adopting their operational and cost consequences.</li></ul>
 <p>Dash can show status and coordinate authenticated exchanges. Its current bounded projections are not full backups. A Cloudflare Worker is not an environment where arbitrary Rust CLI subprocesses can be assumed to run.</p>
@@ -148,26 +188,37 @@ encrypt_private_data = true</code></pre>
 <h2>10. Peers, sinks, sources and hops</h2>
 <p>A <em>peer</em> or <em>node</em> is an identified participant. A <em>sink</em> accepts authorized data; a <em>source</em> provides it. A <em>hop</em> can invoke its own local rebsync and participate in onward exchange.</p>
 <p>Separate identity, address, capability, authority and trust. One peer may be reachable through a directory, SSH, HTTPS, object storage, LAN, Bluetooth or a future mesh address. A familiar Wi-Fi SSID is a discovery hint, not authentication.</p>
-<table><thead><tr><th>Destination</th><th>First transport</th></tr></thead><tbody><tr><td>GitHub</td><td>Git over SSH/HTTPS</td></tr><tr><td>Kali</td><td>Existing Tailscale SSH</td></tr><tr><td>USB</td><td>Explicitly enrolled mounted directory</td></tr><tr><td>R2</td><td>Encrypted object backup</td></tr><tr><td>Android</td><td>Termux-hosted Rust CLI over authenticated SSH, if supported</td></tr><tr><td>Dash</td><td>Existing HTTPS connector; sync endpoints later</td></tr></tbody></table>
+<table><thead><tr><th>Destination</th><th>First transport</th></tr></thead><tbody><tr><td>GitHub</td><td>Git over SSH/HTTPS</td></tr><tr><td>Kali</td><td>Existing Tailscale SSH</td></tr><tr><td>USB</td><td>Explicitly enrolled mounted directory</td></tr><tr><td>S3 / R2</td><td>Encrypted object backup through provider-specific profiles</td></tr><tr><td>Restic REST peer</td><td>Authenticated REST protocol over TLS or encrypted tunnel</td></tr><tr><td>Android</td><td>Termux-hosted Rust CLI over authenticated SSH, if supported</td></tr><tr><td>Dash</td><td>Existing HTTPS connector; sync endpoints later</td></tr></tbody></table>
 <p>Enroll USB devices using a stable identity and marker, not just a mount path. Never write to every removable drive automatically.</p>
 <p>Later, negotiate a versioned manifest such as <code>rebekah.peer.v0.1</code>, verify pinned identities and restrict datasets and operations. A public-key filename alone does not authenticate a phone.</p>
 <p>Store-and-forward needs deduplication, acknowledgements, quotas, expiry and hop limits. Advertise verified possession, not attempted uploads. Add Bluetooth, OSHI mesh, Plan 9 and other adapters after file and SSH exchange work reliably; inspect the actual bridge contracts first.</p>
+<pre><code>received → locally durable → verified → replicated upstream</code></pre>
+<p>A phone acknowledging local storage must not imply that R2 already has a copy. A cloud-backend profile is not a live cloud connection; an advertised feature is not permission to use it.</p>
+<p><strong>Never reconcile disconnected writable restic replicas by blindly merging object directories.</strong> Independent nodes start with separate repositories or coordinated consistent replicas. Copy snapshots through restic-aware operations when connected; do not pretend disconnected replicas share a functioning lock domain. Preserve pack/index/snapshot ordering and prevent conflicting pruning.</p>
 </section>
 <section id="delivery">
 <h2>11. Delivery and proof</h2>
+<p>The application stages below remain the overall roadmap. The three <a href="#r2">storage milestones</a> are a separate workstream feeding those stages, not a claim that application stages 1–3 have all shipped.</p>
 <table><thead><tr><th>Stage</th><th>Deliverable</th><th>Acceptance evidence</th></tr></thead><tbody>
 <tr><td>1</td><td>Workspace, configuration, discovery, dry-run, JSONL</td><td>Correct precedence; no dry-run mutations; isolated failures.</td></tr>
-<tr><td>2</td><td>Encrypted preservation to R2 and enrolled storage</td><td>Restore Git, dirty files, Frog and agenda into a clean directory.</td></tr>
+<tr><td>2</td><td>Encrypted preservation to S3/R2, restic REST peers and enrolled storage</td><td>Off-machine restore of Git, dirty files, Frog and agenda; storage milestone 1 contract tests.</td></tr>
 <tr><td>3</td><td>Safe Git exchange and repository creation policy</td><td>No lost work under divergence, dirty worktrees, offline Kali or denied access.</td></tr>
 <tr><td>4</td><td>Bounded OpenCode reconciliation</td><td>Recoverable conflicts when AI fails, times out or fails tests.</td></tr>
 <tr><td>5</td><td>Directory, SSH and phone exchange</td><td>Reconnect without duplication or silent overwrites.</td></tr>
 <tr><td>6</td><td>Dash, Bluetooth, mesh and additional datasets</td><td>Explicit ownership, schema, privacy and recovery tests per integration.</td></tr>
 </tbody></table>
 <p>Test interrupted uploads, full disks, hostile filenames, malformed manifests, changed host keys, concurrent runs and clock skew from the beginning.</p>
+<p>Storage acceptance additionally requires publication-time exclusion under competing writers, correct raw-prefix pagination, restart-resumable multipart, range restores with real restic, and provider-specific AWS S3/R2 tests. Do not infer any of these from successful client construction or a single-machine smoke test.</p>
 <h3>The first milestone</h3>
 <p><strong>One command discovers your work, preserves otherwise-unprotected changes to an independent destination, safely exchanges eligible Git branches, and tells you exactly what remains unprotected or unresolved—even without internet or AI access.</strong></p>
-<p>Start with stages 1–3. Keep R2 preservation ahead of autonomous merging. This gives immediate practical value without postponing the design needed for phones, removable media and intermittently connected Rebekah hops.</p>
-<p class="endnote">Reading edition of the preceding engineering plan. Tufte CSS and ET Book are vendored locally so the page remains readable offline. Implementation progress and limitations belong in the repository README, not in retroactive claims about this plan.</p>
+<p>Start with application stages 1–3 and storage milestone 1. Keep independent S3/R2 preservation ahead of autonomous merging. This gives immediate practical value without postponing the design needed for phones, removable media and intermittently connected Rebekah hops.</p>
+</section>
+<section id="evaluation">
+<h2>12. Rust storage evaluation</h2>
+<p>Evaluate <strong>Apache OpenDAL™ 0.59.5</strong> and <strong>object_store 0.14.2</strong> in an isolated workspace before selecting a production dependency. OpenDAL offers broader transport coverage and runtime capability metadata; object_store offers an object-focused contract, explicit create modes and lower-level multipart/pagination interfaces. Neither is a complete S3 server or restic REST server.</p>
+<p>The initial probes exercise real temporary filesystem backends, not mocks: put/get/head, ranges, listing, deletion, staged publication, abort and competing create-if-absent writes. S3 and R2 builders use dummy credentials without making cloud requests. Results and decision gates are maintained in <code>docs/STORAGE-EVALUATION.md</code> and <code>evaluations/storage/results/</code>.</p>
+<p>Selection remains provisional until the semantic probes and provider tests are evaluated. In particular, verify durability settings, capability flags versus actual exclusion behavior, raw-prefix listing versus directory semantics, and multipart restart recovery. Do not add either abstraction to the production crates simply because it compiles.</p>
+<p class="endnote">Revision 2 incorporates the storage-stack advice and begins a reproducible Rust abstraction evaluation. Tufte CSS and ET Book remain local for offline reading. Planned server and peer functions are not shipped features; consult the repository README and recorded evaluation results.</p>
 </section>
 </article>
 </body>
