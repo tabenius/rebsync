@@ -154,29 +154,46 @@ in `evaluations/storage/results/object-store-cloud-initial.*`. It is evidence fo
 that recipe, not a completed provider conformance test.
 
 The first OpenDAL build was blocked by a full 1.4 GiB memory-backed `/tmp`, before
-its executable ran. This is **not** an OpenDAL semantic failure or a fair footprint
-comparison: both candidates shared that cache. The memory-backed cache was freed,
-and subsequent filesystem-only probes use a disk-backed cache with one build job.
-Cloud client construction is now a separate opt-in build. Pending probes must not
-be reported as passing.
+its executable ran. This was **not** an OpenDAL semantic failure or a fair
+footprint comparison: both candidates shared that cache. After freeing the
+memory-backed cache and using a disk-backed one with one build job, the OpenDAL
+filesystem probe completed:
+
+- Put/get/stat, range read, deletion, staged publication and abort all passed.
+- An unfinished writer was not visible before close.
+- Two writers opened on the same absent key; the first published, and the second
+  failed at write time with `ConditionNotMatch("file already exists")`. Exactly
+  one publisher won and the final content was `first`. The exclusion check
+  therefore happens at first write rather than at writer open, so a "writer
+  opened" result is not itself a reservation.
+- Recursive listing of `data/` included the directory entry `data/` alongside
+  the two objects. That is filesystem directory semantics, not an S3 raw-prefix
+  listing.
+
+Both candidates now pass the local semantic baseline. Neither probe contacted a
+storage provider.
 
 Source review identifies important issues to verify with the local probes:
 
 - `object_store` local durability is opt-in. Its high-level prefix listing has
   segment semantics, and its lower-level multipart interface does not fill every
   milestone-2 operation.
-- In the inspected OpenDAL FS atomic-write path, create-if-absent checks occur at
-  writer creation while publication uses rename. A competing-writer probe is
-  required before treating the advertised flag as publication-time exclusion.
-  File `sync_all` alone is not proof of parent-directory crash durability.
+- OpenDAL's FS create-if-absent check is deferred to first write, while
+  publication uses rename. A second writer opened before the first close still
+  lost at write time in this probe, but this must be re-checked under true
+  concurrency and process interleaving rather than two sequential awaits in one
+  task. File `sync_all` alone is not proof of parent-directory crash durability.
 - Neither library supplies server authentication, a restic server, peer discovery
   or safe offline replication automatically.
 
 **Provisional direction:** prefer `object_store` as the first FS/S3-focused
-candidate behind a narrow Rebsync-owned interface if its semantic probes pass.
-Keep OpenDAL on the shortlist for broader SFTP/WebDAV/consumer-cloud integration,
-but do not silently weaken atomicity or durability to gain transport breadth.
-Do not adopt both abstractions into production at this stage.
+candidate behind a narrow Rebsync-owned interface. Both candidates pass the local
+baseline, so the remaining differentiation is API fit rather than local
+correctness: `object_store` exposes explicit create modes, object-specific
+pagination and a lower-level multipart contract, while OpenDAL offers broader
+transport coverage. Keep OpenDAL on the shortlist for SFTP/WebDAV/consumer-cloud
+integration, but do not silently weaken atomicity or durability to gain transport
+breadth. Do not adopt both abstractions into production at this stage.
 
 This is not a performance ranking. Shared build caches, different features and
 the absence of real cloud tests do not support claims about comparative speed,

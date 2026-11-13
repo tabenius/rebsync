@@ -1,0 +1,29 @@
+{
+  "backend": "LocalFileSystem",
+  "baseline_checks": [
+    "put/get/head",
+    "range",
+    "directory-prefix list",
+    "delete",
+    "multipart publish",
+    "multipart abort"
+  ],
+  "candidate": "object_store",
+  "create_if_absent_winners": 1,
+  "durability": "fsync option enabled and source reviewed; no power-loss test",
+  "fsync_enabled": true,
+  "network_requests": false,
+  "path_segment_prefix_result": [],
+  "probe_inputs_sha256": "bd0a786bc4e3e8449b9d58650a5f44dd51d2046e875ce5b9340ca13c731eec04",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "s3_and_r2_builders": "not enabled; use cloud-build for construction-only checks",
+  "unverified": [
+    "cloud I/O",
+    "restart-resumable multipart",
+    "S3 wire server",
+    "restic REST server",
+    "Android target"
+  ],
+  "version": "0.14.2",
+  "visible_before_complete": false
+}

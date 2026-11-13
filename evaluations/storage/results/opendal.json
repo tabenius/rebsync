@@ -1,0 +1,40 @@
+{
+  "advertised_create_if_absent": true,
+  "backend": "Fs with atomic_write_dir",
+  "baseline_checks": [
+    "put/get/stat",
+    "range",
+    "directory list",
+    "delete",
+    "writer publish",
+    "writer abort"
+  ],
+  "candidate": "opendal",
+  "create_if_absent_meets_rebsync_atomic_requirement": true,
+  "create_if_absent_winners": 1,
+  "directory_entry_listed": true,
+  "directory_listing_paths": [
+    "data/item-extra",
+    "data/item",
+    "data/"
+  ],
+  "durability": "file sync_all in source; directory durability not demonstrated",
+  "final_content": "first",
+  "first_published": true,
+  "network_requests": false,
+  "probe_inputs_sha256": "6af963ded7bc41251b9f0f236d08e164f8d13d8a9dd397f02fef811936d9f6a2",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "s3_and_r2_builders": "not enabled; use cloud-build for construction-only checks",
+  "second_error": "ConditionNotMatch (permanent) at write, context: { service: fs, path: claims/unique, size: 6, written: 0 } => file already exists, doesn't match the condition if_not_exists",
+  "second_published": false,
+  "second_writer_opened_before_first_close": true,
+  "unverified": [
+    "cloud I/O",
+    "restart-resumable multipart",
+    "S3 wire server",
+    "restic REST server",
+    "Android target"
+  ],
+  "version": "0.59.5",
+  "visible_before_close": false
+}

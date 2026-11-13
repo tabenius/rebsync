@@ -18,29 +18,52 @@ async fn main() -> Result<()> {
             .root(root.to_str().unwrap())
             .atomic_write_dir(staging.to_str().unwrap()),
     )?;
-    let capability = op.info().full_capability();
+    let capability = op.info().capability();
     op.write("data/item", "abcdefghij").await?;
     ensure!(op.stat("data/item").await?.content_length() == 10);
     ensure!(op.read("data/item").await?.to_vec() == b"abcdefghij");
     ensure!(op.read_with("data/item").range(2..5).await?.to_vec() == b"cde");
     op.write("data/item-extra", "neighbor").await?;
     let listing = op.list_with("data/").recursive(true).await?;
-    ensure!(listing.len() == 2);
+    let listed: Vec<String> = listing
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect();
+    ensure!(listed.iter().any(|path| path == "data/item"));
+    ensure!(listed.iter().any(|path| path == "data/item-extra"));
+    // OpenDAL's recursive directory listing includes the directory entry itself
+    // on this filesystem; do not treat it as interchangeable with an S3 raw-prefix list.
+    let directory_entry_listed = listed.iter().any(|path| path.ends_with('/'));
 
     // Both writers are opened while the destination does not exist. This tests
     // publication-time exclusion, not merely a sequential existence check.
+    // Every outcome is recorded rather than asserted: the point is to find out
+    // whether the filesystem adapter actually excludes the second publisher.
     let mut first = op.writer_with("claims/unique").if_not_exists(true).await?;
     let second = op.writer_with("claims/unique").if_not_exists(true).await;
-    first.write("first").await?;
+    let first_write = first.write("first").await;
     let first_close = first.close().await;
-    let (second_opened, second_close_succeeded) = match second {
+    let first_published = first_write.is_ok() && first_close.is_ok();
+    let mut second_opened = false;
+    let mut second_published = false;
+    let mut second_error = None;
+    match second {
         Ok(mut writer) => {
-            writer.write("second").await?;
-            (true, writer.close().await.is_ok())
+            second_opened = true;
+            let write = writer.write("second").await;
+            match (write, writer.close().await) {
+                (Ok(()), Ok(_)) => second_published = true,
+                (Err(err), _) | (Ok(()), Err(err)) => second_error = Some(err.to_string()),
+            }
         }
-        Err(_) => (false, false),
-    };
-    let winners = usize::from(first_close.is_ok()) + usize::from(second_close_succeeded);
+        Err(err) => second_error = Some(err.to_string()),
+    }
+    let winners = usize::from(first_published) + usize::from(second_published);
+    let final_content = op
+        .read("claims/unique")
+        .await
+        .ok()
+        .map(|buffer| String::from_utf8_lossy(&buffer.to_vec()).into_owned());
 
     let mut writer = op.writer("uploads/complete").await?;
     writer.write("part-one").await?;
@@ -79,8 +102,14 @@ async fn main() -> Result<()> {
             "advertised_create_if_absent":capability.write_with_if_not_exists,
             "second_writer_opened_before_first_close":second_opened,
             "create_if_absent_winners":winners,
-            "create_if_absent_meets_rebsync_atomic_requirement":winners == 1,
+            "first_published":first_published,
+            "second_published":second_published,
+            "second_error":second_error,
+            "final_content":final_content,
+            "create_if_absent_meets_rebsync_atomic_requirement":winners == 1 && final_content.as_deref() == Some("first"),
             "visible_before_close":visible_before_close,
+            "directory_listing_paths":listed,
+            "directory_entry_listed":directory_entry_listed,
         "s3_and_r2_builders":if cfg!(feature = "cloud-build") { "constructed with dummy credentials; provider behavior untested" } else { "not enabled; use cloud-build for construction-only checks" },
             "durability":"file sync_all in source; directory durability not demonstrated",
             "unverified":["cloud I/O", "restart-resumable multipart", "S3 wire server", "restic REST server", "Android target"]
