@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Rebsync — preserving work across uncertain connections</title>
+<link rel="stylesheet" href="assets/tufte.css">
+<style>
+html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2rem}header p,nav{width:55%}.kicker,nav,.status{font-family:system-ui,sans-serif;font-size:.85rem;line-height:1.6;letter-spacing:.025em}.kicker{text-transform:uppercase;color:#777}nav{border-block:1px solid #aaa;padding:1rem 0;margin:2.5rem 0}nav a{display:inline-block;margin-right:.9rem}.status{border-left:3px solid #999;padding-left:1rem}table{border-collapse:collapse;font-size:1.1rem;line-height:1.5}th,td{text-align:left;vertical-align:top;padding:.6rem .7rem .6rem 0;border-bottom:1px solid #aaa}th{font-weight:normal;font-style:italic}pre{white-space:pre-wrap}code{overflow-wrap:anywhere}h2{scroll-margin-top:2rem}.endnote{color:#777;font-size:1.1rem}@media(max-width:760px){header p,nav{width:100%}}@media print{body{background:white;color:black}nav{display:none}a{text-decoration:none}section{break-inside:auto}h2,h3{break-after:avoid}pre,table{break-inside:avoid}}
+</style>
+</head>
+<body>
+<article>
+<header>
+<p class="kicker">Rebekah · engineering plan · 13 November 2026</p>
+<h1>Rebsync</h1>
+<p class="subtitle">Preserving work across uncertain connections</p>
+<p>A preservation-first synchronization command, growing into a network of intermittently connected Rebekah peers.</p>
+<p class="status">This is the proposed design, not a claim that every feature has shipped. Implementation starts with inventory, explicit execution, recovery snapshots and safe Git exchange.</p>
+</header>
+<nav aria-label="Contents"><a href="#purpose">Purpose</a><a href="#existing">Existing foundations</a><a href="#architecture">Architecture</a><a href="#config">Configuration</a><a href="#git">Git safety</a><a href="#journal">Journaling</a><a href="#ai">Reconciliation</a><a href="#r2">R2 recovery</a><a href="#datasets">Frog &amp; agenda</a><a href="#peers">Peers &amp; hops</a><a href="#delivery">Delivery</a></nav>
+<section id="purpose">
+<h2>1. Preserve first, synchronize second</h2>
+<p><span class="newthought">The first useful command</span> should answer four questions: what work exists here, where else it has been safely preserved, what can be synchronized without risking that work, and what needs reconciliation.</p>
+<p><label for="n-backup" class="margin-toggle sidenote-number"></label><input id="n-backup" type="checkbox" class="margin-toggle"><span class="sidenote">A successful Git push does not preserve dirty files, ignored data, a running database, or the keys needed to recover an encrypted backup.</span><strong>Backup, synchronization and reconciliation are separate operations.</strong> The system must remain useful without internet, without an AI subscription, and without every usual device being present.</p>
+<p>The immediate aim is not a universal mesh. It is a trustworthy command that saves otherwise unprotected work and explains precisely what remains at risk.</p>
+</section>
+<section id="existing">
+<h2>2. Reuse the existing foundations</h2>
+<p>Frog already owns repository identity, discovery, workspace coordination, locks and SSH federation. Rebekah supplies runtime integration and an authenticated gateway. Dash already exchanges private instance views, including Daily Agenda. These should become adapters, not competing systems.</p>
+<table><thead><tr><th>Component</th><th>Responsibility to reuse</th></tr></thead><tbody>
+<tr><td>ragbaz-frog</td><td>Repository discovery, identity, coordination and SSH federation.</td></tr>
+<tr><td>update-repos.bash</td><td>Existing workflow reference; not a script to run wholesale as the new engine.</td></tr>
+<tr><td>rebekah / ragbaz-dash</td><td>Private gateway, instance connector and agenda contract.</td></tr>
+<tr><td>Android bridge / Indra</td><td>Starting points for authenticated phone transport, not proof of a finished Bluetooth sync system.</td></tr>
+<tr><td>WeftMark / Nostoi</td><td>Existing provenance, attestation and verification responsibilities.</td></tr>
+</tbody></table>
+<p><label for="n-authority" class="margin-toggle sidenote-number"></label><input id="n-authority" type="checkbox" class="margin-toggle"><span class="sidenote">Trusted fleet reference: <code>kali-1</code>, accessed using Tailscale SSH. Known fleet root: <code>/srv/ragbaz/src/vendors/ragbaz/head</code>.</span><strong>Transport preference is not authority.</strong> GitHub is the preferred online exchange; Kali’s fleet-head checkouts remain the authoritative fleet reference. When Kali is unavailable, preserve local work and exchange permitted branches, but label fleet reconciliation pending.</p>
+<p>The authoritative Frog database is on Kali at <code>/srv/ragbaz/src/vendors/ragbaz/head/AGENTS.db</code>. An empty local database must not replace it.</p>
+</section>
+<section id="architecture">
+<h2>3. A Rust workspace with a reusable core</h2>
+<p>Create <code>tabenius/rebsync</code>, private initially, with exactly two application crates from day one. Organization ownership at <code>RAGBAZ/rebsync</code> is an alternative, not a reason to create duplicate projects.</p>
+<pre><code>rebsync/
+├── Cargo.toml
+├── Cargo.lock
+├── crates/
+│   ├── rebsync-core/
+│   │   └── src/
+│   │       ├── config / inventory / planning
+│   │       ├── execution / git / datasets
+│   │       ├── peers / transports
+│   │       └── reconciliation / journal
+│   └── rebsync-cli/
+│       └── src/main.rs
+├── tests/
+└── examples/</code></pre>
+<p>The core owns configuration loading, discovery, subprocesses, files, API calls, policy, planning, execution and structured events. It knows nothing about terminal rendering or interactive prompts.</p>
+<p>The clap-based CLI parses terminal input, passes explicit overrides, displays results and maps outcomes to exit codes. A later Tauri or Dioxus interface imports the same core.</p>
+<p>Use ordinary tools first: Git, GitHub CLI, SSH and established backup utilities. Pass arguments directly rather than interpolating shell commands; construct explicit pipelines only when necessary.</p>
+</section>
+<section id="config">
+<h2>4. Predictable configuration</h2>
+<p>Support TOML and YAML. Configuration precedence is built-in defaults, user configuration, Rebekah-home configuration, an explicit configuration file, then CLI options.</p>
+<pre><code>rebsync                  # rebekah_home defaults to $HOME
+rebsync .                # use this directory instead
+rebsync . --dry-run
+rebsync config explain   # effective configuration and origins</code></pre>
+<p>Discover user configuration under <code>$XDG_CONFIG_HOME/rebsync/</code> and home configuration as <code>rebsync.toml</code> or <code>rebsync.yaml</code>. Competing formats at the same layer are an error. Reject unknown keys. Replace lists by default rather than silently concatenating them.</p>
+<pre><code># Proposed configuration shape; consult the shipped example
+# for the exact fields implemented by each release.
+[github]
+remote_prefixes = ["github.com/tabenius", "github.com/RAGBAZ"]
+creation_owner = "tabenius"
+new_repository_visibility = "private"
+
+[git]
+automatic_merge = "fast-forward-only"
+push_local_branches = true
+force_push = false
+propagate_deletions = false
+
+[reconcile]
+enabled = true
+engine = "opencode"
+write_instructions = true
+publish = "after-policy-checks"
+
+[backup]
+enabled = true
+encrypt_private_data = true</code></pre>
+<p><label for="n-privacy" class="margin-toggle sidenote-number"></label><input id="n-privacy" type="checkbox" class="margin-toggle"><span class="sidenote">A broad repository scan is not permission to upload the contents of a home directory. Private-data backup needs explicit dataset policies and exclusions.</span>Normalize GitHub SSH and HTTPS addresses into repository identities. Treat the configured prefixes as owner allowlists, not vulnerable literal string-prefix comparisons.</p>
+</section>
+<section id="git">
+<h2>5. Safe Git exchange</h2>
+<pre><code>inventory → preserve → fetch → plan
+          → synchronize → reconcile → verify → summarize</code></pre>
+<p>Use Frog discovery where available, with filesystem discovery as a fallback. Account for nested repositories, linked worktrees, <code>.git</code> files, bare repositories, detached HEADs and naming collisions.</p>
+<p>Before moving branches, preserve relevant refs and commit IDs, uncommitted tracked changes, selected untracked files and needed dataset state. Never automatically commit dirty work into shared or public history. Preserve it privately and encrypted.</p>
+<ol>
+<li>Identify trusted read sources and permitted write destinations.</li>
+<li>Fetch sources independently. A failed source must not invalidate successful fetches from another.</li>
+<li>Preserve divergent branch tips before reconciliation.</li>
+<li>Automatically fast-forward only when safe.</li>
+<li>Push eligible local branches using ordinary, non-forced pushes.</li>
+<li>Record rejected pushes, divergence, protected branches and missing permissions explicitly.</li>
+</ol>
+<p>Default prohibitions: no force pushes, deletion propagation, automatic stash/pop cycle, operator working-tree rewrites, or <code>git push --mirror</code> against shared repositories. Do not assume a default branch is named <code>main</code>; do not merge every feature branch into it.</p>
+<p>Fetch and preserve remote-only branches. Publishing them elsewhere requires a mapping, not accidental conflation of branches sharing a name.</p>
+<h3>Creating missing GitHub repositories</h3>
+<p>Distinguish an owned project lacking GitHub storage, a forkable GitHub upstream, and an independent repository originating on Kali or another host. Retain provenance and existing remotes. Never replace <code>origin</code> blindly.</p>
+<p>Require approval of first-run destination mappings and visibility. Naming collisions and possible private upstream content require review.</p>
+</section>
+<section id="journal">
+<h2>6. An exact, restartable journal</h2>
+<p>Write a collision-safe JSONL journal directly under the selected Rebekah home, with UTC timestamps:</p>
+<pre><code>rebsync_2026-11-13_172405.jsonl
+.rebekah/rebsync/          # separate resumable state</code></pre>
+<p>Each event records run and action IDs, repository or dataset identity, peer and transport, planned action, result, redacted executable arguments, timestamps, exit status, before/after refs or digests, verification and skip reasons.</p>
+<p>Write intent before mutation and completion afterward. Stop new mutations if journaling fails. Redact secrets and avoid logging file contents. Use per-repository locks, bounded retries, timeouts and stale-plan checks. An interrupted run must not look like a completed one.</p>
+</section>
+<section id="ai">
+<h2>7. OpenCode reconciliation, with limits</h2>
+<p>Enable reconciliation assistance by default. For divergence, create an isolated worktree and write <code>rebekah-repo-reconcile-merge.md</code> there, recording source refs, target, preserved tips, constraints and required tests.</p>
+<p>Launch OpenCode only when available and permitted. Preserve the instructions and work when AI access is unavailable. Capture its outcome and independently inspect the resulting Git state.</p>
+<p><label for="n-ai" class="margin-toggle sidenote-number"></label><input id="n-ai" type="checkbox" class="margin-toggle"><span class="sidenote">A textual merge is not evidence of semantic correctness. Repository content is untrusted input, not authorization to alter synchronization policy.</span>Allow preparation of reconciliation commits in isolation. Do not expose unrestricted backup credentials. Enforce permissions, execution and spending budgets. Default-branch publication needs configured checks and authorization; otherwise publish a review branch and handoff.</p>
+<p><strong>AI reconciliation must never be required for backup success.</strong></p>
+</section>
+<section id="r2">
+<h2>8. R2 as an independent recovery layer</h2>
+<p>Implement this early, before mesh networking. A private R2 bucket should hold encrypted repository recovery material, dirty-work snapshots, consistent Frog backups, Daily Agenda editions, journals and recovery inventories.</p>
+<p><label for="n-r2" class="margin-toggle sidenote-number"></label><input id="n-r2" type="checkbox" class="margin-toggle"><span class="sidenote">R2 is object storage, not an ordinary Git remote. Store encrypted backups or bundles; do not pretend it accepts <code>git push</code>. See <a href="https://developers.cloudflare.com/r2/">Cloudflare R2 documentation</a>.</span>Prefer an established encrypted backup engine such as restic, invoked by the Rust core, instead of inventing cryptography or a backup format. Validate R2 endpoint configuration through an actual restore.</p>
+<p>Use rclone where broad transport support helps, including a later Google Drive copy. Destructive bidirectional file synchronization is not the default backup policy.</p>
+<ul><li>Use bucket-scoped credentials and separate deletion privileges where practical.</li><li>Start with conservative retention and no automatic pruning.</li><li>Set storage, request and large-file budgets.</li><li>Keep recovery keys outside both the laptop and the backups they unlock.</li><li>Test retention locks before adopting their operational and cost consequences.</li></ul>
+<p>Dash can show status and coordinate authenticated exchanges. Its current bounded projections are not full backups. A Cloudflare Worker is not an environment where arbitrary Rust CLI subprocesses can be assumed to run.</p>
+</section>
+<section id="datasets">
+<h2>9. Frog and Daily Agenda</h2>
+<h3>Consistent task data</h3>
+<p>Do not casually copy an active SQLite file or merge database files. Obtain consistent backups on the authoritative host using SQLite’s backup mechanism. Keep offline snapshots read-only; queue offline changes as stable-ID operations and replay them through supported Frog contracts.</p>
+<p>Conflict rules for independently edited tasks come later. Copying one database over another is not reconciliation.</p>
+<h3>Whole agenda editions</h3>
+<p>Synchronize <code>snapshot.json</code>, <code>editorial.json</code> and <code>manifest.json</code> as one verified edition. Preserve original source timestamps and last-known-good editions; receiving or rerendering an old edition must not make it look fresh.</p>
+<p>Reuse Rebekah’s manifest validation and authenticated Dash connector. Do not create a public artifact directory as a shortcut.</p>
+</section>
+<section id="peers">
+<h2>10. Peers, sinks, sources and hops</h2>
+<p>A <em>peer</em> or <em>node</em> is an identified participant. A <em>sink</em> accepts authorized data; a <em>source</em> provides it. A <em>hop</em> can invoke its own local rebsync and participate in onward exchange.</p>
+<p>Separate identity, address, capability, authority and trust. One peer may be reachable through a directory, SSH, HTTPS, object storage, LAN, Bluetooth or a future mesh address. A familiar Wi-Fi SSID is a discovery hint, not authentication.</p>
+<table><thead><tr><th>Destination</th><th>First transport</th></tr></thead><tbody><tr><td>GitHub</td><td>Git over SSH/HTTPS</td></tr><tr><td>Kali</td><td>Existing Tailscale SSH</td></tr><tr><td>USB</td><td>Explicitly enrolled mounted directory</td></tr><tr><td>R2</td><td>Encrypted object backup</td></tr><tr><td>Android</td><td>Termux-hosted Rust CLI over authenticated SSH, if supported</td></tr><tr><td>Dash</td><td>Existing HTTPS connector; sync endpoints later</td></tr></tbody></table>
+<p>Enroll USB devices using a stable identity and marker, not just a mount path. Never write to every removable drive automatically.</p>
+<p>Later, negotiate a versioned manifest such as <code>rebekah.peer.v0.1</code>, verify pinned identities and restrict datasets and operations. A public-key filename alone does not authenticate a phone.</p>
+<p>Store-and-forward needs deduplication, acknowledgements, quotas, expiry and hop limits. Advertise verified possession, not attempted uploads. Add Bluetooth, OSHI mesh, Plan 9 and other adapters after file and SSH exchange work reliably; inspect the actual bridge contracts first.</p>
+</section>
+<section id="delivery">
+<h2>11. Delivery and proof</h2>
+<table><thead><tr><th>Stage</th><th>Deliverable</th><th>Acceptance evidence</th></tr></thead><tbody>
+<tr><td>1</td><td>Workspace, configuration, discovery, dry-run, JSONL</td><td>Correct precedence; no dry-run mutations; isolated failures.</td></tr>
+<tr><td>2</td><td>Encrypted preservation to R2 and enrolled storage</td><td>Restore Git, dirty files, Frog and agenda into a clean directory.</td></tr>
+<tr><td>3</td><td>Safe Git exchange and repository creation policy</td><td>No lost work under divergence, dirty worktrees, offline Kali or denied access.</td></tr>
+<tr><td>4</td><td>Bounded OpenCode reconciliation</td><td>Recoverable conflicts when AI fails, times out or fails tests.</td></tr>
+<tr><td>5</td><td>Directory, SSH and phone exchange</td><td>Reconnect without duplication or silent overwrites.</td></tr>
+<tr><td>6</td><td>Dash, Bluetooth, mesh and additional datasets</td><td>Explicit ownership, schema, privacy and recovery tests per integration.</td></tr>
+</tbody></table>
+<p>Test interrupted uploads, full disks, hostile filenames, malformed manifests, changed host keys, concurrent runs and clock skew from the beginning.</p>
+<h3>The first milestone</h3>
+<p><strong>One command discovers your work, preserves otherwise-unprotected changes to an independent destination, safely exchanges eligible Git branches, and tells you exactly what remains unprotected or unresolved—even without internet or AI access.</strong></p>
+<p>Start with stages 1–3. Keep R2 preservation ahead of autonomous merging. This gives immediate practical value without postponing the design needed for phones, removable media and intermittently connected Rebekah hops.</p>
+<p class="endnote">Reading edition of the preceding engineering plan. Tufte CSS and ET Book are vendored locally so the page remains readable offline. Implementation progress and limitations belong in the repository README, not in retroactive claims about this plan.</p>
+</section>
+</article>
+</body>
+</html>

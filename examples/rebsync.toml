@@ -1,0 +1,34 @@
+# All paths below are relative to rebekah_home unless absolute.
+version = 1
+command_timeout_seconds = 120
+
+[scan]
+roots = ["src/ragbaz"]
+max_depth = 14
+
+[git]
+remote_prefixes = ["github.com/tabenius", "github.com/RAGBAZ"]
+fetch = true
+push = true
+fast_forward = true
+backup_required = true
+
+[backup]
+# Initialize explicitly with: rebsync backup-init --confirm --config PATH
+# repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rebsync"
+# password_file = "/path/outside/repositories/rebsync-restic-password"
+# AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY come from the environment.
+# Never place credentials or the restic password in this file.
+
+# Back up quiescent owner-produced exports, not a live SQLite directory.
+# [[backup.datasets]]
+# name = "frog-export"
+# path = "reports/frog-export"
+# kind = "directory"
+
+[reconcile]
+write_instructions = true
+
+[fleet]
+host = "kali-1"
+root = "/srv/ragbaz/src/vendors/ragbaz/head"
