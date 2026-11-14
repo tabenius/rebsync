@@ -575,3 +575,175 @@ mod tests {
         assert!(manifest_key("agenda", "local/a/b").is_err());
     }
 }
+
+/// Exclusive per-layer lock: publish and prune never interleave locally.
+/// (Peers are separate stores; pruning never reaches them.)
+pub fn lock(config: &Config, layer: &str) -> Result<File> {
+    use fs2::FileExt;
+    let state = sync::state_dir(config)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join(format!("{layer}.lock")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while file.try_lock_exclusive().is_err() {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "another rebsync is publishing or pruning the {layer} layer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(file)
+}
+
+#[derive(Clone, Debug)]
+pub struct Retention {
+    /// Newest snapshots kept per label; at least 1.
+    pub keep_last: usize,
+    /// Also keep everything created within this many days.
+    pub keep_days: Option<u32>,
+    pub label: Option<String>,
+    /// Unreferenced chunks younger than this are left alone (an interrupted
+    /// or concurrent publish may still reference them).
+    pub grace: chrono::Duration,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct PruneReport {
+    pub layer: String,
+    pub dry_run: bool,
+    pub snapshots_kept: Vec<String>,
+    pub snapshots_removed: Vec<String>,
+    pub chunks_removed: usize,
+    pub bytes_freed: u64,
+    pub chunks_deferred: usize,
+    pub note: &'static str,
+}
+
+/// Chunk digests a manifest references, for both manifest formats: Mneme's
+/// single-file `chunks` and the multi-file `files[].chunks`.
+fn referenced_chunks(manifest: &Value) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut take = |chunks: &Value| -> Result<()> {
+        for chunk in chunks.as_array().context("chunks must be a list")? {
+            let digest = chunk
+                .get("sha256")
+                .and_then(Value::as_str)
+                .filter(|d| valid_sha256(d))
+                .context("invalid chunk digest")?;
+            found.push(digest.to_owned());
+        }
+        Ok(())
+    };
+    if let Some(chunks) = manifest.get("chunks") {
+        take(chunks)?;
+    }
+    if let Some(files) = manifest.get("files").and_then(Value::as_array) {
+        for file in files {
+            take(file.get("chunks").context("file without chunks")?)?;
+        }
+    }
+    Ok(found)
+}
+
+/// Apply retention to one layer. Dry-run unless `apply`. Manifests go first,
+/// then chunks no remaining manifest references (after the grace period).
+/// A manifest that cannot be read stops the prune: its chunks might be
+/// referenced, so nothing is swept on a partial view.
+pub fn prune(
+    storage: &dyn ObjectStorage,
+    layer: &str,
+    retention: &Retention,
+    apply: bool,
+) -> Result<PruneReport> {
+    validate_layer(layer)?;
+    ensure!(
+        retention.keep_last >= 1,
+        "keep at least one snapshot per label"
+    );
+    if let Some(label) = &retention.label {
+        validate_label(label)?;
+    }
+    let base = format!("{}/snapshots/", prefix(layer));
+    let mut by_label: std::collections::BTreeMap<String, Vec<(DateTime<Utc>, String, Value)>> =
+        Default::default();
+    for meta in storage.list_prefix(&base, 0)? {
+        let Some(id) = meta
+            .key
+            .strip_prefix(&base)
+            .and_then(|r| r.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let value: Value = serde_json::from_slice(&storage.get(&ObjectKey::parse(&meta.key)?)?)
+            .with_context(|| format!("unreadable manifest {}; not pruning", meta.key))?;
+        let created = value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .with_context(|| format!("{}: no created_at; not pruning", meta.key))?;
+        referenced_chunks(&value).with_context(|| format!("{}; not pruning", meta.key))?;
+        let label = id.split('/').next().unwrap_or_default().to_owned();
+        by_label
+            .entry(label)
+            .or_default()
+            .push((created, id.to_owned(), value));
+    }
+    let cutoff = retention
+        .keep_days
+        .map(|d| Utc::now() - chrono::Duration::days(i64::from(d)));
+    let mut report = PruneReport {
+        layer: layer.into(),
+        dry_run: !apply,
+        note: "Local only: peers keep their copies, and `rebsync peer pull` would bring pruned snapshots back.",
+        ..Default::default()
+    };
+    let mut remaining = Vec::new();
+    let mut doomed = Vec::new();
+    for (label, mut snapshots) in by_label {
+        snapshots.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let selected = retention.label.as_deref().is_none_or(|l| l == label);
+        for (rank, (created, id, value)) in snapshots.into_iter().enumerate() {
+            let keep =
+                !selected || rank < retention.keep_last || cutoff.is_some_and(|c| created >= c);
+            if keep {
+                report.snapshots_kept.push(id);
+                remaining.push(value);
+            } else {
+                doomed.push(id);
+            }
+        }
+    }
+    let mut live = std::collections::BTreeSet::new();
+    for value in &remaining {
+        live.extend(referenced_chunks(value)?);
+    }
+    let now = Utc::now();
+    let mut sweep = Vec::new();
+    for meta in storage.list_prefix(&format!("{}/chunks/sha256/", prefix(layer)), 0)? {
+        let digest = meta.key.rsplit('/').next().unwrap_or_default();
+        if live.contains(digest) {
+            continue;
+        }
+        let young = meta.last_modified.is_none_or(|t| now - t < retention.grace);
+        if young {
+            report.chunks_deferred += 1;
+        } else {
+            sweep.push(meta);
+        }
+    }
+    if apply {
+        for id in &doomed {
+            storage.delete(&manifest_key(layer, id)?)?;
+        }
+        for meta in &sweep {
+            storage.delete(&ObjectKey::parse(&meta.key)?)?;
+        }
+    }
+    report.snapshots_removed = doomed;
+    report.chunks_removed = sweep.len();
+    report.bytes_freed = sweep.iter().map(|m| m.size).sum();
+    Ok(report)
+}

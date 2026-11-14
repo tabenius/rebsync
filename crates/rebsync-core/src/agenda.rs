@@ -155,6 +155,7 @@ pub fn publish(
     storage: &dyn ObjectStorage,
     journal: &mut Journal,
 ) -> Result<layer::PublishOutcome> {
+    let _lock = crate::layer::lock(config, LAYER)?;
     let stage = layer::staging(config, LAYER)?;
     let edition = stage.path().join("edition");
     std::fs::create_dir_all(&edition)?;

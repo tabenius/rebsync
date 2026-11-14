@@ -129,3 +129,28 @@ fn apply_run_reports_honest_layer_status() -> Result<()> {
     assert_eq!(failed.datasets[0]["status"], "failed");
     Ok(())
 }
+
+#[test]
+fn prune_understands_mneme_manifests_and_shared_chunks() -> Result<()> {
+    use rebsync_core::{chrono::Duration as Span, layer};
+    let t = tempfile::tempdir()?;
+    let config = setup(t.path())?;
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+    let first = mneme::publish(&config, &storage, &mut journal)?;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = mneme::publish(&config, &storage, &mut journal)?;
+    let retention = layer::Retention {
+        keep_last: 1,
+        keep_days: None,
+        label: None,
+        grace: Span::zero(),
+    };
+    let report = layer::prune(&storage, "mneme", &retention, true)?;
+    assert_eq!(report.snapshots_removed, vec![first.id.clone()]);
+    // Identical content: every chunk is still referenced by the survivor.
+    assert_eq!(report.chunks_removed, 0);
+    mneme::verify(&config, &storage, &second.id, &mut journal)?;
+    assert_eq!(mneme::list(&storage, None)?.len(), 1);
+    Ok(())
+}

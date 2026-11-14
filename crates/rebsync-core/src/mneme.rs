@@ -327,6 +327,7 @@ pub fn publish(
     storage: &dyn ObjectStorage,
     journal: &mut Journal,
 ) -> Result<PublishOutcome> {
+    let _lock = crate::layer::lock(config, "mneme")?;
     let stage = staging(config)?;
     let (path, owner) = export(config, stage.path(), journal)?;
     let run_id = journal.run_id.clone();

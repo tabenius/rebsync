@@ -95,6 +95,24 @@ enum Action {
         command: PeerAction,
     },
 }
+#[derive(Args)]
+struct PruneArgs {
+    /// Newest snapshots to keep per label (at least 1).
+    #[arg(long, default_value_t = 7)]
+    keep_last: usize,
+    /// Also keep every snapshot created within this many days.
+    #[arg(long)]
+    keep_days: Option<u32>,
+    /// Only prune this label; others are kept untouched.
+    #[arg(long)]
+    label: Option<String>,
+    /// Leave unreferenced chunks younger than this alone.
+    #[arg(long, default_value_t = 60)]
+    grace_minutes: u32,
+    /// Delete. Without this flag prune only reports what it would remove.
+    #[arg(long)]
+    apply: bool,
+}
 #[derive(Subcommand)]
 enum LayerAction {
     /// Export through the owner, validate, and publish now.
@@ -106,6 +124,8 @@ enum LayerAction {
     },
     /// Read-only storage accounting.
     Stats,
+    /// Retention: drop old snapshots and unreferenced chunks (dry-run by default).
+    Prune(PruneArgs),
     /// Reassemble, check every chunk and validate as the owner would.
     Verify { id: String },
     /// Restore into a new file (frog) or directory (agenda); never overwrites.
@@ -153,6 +173,8 @@ enum MnemeAction {
     Publish,
     /// Read-only storage accounting: dedup ratio, orphan and missing chunks.
     Stats,
+    /// Retention: drop old snapshots and unreferenced chunks (dry-run by default).
+    Prune(PruneArgs),
     /// List published snapshots, oldest first.
     List {
         #[arg(long)]
@@ -286,6 +308,7 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
             }
             serde_json::json!({ "snapshots": items })
         }
+        MnemeAction::Prune(args) => return prune_layer(config, "mneme", args),
         MnemeAction::Stats => {
             let stats = mneme::stats(&storage)?;
             if !json {
@@ -337,6 +360,31 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
 }
 
 #[cfg(feature = "storage")]
+fn prune_layer(config: &rebsync_core::Config, layer: &str, args: PruneArgs) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers};
+
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let _lock = layers::lock(config, layer)?;
+    let retention = layers::Retention {
+        keep_last: args.keep_last,
+        keep_days: args.keep_days,
+        label: args.label,
+        grace: rebsync_core::chrono::Duration::minutes(i64::from(args.grace_minutes)),
+    };
+    let report = layers::prune(&storage, layer, &retention, args.apply)?;
+    if args.apply {
+        let mut journal = Journal::open(&config.rebekah_home)?;
+        journal.event(
+            "layer-pruned",
+            layer,
+            serde_json::json!({"removed": report.snapshots_removed, "chunks": report.chunks_removed, "bytes": report.bytes_freed}),
+        )?;
+    }
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(0)
+}
+
+#[cfg(feature = "storage")]
 fn layer_action(
     config: &rebsync_core::Config,
     layer: &str,
@@ -373,6 +421,7 @@ fn layer_action(
             }
             serde_json::json!({ "snapshots": items })
         }
+        LayerAction::Prune(args) => return prune_layer(config, layer, args),
         LayerAction::Stats => {
             let stats = layers::stats(&storage, layer)?;
             let code = if stats.missing_chunks > 0 { 2 } else { 0 };

@@ -205,3 +205,99 @@ fn apply_runs_report_layer_status() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn prune_keeps_newest_respects_grace_and_never_breaks_survivors() -> Result<()> {
+    use rebsync_core::{ObjectKey, ObjectStorage, chrono::Duration as Span, layer::Retention};
+    let t = tempfile::tempdir()?;
+    let config = config(t.path());
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+    let mut ids = Vec::new();
+    for round in 0..4 {
+        frog_db(&t.path().join("AGENTS.db"), 50 + round * 400);
+        ids.push(frog::publish(&config, &storage, &mut journal)?.id);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let keep_two = |grace| Retention {
+        keep_last: 2,
+        keep_days: None,
+        label: None,
+        grace,
+    };
+    let chunk_count = || storage.list_prefix("frog/v1/chunks/", 0).unwrap().len();
+    let before = chunk_count();
+
+    // Dry run: reports, deletes nothing.
+    let dry = layer::prune(&storage, "frog", &keep_two(Span::zero()), false)?;
+    assert_eq!(dry.snapshots_removed, vec![ids[1].clone(), ids[0].clone()]);
+    assert!(dry.chunks_removed > 0);
+    assert_eq!(layer::list(&storage, "frog", None)?.len(), 4);
+    assert_eq!(chunk_count(), before);
+
+    // Grace period: fresh unreferenced chunks are deferred, not deleted.
+    let graced = layer::prune(&storage, "frog", &keep_two(Span::hours(1)), false)?;
+    assert_eq!(graced.chunks_removed, 0);
+    assert_eq!(graced.chunks_deferred, dry.chunks_removed);
+
+    // keep_days keeps everything recent.
+    let recent = Retention {
+        keep_last: 1,
+        keep_days: Some(1),
+        label: None,
+        grace: Span::zero(),
+    };
+    assert!(
+        layer::prune(&storage, "frog", &recent, false)?
+            .snapshots_removed
+            .is_empty()
+    );
+    // A label filter leaves other labels untouched.
+    let other = Retention {
+        keep_last: 1,
+        keep_days: None,
+        label: Some("elsewhere".into()),
+        grace: Span::zero(),
+    };
+    assert!(
+        layer::prune(&storage, "frog", &other, false)?
+            .snapshots_removed
+            .is_empty()
+    );
+
+    let applied = layer::prune(&storage, "frog", &keep_two(Span::zero()), true)?;
+    assert_eq!(applied.snapshots_removed.len(), 2);
+    assert_eq!(chunk_count(), before - applied.chunks_removed);
+    // Survivors still reassemble and validate completely.
+    for id in &ids[2..] {
+        frog::verify(&config, &storage, id, &mut journal)?;
+    }
+    assert!(layer::load(&storage, "frog", &ids[0]).is_err());
+    // Idempotent.
+    let again = layer::prune(&storage, "frog", &keep_two(Span::zero()), true)?;
+    assert!(again.snapshots_removed.is_empty() && again.chunks_removed == 0);
+
+    // keep_last 0 is refused; an unreadable manifest stops the prune.
+    assert!(
+        layer::prune(
+            &storage,
+            "frog",
+            &Retention {
+                keep_last: 0,
+                keep_days: None,
+                label: None,
+                grace: Span::zero()
+            },
+            false
+        )
+        .is_err()
+    );
+    storage.put(
+        &ObjectKey::parse("frog/v1/snapshots/local/broken.json")?,
+        b"not json",
+    )?;
+    let error = layer::prune(&storage, "frog", &keep_two(Span::zero()), true).unwrap_err();
+    assert!(format!("{error:#}").contains("not pruning"), "{error:#}");
+    assert_eq!(chunk_count(), before - applied.chunks_removed);
+    Ok(())
+}
