@@ -92,6 +92,14 @@ which is gitignored, or the variables `REBEKAH_STORE_FILE`,
 `REBEKAH_STORE_PASSWORD`, `REBEKAH_KEY_ALIAS` and `REBEKAH_KEY_PASSWORD` for CI.
 Never commit a keystore. Without one, the release APK is unsigned.
 
+CI release: push a tag `rebekah-vX.Y.Z` (after bumping `version` in
+`src-tauri/tauri.conf.json`). `.github/workflows/rebekah-android.yml` then builds,
+signs, verifies and publishes a pre-release with the APK and its SHA-256. It needs
+the repository secrets `REBEKAH_KEYSTORE_B64`, `REBEKAH_STORE_PASSWORD`,
+`REBEKAH_KEY_PASSWORD` and `REBEKAH_KEY_ALIAS`. Use the same keystore that signed
+0.2.0 (certificate SHA-256 `60:24:5D:…:F9:A9`), or Android will refuse to update
+an existing install.
+
 The app logic (peer endpoint, volumes, move) is tested without Tauri or GTK:
 
 ```bash
