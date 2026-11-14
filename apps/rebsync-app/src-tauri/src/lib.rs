@@ -168,7 +168,7 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         .ok()
         .filter(|s| s.snapshots > 0)
         .and_then(|s| serde_json::to_value(s).ok());
-    let layers: Vec<serde_json::Value> = ["frog", "agenda"]
+    let layers: Vec<serde_json::Value> = ["frog", "agenda", "git"]
         .iter()
         .filter_map(|layer| rebsync_core::layer::stats(storage.as_ref(), layer).ok())
         .filter(|s| s.snapshots > 0)

@@ -30,7 +30,7 @@ use std::{
 
 pub const SNAPSHOT_SCHEMA: &str = "rebsync.layer.snapshot.v1";
 /// Layers whose objects Rebsync publishes and exchanges with peers.
-pub const LAYERS: &[&str] = &["mneme", "frog", "agenda"];
+pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -714,6 +714,25 @@ pub fn prune(
             } else {
                 doomed.push(id);
             }
+        }
+    }
+    // Incremental snapshots (git layer) depend on their `owner.base`: keep the
+    // whole chain behind every kept snapshot, or the survivors cannot restore.
+    let base_of = |value: &Value| {
+        value
+            .pointer("/owner/base")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let mut needed: Vec<String> = remaining.iter().filter_map(base_of).collect();
+    while let Some(base) = needed.pop() {
+        if let Some(position) = doomed.iter().position(|id| id == &base) {
+            let id = doomed.remove(position);
+            let key = manifest_key(layer, &id)?;
+            let value: Value = serde_json::from_slice(&storage.get(&key)?)?;
+            needed.extend(base_of(&value));
+            report.snapshots_kept.push(id);
+            remaining.push(value);
         }
     }
     let mut live = std::collections::BTreeSet::new();

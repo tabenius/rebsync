@@ -266,6 +266,66 @@ In `--apply` runs these layers report `backed-up` (restic succeeded),
 `backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
 layer instead.
 
+## Git layer (offline exchange)
+
+For when GitHub is down, blocked, or out of reach for weeks or months. Each
+discovered repository's committed history is published as Git bundles into the
+object store, the phone carries them (`rebsync peer push` / `pull`), and another
+machine fetches them. No server and no network beyond the local link.
+
+```bash
+rebsync git publish                         # every repository whose refs changed
+rebsync peer push                           # laptop A → phone
+# … later, on laptop B …
+rebsync peer pull --layer git               # phone → laptop B
+rebsync git list
+rebsync git fetch ID --repo ~/src/project --as laptop-a
+git log rebsync-laptop-a/main               # review, then merge deliberately
+rebsync git restore ID --into ~/src/new-copy   # or clone a repository B never had
+```
+
+- **Owner export.** Git produces each bundle itself (`git bundle create`
+  for branches, tags and HEAD), and rebsync checks it with `git bundle verify`.
+  Each repository gets a stable label, `<name>-<hash of its GitHub identity or
+  path>`.
+- **Incremental chains.** The first snapshot is a full bundle. Later ones
+  carry only what is new since the previous snapshot (`--not <previous heads>`).
+  Measured on a 200-commit repository, the full bundle was 720 KB and one
+  further commit cost 680 bytes. Rebuilding a full bundle would re-pack and
+  re-send everything, because Git packs share no chunks between builds. A
+  change that only moves refs (a tag, a deleted branch) becomes a tiny
+  refs-only link. Unchanged repositories publish nothing. A new full bundle
+  starts a fresh chain every `full_every` snapshots (default 20), or when an
+  incremental cannot be built, for example after history was rewritten.
+- **Verified on the way back.** `verify`, `restore` and `fetch` rebuild the
+  chain base-first in a throwaway repository. Each link must pass `git bundle
+  verify` against what came before it and match its recorded heads. Then the
+  exact recorded branch and tag state is applied, and any commit missing from
+  the chain is an error, never a silent gap. A missing link is named, with a
+  hint to pull it from a peer.
+- **Never rewrites your work.** `fetch` writes branches to
+  `refs/remotes/rebsync-<name>/*` and tags to `refs/rebsync/<name>/tags/*`
+  only. Local branches, local tags and the worktree are untouched, which
+  makes it safe when both sides kept committing offline. `restore` only
+  creates a new directory and removes its temporary remote. Git hooks are
+  disabled throughout.
+- **Retention and checks.** `rebsync git prune` keeps the entire chain behind
+  every kept snapshot, so pruning cannot make a survivor unrestorable.
+  `rebsync storage fsck` checks git snapshots like any other layer.
+- **Scope.** Committed history only. Uncommitted work and stashes are covered
+  by the encrypted repository snapshots (restic), not by this layer. Bundles
+  contain whatever history contains, including any secret ever committed; the
+  object store and the phone are plaintext, so treat them like the repositories.
+
+```toml
+[git_layer]
+enabled = true            # publish during --apply runs
+skip_unchanged = true
+include_local_only = true # also repositories without a permitted GitHub remote
+full_every = 20
+chunk_bytes = 65536
+```
+
 ## Retention (`prune`)
 
 Snapshots are kept until you prune them. Pruning matters after

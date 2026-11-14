@@ -3,6 +3,7 @@ pub use chrono;
 pub mod agenda;
 pub mod config;
 pub mod frog;
+pub mod gitlayer;
 pub mod inventory;
 pub mod journal;
 pub mod layer;

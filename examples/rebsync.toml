@@ -63,6 +63,14 @@ chunk_bytes = 65536
 restic = true
 require_ready = true
 
+[git_layer]
+# Committed history as Git bundles for offline exchange via the phone.
+enabled = false
+chunk_bytes = 65536
+skip_unchanged = true
+include_local_only = true
+full_every = 20
+
 [reconcile]
 write_instructions = true
 

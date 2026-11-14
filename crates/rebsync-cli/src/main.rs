@@ -89,6 +89,11 @@ enum Action {
         #[command(subcommand)]
         command: LayerAction,
     },
+    /// Git layer: committed history as verified bundles, for offline exchange.
+    Git {
+        #[command(subcommand)]
+        command: GitAction,
+    },
     /// Exchange layer objects with a Rebekah phone (rebsync-peer/0).
     Peer {
         #[command(subcommand)]
@@ -133,6 +138,38 @@ enum LayerAction {
         id: String,
         #[arg(long)]
         into: PathBuf,
+    },
+}
+#[derive(Subcommand)]
+enum GitAction {
+    /// Bundle every discovered repository whose refs changed and publish it.
+    Publish,
+    /// List published bundles, oldest first.
+    List {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Read-only storage accounting.
+    Stats,
+    /// Retention: drop old bundles and unreferenced chunks (dry-run by default).
+    Prune(PruneArgs),
+    /// Reassemble, check chunks, run `git bundle verify`, compare heads.
+    Verify { id: String },
+    /// Clone a bundle into a new directory.
+    Restore {
+        id: String,
+        #[arg(long)]
+        into: PathBuf,
+    },
+    /// Fetch a bundle's branches/tags into refs/remotes/rebsync-NAME/* of an
+    /// existing repository; local branches, tags and the worktree are untouched.
+    Fetch {
+        id: String,
+        #[arg(long)]
+        repo: PathBuf,
+        /// Namespace name; defaults to the snapshot's label.
+        #[arg(long = "as")]
+        name: Option<String>,
     },
 }
 #[derive(Args)]
@@ -479,6 +516,75 @@ fn layer_action(_: &rebsync_core::Config, _: &str, _: LayerAction, _: bool) -> R
     bail!("rebsync was built without the storage feature; rebuild with --features storage")
 }
 
+#[cfg(feature = "storage")]
+fn git_action(config: &rebsync_core::Config, action: GitAction, json: bool) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, gitlayer, journal::Journal, layer};
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let absolute = |p: PathBuf| -> Result<PathBuf> {
+        Ok(if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()?.join(p)
+        })
+    };
+    let value = match action {
+        GitAction::Publish => {
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let outcomes = gitlayer::publish_all(config, &storage, &mut journal)?;
+            let failed = outcomes.iter().any(|o| o.status == "failed");
+            println!("{}", serde_json::to_string_pretty(&outcomes)?);
+            return Ok(if failed { 2 } else { 0 });
+        }
+        GitAction::List { label } => {
+            let items: Vec<_> = layer::list(&storage, gitlayer::LAYER, label.as_deref())?
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({"id": m.id, "created_at": m.created_at, "bytes": m.bytes(),
+                        "name": m.owner.get("name"), "github": m.owner.get("github"), "head": m.owner.get("head"),
+                        "heads": m.owner.get("heads").and_then(|h| h.as_array()).map(Vec::len)})
+                })
+                .collect();
+            if !json {
+                for item in &items {
+                    println!(
+                        "{}  {} heads  {} bytes",
+                        item["id"].as_str().unwrap_or_default(),
+                        item["heads"],
+                        item["bytes"]
+                    );
+                }
+                return Ok(0);
+            }
+            serde_json::json!({ "snapshots": items })
+        }
+        GitAction::Stats => serde_json::to_value(layer::stats(&storage, gitlayer::LAYER)?)?,
+        GitAction::Prune(args) => return prune_layer(config, gitlayer::LAYER, args),
+        GitAction::Verify { id } => gitlayer::verify(config, &storage, &id)?,
+        GitAction::Restore { id, into } => {
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            gitlayer::restore(config, &storage, &id, &absolute(into)?, &mut journal)?
+        }
+        GitAction::Fetch { id, repo, name } => {
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            gitlayer::fetch(
+                config,
+                &storage,
+                &id,
+                &absolute(repo)?,
+                name.as_deref(),
+                &mut journal,
+            )?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(0)
+}
+
+#[cfg(not(feature = "storage"))]
+fn git_action(_: &rebsync_core::Config, _: GitAction, _: bool) -> Result<i32> {
+    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+}
+
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
     use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer};
@@ -509,7 +615,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 if layers::LAYERS.contains(&l.as_str()) {
                     Ok(format!("{l}/"))
                 } else {
-                    bail!("unknown layer {l}; use mneme, frog or agenda")
+                    bail!("unknown layer {l}; use mneme, frog, agenda or git")
                 }
             })
             .collect()
@@ -651,6 +757,7 @@ fn entry() -> Result<i32> {
             return layer_action(&config.config, "agenda", command, cli.json);
         }
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
+        Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
         None => {}
     }
     let summary = rebsync_core::run(&config.config, RunOptions { apply: cli.apply })?;
