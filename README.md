@@ -266,6 +266,38 @@ In `--apply` runs these layers report `backed-up` (restic succeeded),
 `backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
 layer instead.
 
+## Instructions page (`rebsync serve`)
+
+```bash
+rebsync serve                        # https://localhost:8790/ (self-signed)
+rebsync serve --bind 0.0.0.0         # share the page on the local network and announce it
+rebsync serve --plain-http --port 8080 --no-announce
+```
+
+- **What it shows.** A read-only page with live status built from the
+  effective configuration: Rebekah home, object store, whether a backup is
+  configured, and the fleet authority. Each layer appears with its `--apply`
+  state, snapshot count, freshness and storage use, followed by everyday,
+  phone-sync and offline-git recipes. `/v1/status` returns the same as JSON;
+  `/healthz` is for probes.
+- **No secrets.** The backup repository URL is redacted, and tokens and
+  password files are never read. The page is served with
+  `Content-Security-Policy: default-src 'none'`.
+- **HTTPS.** HTTPS is the default. On first use rebsync generates a
+  self-signed certificate for `localhost`, `127.0.0.1`, `::1` and
+  `<hostname>.local`, and stores it owner-only under `.rebekah/rebsync/tls/`.
+  It prints the certificate's SHA-256 fingerprint, so you can check a
+  browser's warning instead of clicking through it.
+- **Announcement.** When bound beyond localhost, rebsync advertises
+  `_rebsync._tcp` (TXT `path=/`, `scheme=https|http`). It tries the system
+  Avahi daemon first (`avahi-publish-service`, which talks to Avahi over
+  D-Bus), then falls back to a built-in mDNS responder. It also posts a
+  desktop notification over the D-Bus session bus when one exists. Each
+  mechanism reports `✓` or why not; none is required. Bound to localhost,
+  it deliberately does not advertise on the network.
+- **Path exposure.** On the network the page shows this machine's paths and
+  layer status. Share it only where that is fine.
+
 ## Git layer (offline exchange)
 
 For when GitHub is down, blocked, or out of reach for weeks or months. Each
