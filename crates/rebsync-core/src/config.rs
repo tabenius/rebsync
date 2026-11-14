@@ -81,7 +81,8 @@ pub struct MnemeConfig {
     pub db: Option<PathBuf>,
     /// Names this history store in object keys; one object-key segment.
     pub label: String,
-    /// Fixed chunk size for content addressing, 64 KiB..=64 MiB.
+    /// Fixed chunk size for content addressing: a multiple of 4 KiB, 4 KiB..=64 MiB.
+    /// Mneme exports whole SQLite pages, so page-aligned chunks survive inserts.
     pub chunk_bytes: u64,
     /// Also back up the verified snapshot through the encrypted restic repository.
     pub restic: bool,
@@ -96,7 +97,7 @@ impl Default for MnemeConfig {
             binary: PathBuf::from("mneme"),
             db: None,
             label: "local".into(),
-            chunk_bytes: 4 * 1024 * 1024,
+            chunk_bytes: 64 * 1024,
             restic: true,
             timeout_seconds: 900,
         }
@@ -187,8 +188,10 @@ impl Config {
         if self.storage.root.as_os_str().is_empty() {
             bail!("storage root cannot be empty");
         }
-        if !(64 * 1024..=64 * 1024 * 1024).contains(&self.mneme.chunk_bytes) {
-            bail!("mneme.chunk_bytes must be between 64 KiB and 64 MiB");
+        if !(4096..=64 * 1024 * 1024).contains(&self.mneme.chunk_bytes)
+            || !self.mneme.chunk_bytes.is_multiple_of(4096)
+        {
+            bail!("mneme.chunk_bytes must be a multiple of 4096 between 4 KiB and 64 MiB");
         }
         if self.mneme.timeout_seconds == 0 {
             bail!("mneme.timeout_seconds must be positive");
@@ -486,6 +489,18 @@ mod tests {
         assert_eq!(e.origins["git.push"], "CLI");
         assert_eq!(e.config.scan.roots, vec![home.join("other")]);
         Ok(())
+    }
+    #[test]
+    fn mneme_chunks_must_be_page_aligned() {
+        let mut config = Config::defaults("/home/test".into());
+        assert_eq!(config.mneme.chunk_bytes, 64 * 1024);
+        assert!(config.validate().is_ok());
+        for bad in [0, 1000, 4095, 65_537, 128 * 1024 * 1024] {
+            config.mneme.chunk_bytes = bad;
+            assert!(config.validate().is_err(), "accepted {bad}");
+        }
+        config.mneme.chunk_bytes = 4096;
+        assert!(config.validate().is_ok());
     }
     #[test]
     fn rejects_unknown_keys_and_ambiguous_formats() -> Result<()> {

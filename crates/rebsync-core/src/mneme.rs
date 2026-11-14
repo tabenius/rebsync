@@ -367,6 +367,65 @@ pub fn run_layer(config: &Config, journal: &mut Journal) -> Value {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct LayerStats {
+    pub snapshots: usize,
+    pub latest_id: Option<String>,
+    pub latest_created_at: Option<DateTime<Utc>>,
+    /// Sum of snapshot sizes: what storing every snapshot whole would cost.
+    pub logical_bytes: u64,
+    pub referenced_chunks: usize,
+    pub referenced_bytes: u64,
+    pub stored_chunks: usize,
+    pub stored_bytes: u64,
+    /// Chunks no manifest references, e.g. from an interrupted publish.
+    /// Reported only; nothing is deleted.
+    pub orphan_chunks: usize,
+    pub orphan_bytes: u64,
+    /// Referenced chunks that are missing from storage: restore would fail.
+    pub missing_chunks: usize,
+}
+
+/// Read-only accounting of what the layer holds. Lists objects, reads manifests.
+pub fn stats(storage: &dyn ObjectStorage) -> Result<LayerStats> {
+    use std::collections::BTreeMap;
+    let manifests = list(storage, None)?;
+    let mut referenced = BTreeMap::new();
+    for manifest in &manifests {
+        for chunk in &manifest.chunks {
+            referenced.insert(chunk.sha256.clone(), chunk.size);
+        }
+    }
+    let mut stored = BTreeMap::new();
+    for meta in storage.list_prefix(&format!("{PREFIX}/chunks/sha256/"), 0)? {
+        if let Some(digest) = meta.key.rsplit('/').next() {
+            stored.insert(digest.to_owned(), meta.size);
+        }
+    }
+    let orphans: Vec<u64> = stored
+        .iter()
+        .filter(|(digest, _)| !referenced.contains_key(*digest))
+        .map(|(_, size)| *size)
+        .collect();
+    let latest = manifests.last();
+    Ok(LayerStats {
+        snapshots: manifests.len(),
+        latest_id: latest.map(|m| m.id.clone()),
+        latest_created_at: latest.map(|m| m.created_at),
+        logical_bytes: manifests.iter().map(|m| m.bytes).sum(),
+        referenced_chunks: referenced.len(),
+        referenced_bytes: referenced.values().sum(),
+        stored_chunks: stored.len(),
+        stored_bytes: stored.values().sum(),
+        orphan_chunks: orphans.len(),
+        orphan_bytes: orphans.iter().sum(),
+        missing_chunks: referenced
+            .keys()
+            .filter(|digest| !stored.contains_key(*digest))
+            .count(),
+    })
+}
+
 /// Published manifests, oldest first. Unparseable manifests are reported, not skipped.
 pub fn list(storage: &dyn ObjectStorage, label: Option<&str>) -> Result<Vec<LayerManifest>> {
     let prefix = match label {

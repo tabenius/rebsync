@@ -149,8 +149,7 @@ to validate:
 
    Chunks are create-if-absent and written before the manifest. Nothing is
    overwritten or deleted. An unchanged index re-exports byte-identically and
-   reuses every chunk; after heavy changes `VACUUM` reorders pages, so expect
-   little reuse rather than incremental deltas.
+   reuses every chunk.
 3. With `mneme.restic = true` (the default) the verified export and its manifest
    are also backed up through the encrypted restic repository.
 
@@ -160,7 +159,7 @@ enabled = true            # publish during --apply runs
 binary = "mneme"          # PATH lookup; paths resolve against rebekah_home
 # db = "/private/mneme/index.sqlite"   # else mneme's default / MNEME_DB
 label = "local"           # one key segment naming this history store
-chunk_bytes = 4194304     # 64 KiB..64 MiB
+chunk_bytes = 65536       # multiple of 4096, 4 KiB..64 MiB
 restic = true             # requires backup.repository
 timeout_seconds = 900
 ```
@@ -168,9 +167,28 @@ timeout_seconds = 900
 ```bash
 rebsync mneme publish                 # export + publish now (journaled)
 rebsync mneme list [--label local] [--json]
+rebsync mneme stats [--json]          # read-only: dedup, orphan and missing chunks
 rebsync mneme verify local/20261114T112650.973Z-d7af0bf4f612
 rebsync mneme restore ID --into /private/new/index.sqlite
 ```
+
+**Chunk size.** `VACUUM INTO` writes whole 4 KiB SQLite pages, so chunks that
+are page multiples stay aligned when rows are inserted; that alignment, not
+content-defined chunking, is what makes reuse work. Measured on a synthetic
+10 MB index after adding 5% more sessions, the share of the second snapshot that
+had to be uploaded:
+
+| chunk | 4 KiB | 16 KiB | 64 KiB (default) | 256 KiB | 1 MiB | 4 MiB |
+|---|---|---|---|---|---|---|
+| uploaded | 10% | 21% | 25% | 31% | 69% | 100% |
+
+Gear-hash content-defined chunking was measured too and did no better at 64 KiB
+(23%) and worse at 1 MiB (94%), so it is not used. Smaller chunks trade object
+count for transfer; 64 KiB keeps a 1 GB index near 16k objects.
+
+`stats` is read-only. It reports logical versus stored bytes, chunks no
+manifest references (for example from an interrupted publish; never deleted
+automatically) and referenced chunks that are missing, which exits `2`.
 
 `verify` reassembles into private staging, checks every chunk digest and the
 whole-file digest, then runs `mneme snapshot verify --sha256`. `restore` does
@@ -262,8 +280,8 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, consistent remote
   SQLite export, agenda validator, AI execution, resume engine or peer protocol.
-- Mneme layer chunks are fixed-size, not content-defined; no retention policy
-  or garbage collection of unreferenced chunks exists yet.
+- The Mneme layer has no retention policy or garbage collection yet; `rebsync
+  mneme stats` reports orphans but nothing removes them.
 - No USB enrollment, phone transport, Bluetooth or mesh autodiscovery yet.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.

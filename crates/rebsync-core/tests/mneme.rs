@@ -61,6 +61,13 @@ fn publish_dedups_lists_verifies_and_restores() -> Result<()> {
     assert_eq!(listed[0].id, first.id);
     assert_eq!(listed[0].owner["generation"], 7);
 
+    let stats = mneme::stats(&storage)?;
+    assert_eq!(stats.snapshots, 2);
+    assert_eq!(stats.logical_bytes, 2 * 200 * 1024);
+    assert_eq!(stats.stored_bytes, 200 * 1024);
+    assert_eq!((stats.orphan_chunks, stats.missing_chunks), (0, 0));
+    assert_eq!(stats.latest_id.as_deref(), Some(second.id.as_str()));
+
     let verified = mneme::verify(&config, &storage, &first.id, &mut journal)?;
     assert_eq!(verified["sha256"], first.sha256);
 
@@ -82,6 +89,16 @@ fn publish_dedups_lists_verifies_and_restores() -> Result<()> {
     let mut bytes = fs::read(&path)?;
     bytes[0] ^= 1;
     fs::write(&path, bytes)?;
+    // An orphan from an interrupted publish is reported, never deleted.
+    let orphan = config
+        .storage
+        .root
+        .join(format!("mneme/v1/chunks/sha256/00/{}", "0".repeat(64)));
+    fs::create_dir_all(orphan.parent().unwrap())?;
+    fs::write(&orphan, b"orphan")?;
+    let stats = mneme::stats(&storage)?;
+    assert_eq!((stats.orphan_chunks, stats.orphan_bytes), (1, 6));
+    assert!(orphan.exists());
     let error = mneme::verify(&config, &storage, &second.id, &mut journal).unwrap_err();
     assert!(format!("{error:#}").contains("damaged"), "{error:#}");
     assert!(mneme::verify(&config, &storage, "local/../x", &mut journal).is_err());

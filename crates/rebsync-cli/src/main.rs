@@ -84,6 +84,8 @@ enum Action {
 enum MnemeAction {
     /// Export a consistent snapshot through mneme and publish it now.
     Publish,
+    /// Read-only storage accounting: dedup ratio, orphan and missing chunks.
+    Stats,
     /// List published snapshots, oldest first.
     List {
         #[arg(long)]
@@ -214,6 +216,28 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
                 return Ok(0);
             }
             serde_json::json!({ "snapshots": items })
+        }
+        MnemeAction::Stats => {
+            let stats = mneme::stats(&storage)?;
+            if !json {
+                println!(
+                    "{} snapshots, latest {}",
+                    stats.snapshots,
+                    stats.latest_id.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "logical {} bytes, stored {} bytes in {} chunks",
+                    stats.logical_bytes, stats.stored_bytes, stats.stored_chunks
+                );
+                println!(
+                    "orphan chunks {} ({} bytes), missing chunks {}",
+                    stats.orphan_chunks, stats.orphan_bytes, stats.missing_chunks
+                );
+                return Ok(if stats.missing_chunks > 0 { 2 } else { 0 });
+            }
+            let code = if stats.missing_chunks > 0 { 2 } else { 0 };
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+            return Ok(code);
         }
         MnemeAction::Publish => {
             if config.mneme.restic && config.backup.repository.is_none() {
