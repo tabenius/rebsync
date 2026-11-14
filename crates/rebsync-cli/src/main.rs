@@ -199,6 +199,12 @@ enum StorageAction {
     Path,
     /// Write, read, verify and delete a probe object.
     Check,
+    /// Check every layer snapshot: chunk and whole-file digests (read-only).
+    Fsck {
+        /// Restrict to these layers (mneme, frog, agenda); default all.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+    },
 }
 
 #[cfg(feature = "storage")]
@@ -528,22 +534,14 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             let remote = peer::Peer::connect(target_of(&target)?);
             let mut journal = Journal::open(&config.rebekah_home)?;
             let report = peer::push(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
-            let code = if report.conflicts.is_empty() && report.rejected.is_empty() {
-                0
-            } else {
-                2
-            };
+            let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
         PeerAction::Pull { target, layers } => {
             let remote = peer::Peer::connect(target_of(&target)?);
             let mut journal = Journal::open(&config.rebekah_home)?;
             let report = peer::pull(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
-            let code = if report.conflicts.is_empty() && report.rejected.is_empty() {
-                0
-            } else {
-                2
-            };
+            let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
     };
@@ -559,6 +557,25 @@ fn peer_action(_: &rebsync_core::Config, _: PeerAction, _: bool) -> Result<i32> 
 
 #[cfg(not(feature = "storage"))]
 fn mneme_action(_config: &rebsync_core::Config, _action: MnemeAction, _json: bool) -> Result<i32> {
+    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+}
+
+#[cfg(feature = "storage")]
+fn storage_fsck(config: &rebsync_core::Config, layers: Vec<String>) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, layer};
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let selected: Vec<&str> = if layers.is_empty() {
+        layer::LAYERS.to_vec()
+    } else {
+        layers.iter().map(String::as_str).collect()
+    };
+    let report = layer::fsck(&storage, &selected)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(if report.failures.is_empty() { 0 } else { 2 })
+}
+
+#[cfg(not(feature = "storage"))]
+fn storage_fsck(_: &rebsync_core::Config, _: Vec<String>) -> Result<i32> {
     bail!("rebsync was built without the storage feature; rebuild with --features storage")
 }
 
@@ -624,6 +641,7 @@ fn entry() -> Result<i32> {
                 return Ok(0);
             }
             StorageAction::Check => return storage_check(&config.config, cli.json),
+            StorageAction::Fsck { layers } => return storage_fsck(&config.config, layers),
         },
         Some(Action::Mneme { command }) => return mneme_action(&config.config, command, cli.json),
         Some(Action::Frog { command }) => {

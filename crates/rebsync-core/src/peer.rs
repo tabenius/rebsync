@@ -236,6 +236,16 @@ pub struct SyncReport {
     pub already_present: usize,
     pub conflicts: Vec<String>,
     pub rejected: Vec<String>,
+    /// Pull only: newly received snapshots whose chunks and digests check out.
+    pub verified: Vec<String>,
+    /// Pull only: newly received snapshots that are incomplete or damaged.
+    pub verification_failed: Vec<String>,
+}
+
+impl SyncReport {
+    pub fn clean(&self) -> bool {
+        self.conflicts.is_empty() && self.rejected.is_empty() && self.verification_failed.is_empty()
+    }
 }
 
 /// Accept only layer objects, and check what can be checked before storing.
@@ -334,6 +344,7 @@ pub fn pull(
         prefixes: prefixes.to_vec(),
         ..Default::default()
     };
+    let mut new_manifests = Vec::new();
     for prefix in prefixes {
         let local = local_listing(storage, prefix)?;
         let remote = peer.list(prefix)?;
@@ -359,9 +370,24 @@ pub fn pull(
                 PutOutcome::Created(_) => {
                     report.transferred += 1;
                     report.transferred_bytes += bytes.len() as u64;
+                    if key.contains("/snapshots/") {
+                        new_manifests.push(key.clone());
+                    }
                 }
                 PutOutcome::AlreadyExists(_) => report.already_present += 1,
             }
+        }
+    }
+    // A pulled snapshot is only as good as its chunks: check each new one.
+    for key in new_manifests {
+        let layer_name = key.split('/').next().unwrap_or_default().to_owned();
+        let check = layer::check_snapshot(storage, &layer_name, &key);
+        if check.ok {
+            report.verified.push(key);
+        } else {
+            report
+                .verification_failed
+                .push(format!("{key}: {}", check.error.unwrap_or_default()));
         }
     }
     journal.event("peer-pull", &peer.target.base, json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len()}))?;

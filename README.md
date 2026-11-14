@@ -122,6 +122,12 @@ rebsync storage path --storage-root /mnt/backup/rebsync --json
 rebsync storage check --storage-root /tmp/rebsync-probe --json
 ```
 
+`storage fsck [--layer L]` reads every layer snapshot (Mneme and multi-file
+formats), streams each chunk and checks chunk and whole-file digests, and reports
+damaged, missing or unreadable snapshots plus unreferenced chunks. It writes
+nothing and exits `2` on any failure. It is a structural check; the owners'
+validators run through `rebsync <layer> verify ID`.
+
 `storage check` writes a `_probes/check-*` object, verifies create-if-absent,
 readback, range read, HEAD and raw-prefix listing, then deletes it. It never touches
 the restic repository. Keys are limited to ASCII letters, digits, `.`, `-`, `_`
@@ -312,7 +318,9 @@ rebsync peer pull --layer frog       # phone → this machine, Frog only
   - Only `mneme/`, `frog/` and `agenda/` objects are accepted.
   - Rejected objects are listed and never stored.
 
-  Run `rebsync <layer> verify ID` before relying on a pulled snapshot.
+  Each newly pulled snapshot is then checked chunk by chunk (`verified` /
+  `verification_failed` in the report; failures exit `2`). Owner validation
+  (SQLite integrity, edition manifests) is still `rebsync <layer> verify ID`.
 - **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
   hotspot or USB tethering. Listings page with `after=`, which needs Rebekah
   0.2.1 or later; older apps produce a clear error.

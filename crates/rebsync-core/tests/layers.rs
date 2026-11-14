@@ -301,3 +301,68 @@ fn prune_keeps_newest_respects_grace_and_never_breaks_survivors() -> Result<()> 
     assert_eq!(chunk_count(), before - applied.chunks_removed);
     Ok(())
 }
+
+#[test]
+fn fsck_finds_damaged_missing_and_unreadable_snapshots() -> Result<()> {
+    use rebsync_core::{ObjectKey, ObjectStorage};
+    let t = tempfile::tempdir()?;
+    let config = config(t.path());
+    frog_db(&t.path().join("AGENTS.db"), 6000);
+    edition(&t.path().join("daily-agenda"), "ready", "<p>ok</p>");
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+    let frog_id = frog::publish(&config, &storage, &mut journal)?.id;
+    agenda::publish(&config, &storage, &mut journal)?;
+
+    let clean = layer::fsck(&storage, layer::LAYERS)?;
+    assert_eq!((clean.snapshots_checked, clean.snapshots_ok), (2, 2));
+    assert!(clean.failures.is_empty() && clean.bytes_verified > 0);
+    assert_eq!(clean.orphan_chunks, 0);
+
+    let manifest = layer::load(&storage, "frog", &frog_id)?;
+    let chunk_path = |digest: &str| {
+        config
+            .storage
+            .root
+            .join(format!("frog/v1/chunks/sha256/{}/{digest}", &digest[..2]))
+    };
+    let first = &manifest.files[0].chunks[0].sha256;
+    let mut bytes = fs::read(chunk_path(first))?;
+    bytes[0] ^= 0xff;
+    fs::write(chunk_path(first), bytes)?;
+    let damaged = layer::fsck(&storage, &["frog"])?;
+    assert_eq!(damaged.failures.len(), 1);
+    assert!(
+        damaged.failures[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("damaged")
+    );
+
+    let second = &manifest.files[0].chunks[1].sha256;
+    fs::remove_file(chunk_path(second))?;
+    fs::remove_file(chunk_path(first))?;
+    let missing = layer::fsck(&storage, &["frog"])?;
+    assert!(
+        missing.failures[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("missing")
+    );
+
+    storage.put(
+        &ObjectKey::parse("agenda/v1/snapshots/local/broken.json")?,
+        b"{",
+    )?;
+    let unreadable = layer::fsck(&storage, &["agenda"])?;
+    assert_eq!((unreadable.snapshots_ok, unreadable.failures.len()), (1, 1));
+    // fsck never writes: the agenda store is unchanged apart from our probe.
+    assert!(
+        storage
+            .head(&ObjectKey::parse("agenda/v1/snapshots/local/broken.json")?)
+            .is_ok()
+    );
+    Ok(())
+}
