@@ -67,7 +67,10 @@ kotlin {
 }
 
 rust {
-    rootDirRel = "../../../"
+    // Gradle runs `npm run -- tauri android android-studio-script` from this
+    // directory. The npm project lives at the Tauri app root, one level above
+    // src-tauri; point the generated task there rather than at src-tauri.
+    rootDirRel = "../../../../"
 }
 
 dependencies {
