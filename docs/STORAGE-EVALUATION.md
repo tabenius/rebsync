@@ -199,6 +199,16 @@ This is not a performance ranking. Shared build caches, different features and
 the absence of real cloud tests do not support claims about comparative speed,
 RAM use, binary size, availability or provider reliability.
 
+## Provisional adoption
+
+`object_store` 0.14.2 is now the first adapter behind a Rebsync-owned
+`ObjectStorage` trait, but only for a local filesystem root and only behind the
+`storage-object-store` feature in `rebsync-core`. The CLI enables that feature by
+default; `--no-default-features` omits it. This is an interface and durability
+experiment, not production cloud adoption: no S3/R2 profile, multipart upload,
+restic REST serving or peer negotiation is wired up, and the existing restic
+backup path is unchanged.
+
 ## Still required before production adoption
 
 - Review recorded observations and resolve failed atomicity/durability gates.

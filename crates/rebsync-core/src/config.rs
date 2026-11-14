@@ -15,6 +15,7 @@ pub struct Config {
     pub scan: Scan,
     pub git: Git,
     pub backup: Backup,
+    pub storage: StorageConfig,
     pub reconcile: Reconcile,
     pub fleet: Fleet,
     pub command_timeout_seconds: u64,
@@ -53,6 +54,21 @@ pub struct Dataset {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+    /// Root of Rebsync-managed objects. Relative paths resolve against
+    /// rebekah_home. This is not a source checkout or a restic repository.
+    pub root: PathBuf,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from(".rebsync/objects"),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reconcile {
     pub write_instructions: bool,
 }
@@ -74,6 +90,7 @@ impl Config {
                 exclude: [
                     ".git",
                     ".rebekah",
+                    ".rebsync",
                     ".cache",
                     ".cargo",
                     ".rustup",
@@ -105,6 +122,7 @@ impl Config {
                 password_file: None,
                 datasets: vec![],
             },
+            storage: StorageConfig::default(),
             reconcile: Reconcile {
                 write_instructions: true,
             },
@@ -128,6 +146,9 @@ impl Config {
         }
         if self.command_timeout_seconds == 0 {
             bail!("command timeout must be positive");
+        }
+        if self.storage.root.as_os_str().is_empty() {
+            bail!("storage root cannot be empty");
         }
         for prefix in &self.git.remote_prefixes {
             let owner = prefix.strip_prefix("github.com/").unwrap_or("");
@@ -165,6 +186,7 @@ pub struct ConfigOverrides {
     pub fast_forward: Option<bool>,
     pub backup_repository: Option<String>,
     pub password_file: Option<PathBuf>,
+    pub storage_root: Option<PathBuf>,
 }
 #[derive(Debug, Serialize)]
 pub struct EffectiveConfig {
@@ -349,9 +371,13 @@ pub fn load_config_at(
     if let Some(path) = overrides.password_file {
         cli["backup"]["password_file"] = serde_json::to_value(path)?;
     }
+    if let Some(root) = overrides.storage_root {
+        cli["storage"]["root"] = serde_json::to_value(root)?;
+    }
     merge(&mut value, cli, "", "CLI", &mut origins);
     let mut config: Config = serde_json::from_value(value).context("invalid configuration")?;
     config.rebekah_home = absolute(config.rebekah_home, &cwd);
+    config.storage.root = absolute(config.storage.root, &config.rebekah_home);
     config.scan.roots = config
         .scan
         .roots

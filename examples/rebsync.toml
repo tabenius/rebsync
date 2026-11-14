@@ -26,6 +26,11 @@ backup_required = true
 # path = "reports/frog-export"
 # kind = "directory"
 
+[storage]
+# Rebsync-managed objects, not a source checkout or the restic repository.
+# Relative paths resolve against rebekah_home. Override with --storage-root.
+root = ".rebsync/objects"
+
 [reconcile]
 write_instructions = true
 

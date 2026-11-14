@@ -17,7 +17,7 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <h1>Rebsync</h1>
 <p class="subtitle">Preserving work across uncertain connections</p>
 <p>A preservation-first synchronization command, growing into a network of intermittently connected Rebekah peers.</p>
-<p class="status">Revision 2 adds the storage stack, S3/R2 client and server roles, early restic REST interoperability, resumable uploads and authenticated capability discovery. The initial command is implemented; the storage milestones below are planned. See the <a href="#evaluation">storage evaluation</a> and repository README for evidence and current limits.</p>
+<p class="status">Revision 2 adds the storage stack, S3/R2 client and server roles, early restic REST interoperability, resumable uploads and authenticated capability discovery. The initial command and a feature-gated local filesystem adapter are implemented; the cloud, multipart and peer milestones below remain planned. See the <a href="#evaluation">storage evaluation</a> and repository README for evidence and current limits.</p>
 </header>
 <nav aria-label="Contents"><a href="#purpose">Purpose</a><a href="#existing">Existing foundations</a><a href="#architecture">Architecture</a><a href="#config">Configuration</a><a href="#git">Git safety</a><a href="#journal">Journaling</a><a href="#ai">Reconciliation</a><a href="#r2">Storage stack · S3 · R2 · restic</a><a href="#datasets">Frog &amp; agenda</a><a href="#peers">Peers &amp; hops</a><a href="#delivery">Delivery</a><a href="#evaluation">Rust storage evaluation</a></nav>
 <section id="purpose">
@@ -59,7 +59,7 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <p>The core owns configuration loading, discovery, subprocesses, files, API calls, policy, planning, execution and structured events. It knows nothing about terminal rendering or interactive prompts.</p>
 <p>The clap-based CLI parses terminal input, passes explicit overrides, displays results and maps outcomes to exit codes. A later Tauri or Dioxus interface imports the same core.</p>
 <p>Use ordinary tools first: Git, GitHub CLI, SSH and established backup utilities. Pass arguments directly rather than interpolating shell commands; construct explicit pipelines only when necessary.</p>
-<p>Keep storage providers behind a narrow Rebsync-owned interface inside the core. Client adapters, incoming server protocols and synchronization policy are separate responsibilities. The experimental storage comparison is a standalone, unpublished workspace under <code>evaluations/storage/</code>; it adds no dependency or third crate to the production workspace.</p>
+<p>Keep storage providers behind a narrow Rebsync-owned interface inside the core. Client adapters, incoming server protocols and synchronization policy are separate responsibilities. The experimental storage comparison remains a standalone, unpublished workspace under <code>evaluations/storage/</code>. The production core now carries an optional <code>object_store</code> filesystem adapter behind that trait and an off-by-default feature; it is not a cloud or server implementation.</p>
 </section>
 <section id="config">
 <h2>4. Predictable configuration</h2>
@@ -87,6 +87,10 @@ enabled = true
 engine = "opencode"
 write_instructions = true
 publish = "after-policy-checks"
+
+[storage]
+# Rebsync-managed objects; relative to rebekah_home.
+root = ".rebsync/objects"
 
 [backup]
 enabled = true
@@ -215,7 +219,7 @@ AbortMultipartUpload  · ListParts  · ListMultipartUploads</code></pre>
 </section>
 <section id="evaluation">
 <h2>12. Rust storage evaluation</h2>
-<p>Evaluate <strong>Apache OpenDAL™ 0.59.5</strong> and <strong>object_store 0.14.2</strong> in an isolated workspace before selecting a production dependency. OpenDAL offers broader transport coverage and runtime capability metadata; object_store offers an object-focused contract, explicit create modes and lower-level multipart/pagination interfaces. Neither is a complete S3 server or restic REST server.</p>
+<p>Evaluate <strong>Apache OpenDAL™ 0.59.5</strong> and <strong>object_store 0.14.2</strong> in an isolated workspace before selecting a production dependency. The first selection is provisional and limited to a feature-gated local filesystem adapter; OpenDAL remains on the shortlist for broader transports. OpenDAL offers broader transport coverage and runtime capability metadata; object_store offers an object-focused contract, explicit create modes and lower-level multipart/pagination interfaces. Neither is a complete S3 server or restic REST server.</p>
 <p>The initial probes exercise real temporary filesystem backends, not mocks: put/get/head, ranges, listing, deletion, staged publication, abort and competing create-if-absent writes. S3 and R2 builders use dummy credentials without making cloud requests. Results and decision gates are maintained in <code>docs/STORAGE-EVALUATION.md</code> and <code>evaluations/storage/results/</code>.</p>
 <p>The first object_store probe passed its basic object, range, publication and abort checks: exactly one competing create-if-absent writer succeeded, and incomplete uploads were hidden. Raw-prefix behavior still needs adaptation. The initial OpenDAL build exhausted the small memory-backed temporary filesystem before its probe ran; after moving the cache to disk, its filesystem probe also passed, with one create-if-absent winner and hidden incomplete writes. Its exclusion is checked at first write rather than writer open, and its recursive directory listing includes the directory entry. Follow-up filesystem probes use a disk-backed cache, one build job and separate optional cloud-client compilation.</p>
 <p>Selection remains provisional until the semantic probes and provider tests are evaluated. In particular, verify durability settings, capability flags versus actual exclusion behavior, raw-prefix listing versus directory semantics, and multipart restart recovery. Do not add either abstraction to the production crates simply because it compiles.</p>

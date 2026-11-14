@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/rebsync-core", "crates/rebsync-cli"]
+exclude = ["apps/rebsync-app/src-tauri"]
 resolver = "2"
 
 [workspace.package]

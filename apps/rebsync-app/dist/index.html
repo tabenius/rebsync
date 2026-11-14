@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rebsync</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.5; }
+      code { background: #eee; padding: 0.1rem 0.3rem; }
+      #result { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>Rebsync</h1>
+    <p>Android shell for the local preservation core.</p>
+    <label>Object key <input id="key" value="probes/android" /></label>
+    <button id="check">Validate key</button>
+    <p id="result"></p>
+    <script>
+      const result = document.querySelector("#result");
+      document.querySelector("#check").addEventListener("click", async () => {
+        const key = document.querySelector("#key").value;
+        try {
+          const validated = await window.__TAURI__.core.invoke("validate_key", { key });
+          result.textContent = `accepted: ${validated}`;
+        } catch (error) {
+          result.textContent = `rejected: ${error}`;
+        }
+      });
+    </script>
+  </body>
+</html>

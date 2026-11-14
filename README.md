@@ -95,6 +95,64 @@ A filesystem restic repository may be useful for tests or an enrolled USB drive,
 but rebsync does not assert that it is independent of this machine. It never
 prunes backups or propagates deletions.
 
+## Local object storage
+
+`rebsync` can publish Rebsync-managed objects into a local filesystem root behind
+a narrow `ObjectStorage` trait. This is the **client-side** contract for future
+S3/R2 adapters, not an S3 server, not a restic REST server, and not a change to how
+restic stores or encrypts existing snapshots.
+
+The adapter is feature-gated. `rebsync-core` keeps `storage-object-store` off by
+default; the CLI enables it through its default `storage` feature. Build the CLI
+with `--no-default-features` to omit it. Restic-based backup and Git exchange do
+not use this layer.
+
+```toml
+[storage]
+# Relative paths resolve against rebekah_home. Default shown.
+root = ".rebsync/objects"
+```
+
+`--storage-root PATH` overrides the file for one invocation, which is the easiest
+way to keep experiments away from real home storage:
+
+```bash
+rebsync storage path
+rebsync storage path --storage-root /mnt/backup/rebsync --json
+rebsync storage check --storage-root /tmp/rebsync-probe --json
+```
+
+`storage check` writes a `_probes/check-*` object, verifies create-if-absent,
+readback, range read, HEAD and raw-prefix listing, then deletes it. It never touches
+the restic repository. Keys are limited to ASCII letters, digits, `.`, `-`, `_`
+and `/`; empty segments, traversal, leading/trailing slashes and overlong keys are
+rejected, and symlinked path ancestors are refused. Filesystem publication is
+fsynced. Deletion exists for storage administration only: no synchronization
+policy propagates repository deletions between peers.
+
+## Android compile check
+
+`apps/rebsync-app` is a small Tauri 2 shell that exercises the shared storage
+boundary on Android. It is excluded from the root Cargo workspace, so the two
+production crates remain `rebsync-core` and `rebsync-cli`. The app has no mobile
+background sync, peer discovery or filesystem permissions yet; it is a build and
+link check, not a phone transport.
+
+With JDK 21, an Android SDK, NDK 27 and the Android Rust targets installed:
+
+```bash
+export ANDROID_HOME="$HOME/.local/android-sdk"
+export NDK_HOME="$HOME/.local/android-sdk/ndk/27.2.12479018"
+cd apps/rebsync-app
+npx @tauri-apps/cli@^2 android build --debug --apk --target aarch64
+```
+
+The APK lands under `src-tauri/gen/android/app/build/outputs/apk/`. Tauri writes
+its own `Cargo.lock` and Gradle files under the app directory; they are not part of
+the production workspace. The first build downloads the Gradle wrapper and needs
+network access. See [the plan](docs/plan.html#r2) for the still-planned phone
+transport and peer protocol.
+
 ## Git safety
 
 - Discovers nested repositories, bare repositories and linked worktrees without
@@ -145,8 +203,9 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
 - The revised [storage-stack plan](docs/plan.html#r2) covers S3/R2 client profiles,
   early restic REST serving, resumable multipart and peer capability negotiation.
   The [Rust abstraction evaluation](docs/STORAGE-EVALUATION.md) compares pinned
-  object_store/OpenDAL candidates in an isolated workspace; no candidate has been
-  added to the production crates.
+  object_store/OpenDAL candidates in an isolated workspace. A feature-gated
+  `object_store` filesystem adapter now implements the production trait; S3/R2,
+  multipart and peer negotiation are not implemented yet.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, consistent remote

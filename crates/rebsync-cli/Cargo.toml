@@ -5,12 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["storage"]
+storage = ["rebsync-core/storage-object-store"]
+
 [[bin]]
 name = "rebsync"
 path = "src/main.rs"
 
 [dependencies]
-rebsync-core = { path = "../rebsync-core" }
+rebsync-core = { path = "../rebsync-core", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }

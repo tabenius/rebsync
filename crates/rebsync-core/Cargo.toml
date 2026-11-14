@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+storage-object-store = ["dep:object_store", "dep:futures", "dep:tokio"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
@@ -17,3 +21,6 @@ walkdir = "2"
 wait-timeout = "0.2"
 fs2 = "0.4"
 sha2 = "0.10"
+object_store = { version = "0.14.2", default-features = false, features = ["fs"], optional = true }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
