@@ -220,6 +220,20 @@ fn put_chunk(storage: &dyn ObjectStorage, data: &[u8]) -> Result<(Chunk, bool)> 
     let sha256 = format!("{:x}", Sha256::digest(data));
     let key = chunk_key(&sha256)?;
     let size = data.len() as u64;
+    // Most chunks of a republished index already exist; a HEAD avoids
+    // rewriting and fsyncing them. put_if_absent still guards the race.
+    match storage.head(&key) {
+        Ok(meta) if meta.size == size => return Ok((Chunk { sha256, size }, false)),
+        Ok(meta) => {
+            return Err(StorageError::Corrupt(format!(
+                "{key}: stored {} bytes, expected {size}",
+                meta.size
+            ))
+            .into());
+        }
+        Err(StorageError::NotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
     let created = match storage.put_if_absent(&key, data)? {
         PutOutcome::Created(_) => true,
         PutOutcome::AlreadyExists(meta) => {
