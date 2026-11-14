@@ -44,8 +44,9 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   - Peer writes pause during the move.
   - An interrupted move can be resumed. Identical files are kept, and a
     conflicting file is never overwritten.
-- **Mneme snapshots.** If the store holds snapshots published by
-  `rebsync mneme`, the app shows their count and storage use.
+- **Layer snapshots.** The app shows the count and storage use of Mneme, Frog
+  and agenda snapshots, pushed with `rebsync peer push` or pulled back with
+  `rebsync peer pull`.
 
 ## Limits, stated plainly
 
@@ -112,7 +113,7 @@ cargo test --manifest-path logic-tests/Cargo.toml
 |---|---|
 | `GET /v1/health` | No auth needed; `{"ok":true,...}` |
 | `GET /v1/status` | Protocol, version, storage capabilities, whether writes are paused |
-| `GET /v1/objects?prefix=&limit=` | Keys and sizes; at most 10 000 |
+| `GET /v1/objects?prefix=&limit=&after=` | Keys and sizes in key order, keys strictly after `after`; at most 10 000 per page; `truncated` signals more (0.2.1+) |
 | `GET` or `HEAD /v1/objects/KEY` | Object bytes, or `X-Object-Size` |
 | `PUT /v1/objects/KEY` | Create if absent: `201` created, `200` exists, `503` during a move; 64 MiB maximum |
 

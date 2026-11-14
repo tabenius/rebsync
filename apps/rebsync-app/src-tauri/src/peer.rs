@@ -369,14 +369,19 @@ fn handle(
                 .and_then(|l| l.parse().ok())
                 .unwrap_or(1000)
                 .clamp(1, MAX_LIST);
-            match store.list_prefix(&prefix, limit) {
+            // Keyset pagination: keys strictly after `after`, in key order.
+            let after = params.get("after").cloned().unwrap_or_default();
+            match store.list_prefix(&prefix, 0) {
                 Ok(items) => {
-                    let items: Vec<_> = items
+                    let mut page: Vec<_> = items
                         .into_iter()
+                        .filter(|m| m.key.as_str() > after.as_str())
+                        .take(limit + 1)
                         .map(|m| serde_json::json!({"key": m.key, "size": m.size}))
                         .collect();
-                    let body =
-                        serde_json::json!({"items": items, "truncated": items.len() == limit});
+                    let truncated = page.len() > limit;
+                    page.truncate(limit);
+                    let body = serde_json::json!({"items": page, "truncated": truncated});
                     respond(
                         request,
                         200,

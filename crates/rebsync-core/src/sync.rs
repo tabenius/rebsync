@@ -87,7 +87,7 @@ fn lock(config: &Config, repo: &Repository) -> Result<File> {
     let _ = config;
     Ok(file)
 }
-fn execute(
+pub(crate) fn execute(
     journal: &mut Journal,
     subject: &Path,
     action: &str,
@@ -803,7 +803,7 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
         let result = if !options.apply {
             json!({"name":dataset.name,"status":"planned"})
         } else if dataset.kind == "agenda" {
-            json!({"name":dataset.name,"status":"blocked","reason":"whole-edition owner validation adapter is not implemented; do not claim agenda coverage"})
+            json!({"name":dataset.name,"status":"blocked","reason":"agenda editions are handled by the [agenda] layer, which verifies the edition manifest; enable agenda.enabled instead"})
         } else if !dataset.path.is_dir() {
             json!({"name":dataset.name,"status":"missing"})
         } else {
@@ -829,6 +829,23 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
             json!({"name":"mneme","kind":"mneme","status":"planned"})
         };
         journal.event("dataset-outcome", "mneme", result.clone())?;
+        datasets.push(result);
+    }
+    for (name, enabled) in [
+        ("frog", config.frog.enabled),
+        ("agenda", config.agenda.enabled),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let result = if !options.apply {
+            json!({"name":name,"kind":name,"status":"planned"})
+        } else if name == "frog" {
+            crate::frog::run_layer(config, &mut journal)
+        } else {
+            crate::agenda::run_layer(config, &mut journal)
+        };
+        journal.event("dataset-outcome", name, result.clone())?;
         datasets.push(result);
     }
     let summary = RunSummary {

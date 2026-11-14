@@ -17,6 +17,8 @@ pub struct Config {
     pub backup: Backup,
     pub storage: StorageConfig,
     pub mneme: MnemeConfig,
+    pub frog: crate::frog::FrogConfig,
+    pub agenda: crate::agenda::AgendaConfig,
     pub reconcile: Reconcile,
     pub fleet: Fleet,
     pub command_timeout_seconds: u64,
@@ -161,6 +163,8 @@ impl Config {
             },
             storage: StorageConfig::default(),
             mneme: MnemeConfig::default(),
+            frog: Default::default(),
+            agenda: Default::default(),
             reconcile: Reconcile {
                 write_instructions: true,
             },
@@ -200,6 +204,18 @@ impl Config {
             bail!("mneme.binary cannot be empty");
         }
         crate::mneme::validate_label(&self.mneme.label)?;
+        for (name, label, chunk) in [
+            ("frog", &self.frog.label, self.frog.chunk_bytes),
+            ("agenda", &self.agenda.label, self.agenda.chunk_bytes),
+        ] {
+            crate::layer::validate_label(label).map_err(|e| anyhow::anyhow!("{name}.{e}"))?;
+            if !(4096..=64 * 1024 * 1024).contains(&chunk) || !chunk.is_multiple_of(4096) {
+                bail!("{name}.chunk_bytes must be a multiple of 4096 between 4 KiB and 64 MiB");
+            }
+        }
+        if self.frog.timeout_seconds == 0 {
+            bail!("frog.timeout_seconds must be positive");
+        }
         for prefix in &self.git.remote_prefixes {
             let owner = prefix.strip_prefix("github.com/").unwrap_or("");
             if owner.is_empty()
@@ -214,7 +230,7 @@ impl Config {
         for dataset in &self.backup.datasets {
             if !["directory", "agenda"].contains(&dataset.kind.as_str()) {
                 bail!(
-                    "dataset {}: supported kinds are directory and agenda; SQLite must be exported consistently by its owner first (Mneme has its own [mneme] layer)",
+                    "dataset {}: supported kinds are directory and agenda; SQLite must be exported consistently by its owner first (use the [mneme] or [frog] layer)",
                     dataset.name
                 );
             }
@@ -448,6 +464,15 @@ pub fn load_config_at(
     if config.mneme.binary.components().count() > 1 {
         config.mneme.binary = absolute(config.mneme.binary.clone(), &config.rebekah_home);
     }
+    if let Some(path) = config.frog.db.take() {
+        config.frog.db = Some(absolute(path, &config.rebekah_home));
+    }
+    for program in [&mut config.frog.binary, &mut config.frog.python] {
+        if program.components().count() > 1 {
+            *program = absolute(program.clone(), &config.rebekah_home);
+        }
+    }
+    config.agenda.path = absolute(config.agenda.path.clone(), &config.rebekah_home);
     for dataset in &mut config.backup.datasets {
         dataset.path = absolute(dataset.path.clone(), &config.rebekah_home);
     }

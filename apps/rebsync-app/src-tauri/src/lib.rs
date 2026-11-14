@@ -141,6 +141,7 @@ struct Overview {
     object_bytes: u64,
     objects_truncated: bool,
     mneme: Option<serde_json::Value>,
+    layers: Vec<serde_json::Value>,
     moving: MoveStatus,
     warnings: Vec<String>,
 }
@@ -167,6 +168,12 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         .ok()
         .filter(|s| s.snapshots > 0)
         .and_then(|s| serde_json::to_value(s).ok());
+    let layers: Vec<serde_json::Value> = ["frog", "agenda"]
+        .iter()
+        .filter_map(|layer| rebsync_core::layer::stats(storage.as_ref(), layer).ok())
+        .filter(|s| s.snapshots > 0)
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
     Ok(Overview {
         app_version: env!("CARGO_PKG_VERSION"),
         data_root: settings.objects(),
@@ -186,6 +193,7 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         object_bytes: listing.iter().map(|m| m.size).sum(),
         objects_truncated: listing.len() == 50_000,
         mneme,
+        layers,
         moving: app.moving.lock().map(|m| m.clone()).unwrap_or_default(),
         warnings,
     })

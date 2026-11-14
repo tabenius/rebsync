@@ -8,7 +8,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-rebsync-core = { path = "../../../crates/rebsync-core", features = ["storage-object-store"] }
+rebsync-core = { path = "../../../crates/rebsync-core", features = ["storage-object-store", "peer-http"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"

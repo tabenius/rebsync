@@ -1,0 +1,207 @@
+//! Frog and agenda layers against owner-shaped fixtures.
+#![cfg(all(unix, feature = "storage-object-store"))]
+
+use anyhow::Result;
+use rebsync_core::{
+    Config, FsObjectStorage, RunOptions, agenda, frog, journal::Journal, layer, run,
+};
+use sha2::{Digest, Sha256};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+
+fn frog_db(path: &Path, tasks: usize) {
+    let script = format!(
+        r#"
+import sqlite3
+c = sqlite3.connect({path:?})
+c.executescript('''
+CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS repos(id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS locks(id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY, title TEXT);
+CREATE TABLE IF NOT EXISTS event_log(id INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO schema_migrations VALUES ('001_initial.sql'), ('015_audit_intent_limits.sql');
+''')
+c.executemany("INSERT INTO tasks(title) VALUES (?)", [("task %d" % i,) for i in range({tasks})])
+c.commit()
+"#,
+        path = path.to_str().unwrap()
+    );
+    assert!(
+        Command::new("python3")
+            .args(["-c", &script])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// Mimics `frog --db DB --json snapshot --dest D`.
+const FAKE_FROG: &str = r#"#!/bin/sh
+set -e
+db="$2"; dest="$6"
+mkdir -p "$dest"
+python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close()" "$db" "$dest/AGENTS.db.last"
+size=$(wc -c < "$dest/AGENTS.db.last" | tr -d ' ')
+printf '{"ok": true, "last": "%s", "bytes": %s}\n' "$dest/AGENTS.db.last" "$size"
+"#;
+
+fn config(home: &Path) -> Config {
+    let mut config = Config::defaults(home.to_path_buf());
+    fs::create_dir_all(home.join("empty")).unwrap();
+    config.scan.roots = vec![home.join("empty")];
+    config.storage.root = home.join("objects");
+    let script = home.join("fake-frog");
+    fs::write(&script, FAKE_FROG).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    config.frog.binary = script;
+    config.frog.db = Some(home.join("AGENTS.db"));
+    config.frog.restic = false;
+    config.agenda.path = home.join("daily-agenda");
+    config.agenda.restic = false;
+    config
+}
+
+fn edition(dir: &Path, status: &str, html: &str) {
+    fs::create_dir_all(dir).unwrap();
+    let files = [
+        ("index.html", html.to_owned()),
+        ("snapshot.json", r#"{"errors":[]}"#.to_owned()),
+        ("editorial.json", "{}".to_owned()),
+    ];
+    let mut listed = serde_json::Map::new();
+    for (name, body) in &files {
+        fs::write(dir.join(name), body).unwrap();
+        listed.insert(
+            (*name).into(),
+            serde_json::json!({"sha256": format!("{:x}", Sha256::digest(body.as_bytes())), "bytes": body.len()}),
+        );
+    }
+    let manifest = serde_json::json!({"schema": agenda::OWNER_SCHEMA, "id": "daily-agenda-2026-11-14T06:00:00+00:00",
+        "observed_at": "2026-11-14T06:00:00+00:00", "generation": {"status": status, "provider": "local"}, "files": listed});
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn frog_layer_exports_validates_dedups_and_restores_to_new_files() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let config = config(t.path());
+    frog_db(&t.path().join("AGENTS.db"), 200);
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+
+    let first = frog::publish(&config, &storage, &mut journal)?;
+    assert_eq!(first.files, 1);
+    let listed = layer::list(&storage, "frog", None)?;
+    assert_eq!(listed[0].owner["counts"]["tasks"], 200);
+    assert_eq!(listed[0].owner["integrity"], "ok");
+    assert!(listed[0].owner["migrations"].as_array().unwrap().len() == 2);
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = frog::publish(&config, &storage, &mut journal)?;
+    assert_eq!(
+        second.new_chunks, 0,
+        "unchanged database should reuse every chunk"
+    );
+
+    let verified = frog::verify(&config, &storage, &first.id, &mut journal)?;
+    assert_eq!(verified["validation"]["ok"], true);
+    let into = t.path().join("restored/AGENTS.db");
+    frog::restore(&config, &storage, &first.id, &into, &mut journal)?;
+    assert!(frog::restore(&config, &storage, &first.id, &into, &mut journal).is_err());
+    // The live database is never touched by restore.
+    let live = t.path().join("AGENTS.db");
+    assert!(frog::restore(&config, &storage, &first.id, &live, &mut journal).is_err());
+
+    // A database missing Frog's tables is refused before publication.
+    fs::remove_file(&live)?;
+    assert!(
+        Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import sqlite3; sqlite3.connect({:?}).execute('CREATE TABLE x(y)')",
+                    live.to_str().unwrap()
+                )
+            ])
+            .status()?
+            .success()
+    );
+    let error = frog::publish(&config, &storage, &mut journal).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("failed validation"),
+        "{error:#}"
+    );
+    assert_eq!(layer::list(&storage, "frog", None)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn agenda_layer_publishes_only_verified_ready_editions() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let mut config = config(t.path());
+    let source = t.path().join("daily-agenda");
+    edition(&source, "ready", "<h1>Agenda</h1>");
+    fs::write(source.join(".publish.lock"), b"")?;
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+
+    let outcome = agenda::publish(&config, &storage, &mut journal)?;
+    assert_eq!(outcome.files, 4, "three listed files plus the manifest");
+    let verified = agenda::verify(&config, &storage, &outcome.id)?;
+    assert_eq!(verified["edition"]["generation_status"], "ready");
+    let into = t.path().join("restored-edition");
+    agenda::restore(&storage, &outcome.id, &into)?;
+    assert_eq!(
+        fs::read_to_string(into.join("index.html"))?,
+        "<h1>Agenda</h1>"
+    );
+    assert!(agenda::restore(&storage, &outcome.id, &into).is_err());
+
+    // A file that no longer matches its manifest is refused.
+    fs::write(source.join("index.html"), "tampered")?;
+    let error = agenda::publish(&config, &storage, &mut journal).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("digest does not match"),
+        "{error:#}"
+    );
+
+    // Degraded editions are refused unless explicitly allowed.
+    fs::remove_dir_all(&source)?;
+    edition(&source, "degraded", "<h1>Partial</h1>");
+    assert!(agenda::publish(&config, &storage, &mut journal).is_err());
+    config.agenda.require_ready = false;
+    agenda::publish(&config, &storage, &mut journal)?;
+    assert_eq!(layer::list(&storage, "agenda", None)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn apply_runs_report_layer_status() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let mut config = config(t.path());
+    frog_db(&t.path().join("AGENTS.db"), 3);
+    edition(&t.path().join("daily-agenda"), "ready", "x");
+    config.frog.enabled = true;
+    config.agenda.enabled = true;
+    let applied = run(&config, RunOptions { apply: true })?;
+    let status =
+        |name: &str| applied.datasets.iter().find(|d| d["name"] == name).unwrap()["status"].clone();
+    assert_eq!(status("frog"), "published-local");
+    assert_eq!(status("agenda"), "published-local");
+    config.frog.restic = true;
+    let blocked = run(&config, RunOptions { apply: true })?;
+    assert_eq!(
+        blocked
+            .datasets
+            .iter()
+            .find(|d| d["name"] == "frog")
+            .unwrap()["status"],
+        "blocked"
+    );
+    Ok(())
+}
