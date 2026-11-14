@@ -31,6 +31,18 @@ backup_required = true
 # Relative paths resolve against rebekah_home. Override with --storage-root.
 root = ".rebsync/objects"
 
+[mneme]
+# Owner-exported Mneme index snapshots, published as content-addressed chunks.
+enabled = false
+binary = "mneme"
+# db = "/private/path/mneme/index.sqlite"
+label = "local"
+# Multiple of 4096: page-aligned chunks dedup across snapshots.
+chunk_bytes = 65536
+# Also encrypt the verified export through restic (needs backup.repository).
+restic = true
+timeout_seconds = 900
+
 [reconcile]
 write_instructions = true
 

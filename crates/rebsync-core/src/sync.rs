@@ -46,7 +46,7 @@ impl RunSummary {
     }
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         bail!("state directory must not be a symlink");
@@ -58,7 +58,7 @@ fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn state_dir(config: &Config) -> Result<PathBuf> {
+pub(crate) fn state_dir(config: &Config) -> Result<PathBuf> {
     let parent = config.rebekah_home.join(".rebekah");
     private_dir(&parent)?;
     let state = parent.join("rebsync");
@@ -121,7 +121,7 @@ fn execute(
         }
     }
 }
-fn checked(
+pub(crate) fn checked(
     j: &mut Journal,
     p: &Path,
     action: &str,
@@ -150,7 +150,7 @@ fn restic(config: &Config) -> Result<Command> {
     cmd.env_remove("RESTIC_PASSWORD_COMMAND");
     Ok(cmd)
 }
-fn restic_backup(
+pub(crate) fn restic_backup(
     config: &Config,
     source: &Path,
     tag: &str,
@@ -820,6 +820,15 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
             }
         };
         journal.event("dataset-outcome", &dataset.name, result.clone())?;
+        datasets.push(result);
+    }
+    if config.mneme.enabled {
+        let result = if options.apply {
+            crate::mneme::run_layer(config, &mut journal)
+        } else {
+            json!({"name":"mneme","kind":"mneme","status":"planned"})
+        };
+        journal.event("dataset-outcome", "mneme", result.clone())?;
         datasets.push(result);
     }
     let summary = RunSummary {

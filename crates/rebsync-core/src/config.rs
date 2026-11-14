@@ -16,6 +16,7 @@ pub struct Config {
     pub git: Git,
     pub backup: Backup,
     pub storage: StorageConfig,
+    pub mneme: MnemeConfig,
     pub reconcile: Reconcile,
     pub fleet: Fleet,
     pub command_timeout_seconds: u64,
@@ -67,6 +68,42 @@ impl Default for StorageConfig {
         }
     }
 }
+/// The Mneme layer: an owner-produced, owner-validated session-history index
+/// snapshot, published as content-addressed chunks into Rebsync object storage.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MnemeConfig {
+    /// Publish a Mneme snapshot during `--apply` runs.
+    pub enabled: bool,
+    /// Mneme executable; a bare name is looked up on PATH.
+    pub binary: PathBuf,
+    /// Index path passed as `--db`; unset means Mneme's own default/MNEME_DB.
+    pub db: Option<PathBuf>,
+    /// Names this history store in object keys; one object-key segment.
+    pub label: String,
+    /// Fixed chunk size for content addressing: a multiple of 4 KiB, 4 KiB..=64 MiB.
+    /// Mneme exports whole SQLite pages, so page-aligned chunks survive inserts.
+    pub chunk_bytes: u64,
+    /// Also back up the verified snapshot through the encrypted restic repository.
+    pub restic: bool,
+    /// Bound for each Mneme subprocess (snapshot creation can be slow).
+    pub timeout_seconds: u64,
+}
+
+impl Default for MnemeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary: PathBuf::from("mneme"),
+            db: None,
+            label: "local".into(),
+            chunk_bytes: 64 * 1024,
+            restic: true,
+            timeout_seconds: 900,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reconcile {
@@ -123,6 +160,7 @@ impl Config {
                 datasets: vec![],
             },
             storage: StorageConfig::default(),
+            mneme: MnemeConfig::default(),
             reconcile: Reconcile {
                 write_instructions: true,
             },
@@ -150,6 +188,18 @@ impl Config {
         if self.storage.root.as_os_str().is_empty() {
             bail!("storage root cannot be empty");
         }
+        if !(4096..=64 * 1024 * 1024).contains(&self.mneme.chunk_bytes)
+            || !self.mneme.chunk_bytes.is_multiple_of(4096)
+        {
+            bail!("mneme.chunk_bytes must be a multiple of 4096 between 4 KiB and 64 MiB");
+        }
+        if self.mneme.timeout_seconds == 0 {
+            bail!("mneme.timeout_seconds must be positive");
+        }
+        if self.mneme.binary.as_os_str().is_empty() {
+            bail!("mneme.binary cannot be empty");
+        }
+        crate::mneme::validate_label(&self.mneme.label)?;
         for prefix in &self.git.remote_prefixes {
             let owner = prefix.strip_prefix("github.com/").unwrap_or("");
             if owner.is_empty()
@@ -164,7 +214,7 @@ impl Config {
         for dataset in &self.backup.datasets {
             if !["directory", "agenda"].contains(&dataset.kind.as_str()) {
                 bail!(
-                    "dataset {}: supported kinds are directory and agenda; SQLite must be exported consistently by its owner first",
+                    "dataset {}: supported kinds are directory and agenda; SQLite must be exported consistently by its owner first (Mneme has its own [mneme] layer)",
                     dataset.name
                 );
             }
@@ -187,6 +237,7 @@ pub struct ConfigOverrides {
     pub backup_repository: Option<String>,
     pub password_file: Option<PathBuf>,
     pub storage_root: Option<PathBuf>,
+    pub mneme_db: Option<PathBuf>,
 }
 #[derive(Debug, Serialize)]
 pub struct EffectiveConfig {
@@ -374,6 +425,9 @@ pub fn load_config_at(
     if let Some(root) = overrides.storage_root {
         cli["storage"]["root"] = serde_json::to_value(root)?;
     }
+    if let Some(path) = overrides.mneme_db {
+        cli["mneme"]["db"] = serde_json::to_value(path)?;
+    }
     merge(&mut value, cli, "", "CLI", &mut origins);
     let mut config: Config = serde_json::from_value(value).context("invalid configuration")?;
     config.rebekah_home = absolute(config.rebekah_home, &cwd);
@@ -386,6 +440,13 @@ pub fn load_config_at(
         .collect();
     if let Some(path) = config.backup.password_file.take() {
         config.backup.password_file = Some(absolute(path, &config.rebekah_home));
+    }
+    if let Some(path) = config.mneme.db.take() {
+        config.mneme.db = Some(absolute(path, &config.rebekah_home));
+    }
+    // A bare program name stays a PATH lookup; anything with a separator is a path.
+    if config.mneme.binary.components().count() > 1 {
+        config.mneme.binary = absolute(config.mneme.binary.clone(), &config.rebekah_home);
     }
     for dataset in &mut config.backup.datasets {
         dataset.path = absolute(dataset.path.clone(), &config.rebekah_home);
@@ -428,6 +489,18 @@ mod tests {
         assert_eq!(e.origins["git.push"], "CLI");
         assert_eq!(e.config.scan.roots, vec![home.join("other")]);
         Ok(())
+    }
+    #[test]
+    fn mneme_chunks_must_be_page_aligned() {
+        let mut config = Config::defaults("/home/test".into());
+        assert_eq!(config.mneme.chunk_bytes, 64 * 1024);
+        assert!(config.validate().is_ok());
+        for bad in [0, 1000, 4095, 65_537, 128 * 1024 * 1024] {
+            config.mneme.chunk_bytes = bad;
+            assert!(config.validate().is_err(), "accepted {bad}");
+        }
+        config.mneme.chunk_bytes = 4096;
+        assert!(config.validate().is_ok());
     }
     #[test]
     fn rejects_unknown_keys_and_ambiguous_formats() -> Result<()> {
