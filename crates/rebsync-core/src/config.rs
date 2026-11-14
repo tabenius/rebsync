@@ -19,6 +19,7 @@ pub struct Config {
     pub mneme: MnemeConfig,
     pub frog: crate::frog::FrogConfig,
     pub agenda: crate::agenda::AgendaConfig,
+    pub git_layer: crate::gitlayer::GitLayerConfig,
     pub reconcile: Reconcile,
     pub fleet: Fleet,
     pub command_timeout_seconds: u64,
@@ -165,6 +166,7 @@ impl Config {
             mneme: MnemeConfig::default(),
             frog: Default::default(),
             agenda: Default::default(),
+            git_layer: Default::default(),
             reconcile: Reconcile {
                 write_instructions: true,
             },
@@ -207,6 +209,7 @@ impl Config {
         for (name, label, chunk) in [
             ("frog", &self.frog.label, self.frog.chunk_bytes),
             ("agenda", &self.agenda.label, self.agenda.chunk_bytes),
+            ("git_layer", &"repo".to_string(), self.git_layer.chunk_bytes),
         ] {
             crate::layer::validate_label(label).map_err(|e| anyhow::anyhow!("{name}.{e}"))?;
             if !(4096..=64 * 1024 * 1024).contains(&chunk) || !chunk.is_multiple_of(4096) {

@@ -834,6 +834,7 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
     for (name, enabled) in [
         ("frog", config.frog.enabled),
         ("agenda", config.agenda.enabled),
+        ("git", config.git_layer.enabled),
     ] {
         if !enabled {
             continue;
@@ -842,6 +843,8 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
             json!({"name":name,"kind":name,"status":"planned"})
         } else if name == "frog" {
             crate::frog::run_layer(config, &mut journal)
+        } else if name == "git" {
+            crate::gitlayer::run_layer(config, &mut journal)
         } else {
             crate::agenda::run_layer(config, &mut journal)
         };

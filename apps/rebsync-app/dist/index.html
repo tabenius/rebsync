@@ -147,10 +147,10 @@
   </section>
 
   <section id="layers-section" hidden>
-    <h2>Frog &amp; agenda snapshots</h2>
+    <h2>Frog, agenda &amp; git snapshots</h2>
     <div id="layers"></div>
     <p class="small muted">Validated owner exports synced from rebsync (<code>rebsync peer push</code>):
-      Frog's coordination database and Daily Agenda editions.</p>
+      Frog's coordination database, Daily Agenda editions and Git history for offline exchange.</p>
   </section>
 
   <p class="small muted" style="text-align:center">rebsync · RAGBAZ · data stays on this device unless you share it</p>
@@ -244,7 +244,7 @@ function renderOverview(o) {
   } else { $("#mneme-section").hidden = true; }
   const layers = o.layers || [];
   $("#layers-section").hidden = layers.length === 0;
-  const names = { frog: "Frog · AGENTS.db", agenda: "Daily Agenda editions" };
+  const names = { frog: "Frog · AGENTS.db", agenda: "Daily Agenda editions", git: "Git history bundles" };
   $("#layers").innerHTML = layers.map((l) => `
     <div class="vol">
       <div class="row spread"><b>${esc(names[l.layer] ?? l.layer)}</b><span class="tag">${l.snapshots} snapshots</span></div>
