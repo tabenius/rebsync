@@ -72,6 +72,9 @@ fn push_to_phone_then_pull_to_another_machine() {
 
     let pulled = peer::pull(&laptop, &client(), &peer::default_prefixes(), &mut journal).unwrap();
     assert_eq!(pulled.transferred, pushed.transferred);
+    // Every newly pulled snapshot was checked chunk by chunk.
+    assert_eq!(pulled.verified.len(), 2, "{pulled:?}");
+    assert!(pulled.clean());
     // The laptop can reassemble both snapshots, byte for byte.
     let manifest = layer::load(&laptop, "frog", &frog_id).unwrap();
     let out = t.path().join("restored");

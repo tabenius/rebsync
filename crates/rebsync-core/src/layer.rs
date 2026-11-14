@@ -747,3 +747,158 @@ pub fn prune(
     report.bytes_freed = sweep.iter().map(|m| m.size).sum();
     Ok(report)
 }
+
+/// Result of checking one snapshot's structure and content.
+#[derive(Debug, Serialize)]
+pub struct SnapshotCheck {
+    pub layer: String,
+    pub key: String,
+    pub ok: bool,
+    pub files: usize,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct FsckReport {
+    pub snapshots_checked: usize,
+    pub snapshots_ok: usize,
+    pub failures: Vec<SnapshotCheck>,
+    pub bytes_verified: u64,
+    pub orphan_chunks: usize,
+    pub note: &'static str,
+}
+
+/// Files of a manifest in either format: Mneme's single-file layout
+/// (`sha256`, `bytes`, `chunks`) or the multi-file layer layout.
+fn manifest_files(layer: &str, key: &str, value: &Value) -> Result<Vec<LayerFile>> {
+    match value.get("schema").and_then(Value::as_str) {
+        Some(SNAPSHOT_SCHEMA) => {
+            let manifest: SnapshotManifest = serde_json::from_value(value.clone())?;
+            let id = key
+                .strip_prefix(&format!("{}/snapshots/", prefix(layer)))
+                .and_then(|r| r.strip_suffix(".json"))
+                .context("manifest key outside the layer")?;
+            check_manifest(&manifest, layer, id)?;
+            Ok(manifest.files)
+        }
+        Some("rebsync.mneme.snapshot.v1") if layer == "mneme" => {
+            let chunks: Vec<Chunk> = serde_json::from_value(
+                value
+                    .get("chunks")
+                    .cloned()
+                    .context("mneme manifest without chunks")?,
+            )?;
+            let file = LayerFile {
+                path: "mneme-index.sqlite".into(),
+                sha256: value
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .filter(|d| valid_sha256(d))
+                    .context("mneme manifest without a valid sha256")?
+                    .into(),
+                bytes: value
+                    .get("bytes")
+                    .and_then(Value::as_u64)
+                    .context("mneme manifest without bytes")?,
+                chunks,
+            };
+            ensure!(
+                file.chunks.iter().map(|c| c.size).sum::<u64>() == file.bytes,
+                "chunk sizes do not add up"
+            );
+            Ok(vec![file])
+        }
+        other => bail!("unsupported manifest schema {other:?}"),
+    }
+}
+
+/// Stream every chunk of one snapshot and check chunk and whole-file digests.
+/// Reads only; nothing is written.
+pub fn check_snapshot(storage: &dyn ObjectStorage, layer: &str, key: &str) -> SnapshotCheck {
+    let mut check = SnapshotCheck {
+        layer: layer.into(),
+        key: key.into(),
+        ok: false,
+        files: 0,
+        bytes: 0,
+        error: None,
+    };
+    let result = (|| -> Result<(usize, u64)> {
+        let value: Value = serde_json::from_slice(&storage.get(&ObjectKey::parse(key)?)?)
+            .context("manifest is not JSON")?;
+        let files = manifest_files(layer, key, &value)?;
+        let mut total = 0;
+        for file in &files {
+            let mut whole = Sha256::new();
+            for (index, chunk) in file.chunks.iter().enumerate() {
+                let data = storage
+                    .get(&chunk_key(&prefix(layer), &chunk.sha256)?)
+                    .with_context(|| format!("{}: chunk {index} missing", file.path))?;
+                ensure!(
+                    data.len() as u64 == chunk.size
+                        && format!("{:x}", Sha256::digest(&data)) == chunk.sha256,
+                    "{}: chunk {index} ({}) is damaged",
+                    file.path,
+                    chunk.sha256
+                );
+                whole.update(&data);
+            }
+            ensure!(
+                format!("{:x}", whole.finalize()) == file.sha256,
+                "{}: whole-file digest does not match",
+                file.path
+            );
+            total += file.bytes;
+        }
+        Ok((files.len(), total))
+    })();
+    match result {
+        Ok((files, bytes)) => {
+            check.ok = true;
+            check.files = files;
+            check.bytes = bytes;
+        }
+        Err(error) => check.error = Some(format!("{error:#}")),
+    }
+    check
+}
+
+/// Check every snapshot of the given layers. Owner validation (SQLite
+/// integrity, edition manifests) remains `rebsync <layer> verify`.
+pub fn fsck(storage: &dyn ObjectStorage, layers: &[&str]) -> Result<FsckReport> {
+    let mut report = FsckReport {
+        note: "Structural check: every chunk and file digest. Owner validation is `rebsync <layer> verify ID`.",
+        ..Default::default()
+    };
+    for layer in layers {
+        validate_layer(layer)?;
+        let mut live = std::collections::BTreeSet::new();
+        for meta in storage.list_prefix(&format!("{}/snapshots/", prefix(layer)), 0)? {
+            if !meta.key.ends_with(".json") {
+                continue;
+            }
+            let check = check_snapshot(storage, layer, &meta.key);
+            report.snapshots_checked += 1;
+            if check.ok {
+                report.snapshots_ok += 1;
+                report.bytes_verified += check.bytes;
+                if let Ok(value) =
+                    serde_json::from_slice::<Value>(&storage.get(&ObjectKey::parse(&meta.key)?)?)
+                {
+                    live.extend(referenced_chunks(&value).unwrap_or_default());
+                }
+            } else {
+                report.failures.push(check);
+            }
+        }
+        if report.failures.iter().all(|f| f.layer != *layer) {
+            report.orphan_chunks += storage
+                .list_prefix(&format!("{}/chunks/sha256/", prefix(layer)), 0)?
+                .iter()
+                .filter(|m| !live.contains(m.key.rsplit('/').next().unwrap_or_default()))
+                .count();
+        }
+    }
+    Ok(report)
+}

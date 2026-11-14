@@ -154,3 +154,17 @@ fn prune_understands_mneme_manifests_and_shared_chunks() -> Result<()> {
     assert_eq!(mneme::list(&storage, None)?.len(), 1);
     Ok(())
 }
+
+#[test]
+fn fsck_reads_mneme_manifests() -> Result<()> {
+    use rebsync_core::layer;
+    let t = tempfile::tempdir()?;
+    let config = setup(t.path())?;
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let mut journal = Journal::open(t.path())?;
+    mneme::publish(&config, &storage, &mut journal)?;
+    let report = layer::fsck(&storage, &["mneme"])?;
+    assert_eq!((report.snapshots_checked, report.snapshots_ok), (1, 1));
+    assert_eq!(report.bytes_verified, 200 * 1024);
+    Ok(())
+}
