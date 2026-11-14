@@ -260,6 +260,33 @@ In `--apply` runs these layers report `backed-up` (restic succeeded),
 `backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
 layer instead.
 
+## Retention (`prune`)
+
+Snapshots are kept until you prune them. Pruning matters after
+`mneme erase`, because older snapshots still contain the erased sessions.
+
+```bash
+rebsync mneme prune --keep-last 7                  # dry run: shows what would go
+rebsync frog prune --keep-last 3 --keep-days 14 --apply
+rebsync agenda prune --label local --keep-last 30 --apply
+```
+
+- **Dry-run by default.** `--apply` deletes, and the deletion is journaled.
+- **What is kept.** For each label, the newest `--keep-last` snapshots (at least
+  one) and anything newer than `--keep-days`. `--label` limits pruning to one
+  label.
+- **Order of deletion.** Manifests go first. Chunks go after them, and only
+  chunks that no surviving snapshot references and that are older than
+  `--grace-minutes` (default 60).
+- **No partial views.** If any manifest can't be read, nothing is pruned,
+  because its chunks might still be in use.
+- **Locking.** Publish and prune take the same per-layer lock, so they never
+  interleave.
+- **Local only.** Peers keep their own copies, and `rebsync peer pull` would
+  bring pruned snapshots back. Prune the phone's copies separately, or don't
+  pull from it afterwards. Restic snapshots of the same data are untouched;
+  remove those with `restic forget --prune`.
+
 ## Phone sync (Rebekah)
 
 `rebsync peer` exchanges layer objects with the Rebekah Android app's
@@ -371,8 +398,8 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
 - No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
   resume engine. Peer sync is manual (`rebsync peer`), local-network and
   unencrypted; there is no discovery, scheduling or TLS yet.
-- The Mneme layer has no retention policy or garbage collection yet; `rebsync
-  mneme stats` reports orphans but nothing removes them.
+- Retention is manual (`rebsync <layer> prune`); there is no scheduled policy, and
+  pruning is not propagated to peers or restic.
 - No USB enrollment, phone transport, Bluetooth or mesh autodiscovery yet.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.
