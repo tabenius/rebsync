@@ -161,6 +161,7 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
                 "checks": ["create-if-absent", "readback", "range", "head", "raw-prefix-listing", "delete"],
                 "capabilities": {
                     "atomic_create_if_absent": capabilities.atomic_create_if_absent,
+                    "owner_only_permissions": capabilities.owner_only_permissions,
                     "durable_publication": capabilities.durable_publication,
                     "range_reads": capabilities.range_reads,
                     "raw_prefix_listing": capabilities.raw_prefix_listing,
@@ -173,8 +174,9 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
         println!("Probe: {key} ({} bytes, created={created})", head.size);
         println!("Checks: create-if-absent, readback, range, head, listing, delete");
         println!(
-            "Capabilities: atomic_create={}, durable_publication={}, range={}, raw_prefix_listing={}",
+            "Capabilities: atomic_create={}, owner_only={}, durable_publication={}, range={}, raw_prefix_listing={}",
             capabilities.atomic_create_if_absent,
+            capabilities.owner_only_permissions,
             capabilities.durable_publication,
             capabilities.range_reads,
             capabilities.raw_prefix_listing

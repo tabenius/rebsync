@@ -1,32 +1,314 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rebsync</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.5; }
-      code { background: #eee; padding: 0.1rem 0.3rem; }
-      #result { word-break: break-all; }
-    </style>
-  </head>
-  <body>
-    <h1>Rebsync</h1>
-    <p>Android shell for the local preservation core.</p>
-    <label>Object key <input id="key" value="probes/android" /></label>
-    <button id="check">Validate key</button>
-    <p id="result"></p>
-    <script>
-      const result = document.querySelector("#result");
-      document.querySelector("#check").addEventListener("click", async () => {
-        const key = document.querySelector("#key").value;
-        try {
-          const validated = await window.__TAURI__.core.invoke("validate_key", { key });
-          result.textContent = `accepted: ${validated}`;
-        } catch (error) {
-          result.textContent = `rejected: ${error}`;
-        }
-      });
-    </script>
-  </body>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>RAGBAZ Rebekah</title>
+<style>
+  :root {
+    --ink: #0e1621; --ink-2: #16212f; --ink-3: #1f2c3d; --line: #2a3a50;
+    --paper: #f4efe6; --muted: #9aa6b6; --amber: #e8a33d; --amber-2: #f3c27a;
+    --ok: #5cc98a; --warn: #f0b04a; --bad: #ef6b6b;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ink); color: var(--paper);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 0 16px; }
+  .mark { width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--amber);
+    display: grid; place-items: center; font: 700 20px Georgia, serif; color: var(--paper); flex: none; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .02em; }
+  header h1 span { color: var(--amber); font-weight: 800; letter-spacing: .08em; }
+  header small { color: var(--muted); display: block; font-size: 12px; }
+  section { background: var(--ink-2); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 14px 16px; margin-bottom: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: var(--amber-2);
+    margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .spread { justify-content: space-between; }
+  button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-3);
+    color: var(--paper); padding: 9px 14px; min-height: 40px; cursor: pointer; }
+  button.primary { background: var(--amber); color: var(--ink); border-color: var(--amber); font-weight: 650; }
+  button:disabled { opacity: .45; }
+  code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 12.5px; }
+  code { background: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px;
+    word-break: break-all; }
+  .switch { position: relative; width: 52px; height: 30px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: var(--ink-3); border: 1px solid var(--line);
+    border-radius: 30px; transition: .2s; }
+  .switch span::before { content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px;
+    background: var(--muted); border-radius: 50%; transition: .2s; }
+  .switch input:checked + span { background: var(--amber); border-color: var(--amber); }
+  .switch input:checked + span::before { transform: translateX(22px); background: var(--ink); }
+  .conn { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin-top: 10px;
+    display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+  .conn .qr { width: 112px; height: 112px; background: #fff; border-radius: 8px; padding: 4px; }
+  .conn .qr svg { width: 100%; height: 100%; display: block; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px;
+    background: var(--ink-3); border: 1px solid var(--line); color: var(--amber-2); }
+  .tag.ok { color: var(--ok); } .tag.warn { color: var(--warn); } .tag.bad { color: var(--bad); }
+  ul.clean { list-style: none; padding: 0; margin: 0; }
+  .client { padding: 9px 0; border-top: 1px solid var(--line); }
+  .client:first-child { border-top: 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(92,201,138,.18); }
+  .vol { border: 1px solid var(--line); border-radius: 12px; padding: 11px; margin-top: 10px; }
+  .vol.current { border-color: var(--amber); }
+  .bar { height: 8px; background: var(--ink); border-radius: 8px; overflow: hidden; margin: 8px 0 4px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--amber), var(--amber-2)); }
+  .bar.full > i { background: var(--bad); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .stat { background: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; }
+  .stat b { display: block; font-size: 18px; }
+  .note { border-left: 3px solid var(--warn); padding: 6px 10px; background: rgba(240,176,74,.08);
+    border-radius: 0 8px 8px 0; margin-top: 10px; font-size: 13px; }
+  .error { border-left-color: var(--bad); background: rgba(239,107,107,.1); }
+  .progress { margin-top: 12px; }
+  label.check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+  #toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    background: var(--paper); color: var(--ink); padding: 10px 16px; border-radius: 10px; font-size: 14px;
+    opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 90vw; }
+  #toast.show { opacity: 1; }
+  /* In-app splash: continues the native Android splash. */
+  #splash { position: fixed; inset: 0; background: var(--ink); display: grid; place-items: center;
+    z-index: 10; transition: opacity .5s ease; }
+  #splash.hide { opacity: 0; pointer-events: none; }
+  #splash .ring { width: 132px; height: 132px; border-radius: 50%; border: 3px solid var(--amber);
+    display: grid; place-items: center; font: 700 64px Georgia, serif; margin: 0 auto 26px;
+    animation: breathe 1.6s ease-in-out infinite; }
+  #splash .word { text-align: center; }
+  #splash .word b { display: block; font-size: 34px; letter-spacing: .22em; color: var(--amber);
+    font-weight: 800; animation: rise .7s ease both; }
+  #splash .word span { display: block; font-size: 20px; letter-spacing: .3em; color: var(--paper);
+    margin-top: 6px; animation: rise .7s .15s ease both; }
+  #splash .word small { display: block; margin-top: 18px; color: var(--muted); font-size: 12px;
+    letter-spacing: .08em; animation: rise .7s .3s ease both; }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 14px rgba(232,163,61,.08); } }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+</style>
+</head>
+<body>
+<div id="splash" aria-hidden="true">
+  <div>
+    <div class="ring">R</div>
+    <div class="word"><b>RAGBAZ</b><span>Rebekah</span><small>rebsync companion</small></div>
+  </div>
+</div>
+
+<main>
+  <header>
+    <div class="mark">R</div>
+    <div><h1><span>RAGBAZ</span> Rebekah</h1><small id="version">rebsync companion</small></div>
+  </header>
+
+  <section id="sharing">
+    <h2>Sharing <label class="switch"><input type="checkbox" id="share-toggle" /><span></span></label></h2>
+    <div id="share-off" class="muted small">Off. Turn on to let rebsync peers on a network you trust
+      read objects and add new ones. Nothing is ever overwritten or deleted by a peer.</div>
+    <div id="share-on" hidden>
+      <div class="row spread small"><span>Token <code id="token">••••••</code></span>
+        <span class="row"><button id="reveal">Show</button><button id="copy-token">Copy</button><button id="rotate">New token</button></span></div>
+      <div id="connections"></div>
+      <div class="note small">Plain HTTP on the local network: anyone on the same network can see the token.
+        Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Connected clients <span class="tag" id="client-count">0</span></h2>
+    <ul class="clean" id="clients"><li class="muted small">No peers yet.</li></ul>
+  </section>
+
+  <section>
+    <h2>Storage <button id="refresh" class="small">Refresh</button></h2>
+    <div class="stats">
+      <div class="stat"><span class="muted small">Objects</span><b id="objects">–</b></div>
+      <div class="stat"><span class="muted small">Stored</span><b id="object-bytes">–</b></div>
+      <div class="stat"><span class="muted small">Free here</span><b id="free-here">–</b></div>
+    </div>
+    <p class="small muted" style="margin:10px 0 0">Data root <code id="root">–</code></p>
+    <div id="warnings"></div>
+    <div id="move-progress" class="progress" hidden></div>
+    <label class="check" style="margin-top:12px"><input type="checkbox" id="remove-source" />
+      After a verified copy, remove the data from the old location</label>
+    <div id="volumes"></div>
+  </section>
+
+  <section id="mneme-section" hidden>
+    <h2>Mneme history snapshots</h2>
+    <div class="stats" id="mneme"></div>
+    <p class="small muted">Session-history snapshots published by <code>rebsync mneme</code>. They hold
+      private transcripts; keep this device locked.</p>
+  </section>
+
+  <p class="small muted" style="text-align:center">rebsync · RAGBAZ · data stays on this device unless you share it</p>
+</main>
+<div id="toast"></div>
+
+<script>
+const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const bytes = (n) => {
+  if (n == null) return "–";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; let v = n;
+  while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${u[i]}`;
+};
+const ago = (ms) => {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+};
+let toastTimer;
+const toast = (text) => { const t = $("#toast"); t.textContent = text; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2600); };
+const copy = async (text, what) => {
+  try { await navigator.clipboard.writeText(text); toast(`${what} copied`); }
+  catch { toast("Copy failed; long-press to select instead"); }
+};
+
+let revealed = null;
+let lastOverview = null;
+
+function renderOverview(o) {
+  lastOverview = o;
+  $("#version").textContent = `rebsync companion · v${o.app_version}`;
+  $("#share-toggle").checked = o.sharing;
+  $("#share-on").hidden = !o.sharing;
+  $("#share-off").hidden = o.sharing;
+  $("#token").textContent = revealed ?? `${o.token_hint}`;
+  const conns = o.connections.map((c) => `
+    <div class="conn">
+      <div>
+        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+        <div style="margin:6px 0"><code>${esc(c.url)}</code></div>
+        <div class="row small">
+          <button data-copy="${esc(c.pairing)}" data-what="Connection string">Copy connection string</button>
+          <button data-copy="curl -H 'Authorization: Bearer TOKEN' ${esc(c.url)}/v1/status" data-what="curl example">curl</button>
+        </div>
+      </div>
+      <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+    </div>`).join("");
+  $("#connections").innerHTML = o.sharing
+    ? (conns || `<div class="note">No network address. Join Wi-Fi, start a hotspot or enable USB tethering.</div>`)
+    : "";
+  $("#client-count").textContent = o.clients.filter((c) => c.active).length + " active";
+  $("#clients").innerHTML = o.clients.length ? o.clients.map((c) => `
+    <li class="client">
+      <div class="row spread"><span class="row"><i class="dot ${c.active ? "on" : ""}"></i><b class="mono">${esc(c.address)}</b>
+        ${c.authorized ? '<span class="tag ok">paired</span>' : '<span class="tag warn">not paired</span>'}
+        ${c.rejected ? `<span class="tag bad">${c.rejected} rejected</span>` : ""}</span>
+        <span class="muted small">${ago(c.last_seen_ms)}</span></div>
+      <div class="muted small">${c.requests} requests · ↓${bytes(c.bytes_in)} ↑${bytes(c.bytes_out)} · <span class="mono">${esc(c.last_request)}</span></div>
+      ${c.user_agent ? `<div class="muted small mono">${esc(c.user_agent)}</div>` : ""}
+    </li>`).join("") : `<li class="muted small">${o.sharing ? "Waiting for peers…" : "No peers yet. Turn on sharing first."}</li>`;
+  $("#objects").textContent = o.objects.toLocaleString() + (o.objects_truncated ? "+" : "");
+  $("#object-bytes").textContent = bytes(o.object_bytes);
+  $("#root").textContent = o.data_root;
+  $("#warnings").innerHTML = o.warnings.map((w) => `<div class="note">${esc(w)}</div>`).join("");
+  const m = o.moving;
+  const busy = ["scanning", "copying", "verifying", "switching", "cleaning"].includes(m.phase);
+  const box = $("#move-progress");
+  if (m.phase && m.phase !== "idle") {
+    box.hidden = false;
+    const pct = m.bytes_total ? Math.round((100 * m.bytes_done) / m.bytes_total) : (m.phase === "done" ? 100 : 0);
+    box.innerHTML = `
+      <div class="row spread small"><b>Move: ${esc(m.phase)}</b><span class="muted">${m.files_done}/${m.files_total} files · ${bytes(m.bytes_done)} of ${bytes(m.bytes_total)}</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      ${m.error ? `<div class="note error">${esc(m.error)}</div>` : ""}
+      ${m.phase === "done" ? `<div class="muted small">Verified and switched to ${esc(m.to)}${m.removed_source ? "; old copy removed." : "; old copy kept."}</div>` : ""}`;
+  } else { box.hidden = true; }
+  document.querySelectorAll("[data-move]").forEach((b) => (b.disabled = busy || b.dataset.current === "1"));
+  if (o.mneme) {
+    $("#mneme-section").hidden = false;
+    const s = o.mneme;
+    $("#mneme").innerHTML = `
+      <div class="stat"><span class="muted small">Snapshots</span><b>${s.snapshots}</b></div>
+      <div class="stat"><span class="muted small">Stored</span><b>${bytes(s.stored_bytes)}</b></div>
+      <div class="stat"><span class="muted small">Without dedup</span><b>${bytes(s.logical_bytes)}</b></div>
+      <div class="stat"><span class="muted small">Latest</span><b class="small">${esc(s.latest_created_at ? new Date(s.latest_created_at).toLocaleString() : "–")}</b></div>
+      ${s.missing_chunks ? `<div class="note error">${s.missing_chunks} chunks missing: snapshots cannot be restored.</div>` : ""}`;
+  } else { $("#mneme-section").hidden = true; }
+}
+
+function renderVolumes(list) {
+  const current = list.find((v) => v.current);
+  $("#free-here").textContent = current ? bytes(current.available_bytes) : "–";
+  $("#volumes").innerHTML = list.map((v) => {
+    const used = v.total_bytes ? 1 - (v.available_bytes ?? 0) / v.total_bytes : 0;
+    const icon = { internal: "Internal", shared: "Phone", sd: "SD card", usb: "USB", removable: "Removable", detected: "Detected" }[v.kind] ?? v.kind;
+    return `
+      <div class="vol ${v.current ? "current" : ""}">
+        <div class="row spread"><span class="row"><span class="tag">${esc(icon)}</span><b>${esc(v.label)}</b></span>
+          ${v.current ? '<span class="tag ok">current</span>' : ""}</div>
+        <div class="bar ${used > 0.92 ? "full" : ""}"><i style="width:${Math.round(used * 100)}%"></i></div>
+        <div class="row spread small"><span>${bytes(v.available_bytes)} free of ${bytes(v.total_bytes)}</span>
+          ${v.writable && !v.current ? `<button class="primary" data-move="${esc(v.path)}" data-current="0">Move data here</button>` : ""}
+          ${!v.writable ? '<span class="muted">read-only for Rebekah</span>' : ""}</div>
+        <div class="muted small mono" style="margin-top:4px;word-break:break-all">${esc(v.path)}</div>
+        ${v.note ? `<div class="muted small" style="margin-top:4px">${esc(v.note)}</div>` : ""}
+      </div>`;
+  }).join("");
+}
+
+async function refresh() {
+  try {
+    const [o, v] = await Promise.all([invoke("overview"), invoke("volumes")]);
+    renderOverview(o); renderVolumes(v);
+    if (lastOverview) document.querySelectorAll("[data-move]").forEach((b) => {
+      const m = lastOverview.moving; b.disabled = ["scanning","copying","verifying","switching","cleaning"].includes(m.phase);
+    });
+    return true;
+  } catch (e) { toast(String(e)); return false; }
+}
+
+document.addEventListener("click", async (event) => {
+  const t = event.target.closest("button");
+  if (!t) return;
+  if (t.dataset.copy) {
+    let text = t.dataset.copy;
+    if (text.includes("TOKEN")) text = text.replace("TOKEN", revealed ?? (await invoke("reveal_token")));
+    return copy(text, t.dataset.what);
+  }
+  if (t.dataset.move) {
+    const remove = $("#remove-source").checked;
+    const ok = confirm(`Copy all data to\n${t.dataset.move}\nverify every file${remove ? ", then delete the old copy" : ""}?\nPeer writes pause during the move.`);
+    if (!ok) return;
+    try { await invoke("move_data", { volume: t.dataset.move, removeSource: remove }); toast("Move started"); }
+    catch (e) { toast(String(e)); }
+    return refresh();
+  }
+});
+$("#share-toggle").addEventListener("change", async (e) => {
+  try { await invoke("set_sharing", { enabled: e.target.checked }); }
+  catch (err) { toast(String(err)); }
+  refresh();
+});
+$("#reveal").addEventListener("click", async () => {
+  revealed = revealed ? null : await invoke("reveal_token");
+  $("#reveal").textContent = revealed ? "Hide" : "Show";
+  refresh();
+});
+$("#copy-token").addEventListener("click", async () => copy(await invoke("reveal_token"), "Token"));
+$("#rotate").addEventListener("click", async () => {
+  if (!confirm("Create a new token? Paired peers must reconnect with the new one.")) return;
+  await invoke("rotate_token"); revealed = null; $("#reveal").textContent = "Show";
+  toast("New token active"); refresh();
+});
+$("#refresh").addEventListener("click", refresh);
+
+const started = Date.now();
+refresh().finally(() => {
+  // Keep the splash visible briefly so the hand-off from the native splash is smooth.
+  setTimeout(() => $("#splash").classList.add("hide"), Math.max(0, 1100 - (Date.now() - started)));
+});
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+</script>
+</body>
 </html>

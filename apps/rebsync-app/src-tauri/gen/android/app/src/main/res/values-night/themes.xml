@@ -1,6 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Rebekah is dark in both modes; keep the night theme identical. -->
     <style name="Theme.rebsync_app" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/rebekah_ink</item>
+        <item name="android:statusBarColor">@color/rebekah_ink</item>
+        <item name="android:navigationBarColor">@color/rebekah_ink</item>
     </style>
 </resources>

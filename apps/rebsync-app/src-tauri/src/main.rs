@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  rebsync_app_lib::run();
+    rebsync_app_lib::run();
 }

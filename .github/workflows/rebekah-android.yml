@@ -1,0 +1,76 @@
+name: Rebekah Android release
+# Builds the signed universal APK. Push a tag `rebekah-vX.Y.Z` to publish a
+# GitHub pre-release, or run manually to get the APK as a workflow artifact.
+#
+# Required repository secrets (never commit the keystore):
+#   REBEKAH_KEYSTORE_B64   base64 of the .jks file
+#   REBEKAH_STORE_PASSWORD
+#   REBEKAH_KEY_PASSWORD
+#   REBEKAH_KEY_ALIAS      (optional, defaults to "rebekah")
+on:
+  push:
+    tags: ["rebekah-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.2.12479018" > /dev/null
+      - name: Signing keystore from secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.REBEKAH_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "::error::REBEKAH_KEYSTORE_B64 secret is not set"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rebekah-release.jks"
+      - name: Build release APK
+        working-directory: apps/rebsync-app
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          REBEKAH_STORE_FILE: ${{ runner.temp }}/rebekah-release.jks
+          REBEKAH_STORE_PASSWORD: ${{ secrets.REBEKAH_STORE_PASSWORD }}
+          REBEKAH_KEY_PASSWORD: ${{ secrets.REBEKAH_KEY_PASSWORD }}
+          REBEKAH_KEY_ALIAS: ${{ secrets.REBEKAH_KEY_ALIAS || 'rebekah' }}
+        run: |
+          npm ci
+          npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
+      - name: Verify signature and collect
+        run: |
+          apk=apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk"
+          version="$(jq -r .version apps/rebsync-app/src-tauri/tauri.conf.json)"
+          mkdir dist
+          cp "$apk" "dist/rebekah-${version}-universal-release.apk"
+          (cd dist && sha256sum ./*.apk > "rebekah-${version}-universal-release.apk.sha256")
+          rm -f "$RUNNER_TEMP/rebekah-release.jks"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebekah-apk
+          path: dist/*
+      - name: Publish pre-release
+        if: startsWith(github.ref, 'refs/tags/rebekah-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --prerelease \
+            --title "RAGBAZ Rebekah ${GITHUB_REF_NAME#rebekah-v} (Android)" \
+            --notes "Signed universal APK (arm64, armv7, x86_64; Android 7+). Verify with apksigner verify --print-certs."

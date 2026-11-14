@@ -135,7 +135,12 @@ pub enum PutOutcome {
 /// as a library one.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageCapabilities {
+    /// False on filesystems without hard links (FAT/exFAT SD cards, USB
+    /// sticks, Android shared storage): create-if-absent then degrades to
+    /// check-then-rename, which is only safe with a single writer.
     pub atomic_create_if_absent: bool,
+    /// False where the filesystem ignores or refuses Unix permissions.
+    pub owner_only_permissions: bool,
     pub durable_publication: bool,
     pub range_reads: bool,
     pub raw_prefix_listing: bool,
@@ -216,6 +221,30 @@ mod object_store_fs {
         root: PathBuf,
         store: Arc<dyn ObjectStore>,
         runtime: tokio::runtime::Runtime,
+        hard_links: bool,
+        owner_only: bool,
+    }
+
+    /// Hard links back object_store's create-if-absent. Probe once per open
+    /// instead of failing every write on filesystems that lack them.
+    fn probe_hard_links(root: &Path) -> bool {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let source = root.join(format!(
+            ".rebsync-link-probe-{}-{nonce}",
+            std::process::id()
+        ));
+        let link = root.join(format!(
+            ".rebsync-link-probe-{}-{nonce}.link",
+            std::process::id()
+        ));
+        let supported =
+            std::fs::write(&source, b"probe").is_ok() && std::fs::hard_link(&source, &link).is_ok();
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&source);
+        supported
     }
 
     impl FsObjectStorage {
@@ -234,16 +263,20 @@ mod object_store_fs {
                 ))
             })?;
             #[cfg(unix)]
-            if created {
+            let owner_only = {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(requested, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| {
-                        StorageError::PermissionDenied(format!(
-                            "restrict storage root {}: {error}",
-                            requested.display()
-                        ))
-                    })?;
-            }
+                if created {
+                    // FAT/exFAT and Android shared storage refuse or ignore
+                    // chmod; record that instead of refusing removable media.
+                    let _ =
+                        std::fs::set_permissions(requested, std::fs::Permissions::from_mode(0o700));
+                }
+                std::fs::metadata(requested)
+                    .map(|meta| meta.permissions().mode() & 0o077 == 0)
+                    .unwrap_or(false)
+            };
+            #[cfg(not(unix))]
+            let owner_only = false;
             let canonical = std::fs::canonicalize(requested).map_err(|error| {
                 StorageError::Unavailable(format!(
                     "resolve storage root {}: {error}",
@@ -258,11 +291,21 @@ mod object_store_fs {
                 .map_err(|error| {
                     StorageError::Unavailable(format!("create storage runtime: {error}"))
                 })?;
+            let hard_links = probe_hard_links(&canonical);
             Ok(Self {
                 root: canonical,
                 store: Arc::new(store),
                 runtime,
+                hard_links,
+                owner_only,
             })
+        }
+
+        /// Test hook: behave as on a filesystem without hard links.
+        #[doc(hidden)]
+        pub fn without_hard_links(mut self) -> Self {
+            self.hard_links = false;
+            self
         }
 
         pub fn root(&self) -> &Path {
@@ -291,7 +334,8 @@ mod object_store_fs {
     impl ObjectStorage for FsObjectStorage {
         fn capabilities(&self) -> StorageCapabilities {
             StorageCapabilities {
-                atomic_create_if_absent: true,
+                atomic_create_if_absent: self.hard_links,
+                owner_only_permissions: self.owner_only,
                 durable_publication: true,
                 range_reads: true,
                 raw_prefix_listing: true,
@@ -309,6 +353,15 @@ mod object_store_fs {
         fn put_if_absent(&self, key: &ObjectKey, data: &[u8]) -> Result<PutOutcome, StorageError> {
             self.guard(key.as_str())?;
             let path = Self::path(key)?;
+            if !self.hard_links {
+                // Check-then-rename: atomic publication (staged rename) but
+                // not atomic against a concurrent creator. Single writer only.
+                return match self.head(key) {
+                    Ok(meta) => Ok(PutOutcome::AlreadyExists(meta)),
+                    Err(StorageError::NotFound(_)) => Ok(PutOutcome::Created(self.put(key, data)?)),
+                    Err(error) => Err(error),
+                };
+            }
             let options = PutOptions {
                 mode: PutMode::Create,
                 ..Default::default()
@@ -555,6 +608,36 @@ mod tests {
             Ok(PutOutcome::AlreadyExists(meta)) if meta.size == 5
         ));
         assert_eq!(storage.get(&key).unwrap(), b"first");
+    }
+
+    #[test]
+    fn create_if_absent_without_hard_links_still_never_replaces() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FsObjectStorage::open(directory.path().join("objects"))
+            .unwrap()
+            .without_hard_links();
+        assert!(!storage.capabilities().atomic_create_if_absent);
+        let key = ObjectKey::parse("claims/lease").unwrap();
+        assert!(matches!(
+            storage.put_if_absent(&key, b"first"),
+            Ok(PutOutcome::Created(_))
+        ));
+        assert!(matches!(
+            storage.put_if_absent(&key, b"second"),
+            Ok(PutOutcome::AlreadyExists(meta)) if meta.size == 5
+        ));
+        assert_eq!(storage.get(&key).unwrap(), b"first");
+        // No probe files are left in the root.
+        assert!(storage.list_prefix("", 0).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn normal_filesystems_report_atomic_create_and_owner_only() {
+        let (_directory, storage) = adapter();
+        let capabilities = storage.capabilities();
+        assert!(capabilities.atomic_create_if_absent);
+        #[cfg(unix)]
+        assert!(capabilities.owner_only_permissions);
     }
 
     #[cfg(unix)]
