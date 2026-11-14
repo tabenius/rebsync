@@ -43,6 +43,26 @@ chunk_bytes = 65536
 restic = true
 timeout_seconds = 900
 
+[frog]
+# Frog's AGENTS.db via `frog snapshot`, validated read-only before publication.
+enabled = false
+binary = "frog"
+# db = "/data/src/AGENTS.db"
+python = "python3"
+label = "local"
+chunk_bytes = 65536
+restic = true
+timeout_seconds = 600
+
+[agenda]
+# Daily Agenda editions, verified against their own manifest.json.
+enabled = false
+path = "/srv/ragbaz/reports/daily-agenda"
+label = "local"
+chunk_bytes = 65536
+restic = true
+require_ready = true
+
 [reconcile]
 write_instructions = true
 

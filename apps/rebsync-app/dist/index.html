@@ -146,6 +146,13 @@
       private transcripts; keep this device locked.</p>
   </section>
 
+  <section id="layers-section" hidden>
+    <h2>Frog &amp; agenda snapshots</h2>
+    <div id="layers"></div>
+    <p class="small muted">Validated owner exports synced from rebsync (<code>rebsync peer push</code>):
+      Frog's coordination database and Daily Agenda editions.</p>
+  </section>
+
   <p class="small muted" style="text-align:center">rebsync · RAGBAZ · data stays on this device unless you share it</p>
 </main>
 <div id="toast"></div>
@@ -235,6 +242,16 @@ function renderOverview(o) {
       <div class="stat"><span class="muted small">Latest</span><b class="small">${esc(s.latest_created_at ? new Date(s.latest_created_at).toLocaleString() : "–")}</b></div>
       ${s.missing_chunks ? `<div class="note error">${s.missing_chunks} chunks missing: snapshots cannot be restored.</div>` : ""}`;
   } else { $("#mneme-section").hidden = true; }
+  const layers = o.layers || [];
+  $("#layers-section").hidden = layers.length === 0;
+  const names = { frog: "Frog · AGENTS.db", agenda: "Daily Agenda editions" };
+  $("#layers").innerHTML = layers.map((l) => `
+    <div class="vol">
+      <div class="row spread"><b>${esc(names[l.layer] ?? l.layer)}</b><span class="tag">${l.snapshots} snapshots</span></div>
+      <div class="row spread small" style="margin-top:6px"><span>${bytes(l.stored_bytes)} stored · ${bytes(l.logical_bytes)} without dedup</span>
+        <span class="muted">${esc(l.latest_created_at ? new Date(l.latest_created_at).toLocaleString() : "")}</span></div>
+      ${l.missing_chunks ? `<div class="note error">${l.missing_chunks} chunks missing: those snapshots cannot be restored.</div>` : ""}
+    </div>`).join("");
 }
 
 function renderVolumes(list) {

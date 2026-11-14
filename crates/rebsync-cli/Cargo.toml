@@ -6,8 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["storage"]
+default = ["storage", "peer"]
 storage = ["rebsync-core/storage-object-store"]
+peer = ["storage", "rebsync-core/peer-http"]
 
 [[bin]]
 name = "rebsync"

@@ -89,7 +89,7 @@ default if preservation failed or is unconfigured.
 Ignored files, Git LFS payloads, nested submodule contents, reflog-only objects,
 external Git alternates and live databases need additional owner-specific backup
 policies. Selected quiescent directories can be declared as `backup.datasets`.
-Agenda editions are currently blocked pending an owner-validator adapter.
+Agenda editions and the Frog database have their own owner-validated layers (see below).
 
 A filesystem restic repository may be useful for tests or an enrolled USB drive,
 but rebsync does not assert that it is independent of this machine. It never
@@ -200,6 +200,96 @@ but no repository) keep the exit code at `2`. The object store holds plaintext
 transcripts owner-only (`0700`); treat it like the index itself. `--mneme-db`
 overrides `mneme.db` for one invocation.
 
+## Frog and agenda layers
+
+The same owner-export pattern as the Mneme layer, stored under `frog/v1/…` and
+`agenda/v1/…` (content-addressed chunks, then an immutable manifest).
+
+**Frog (`AGENTS.db`).** `frog --db DB --json snapshot --dest <private staging>`
+makes a consistent copy with SQLite's online backup API. (As always, Frog also
+records a `workspace.snapshot` event in the live database.) Frog has no snapshot
+validator, so Rebsync checks the copy itself, through Python's standard `sqlite3`
+module opened read-only and immutable:
+
+- `PRAGMA integrity_check`;
+- that Frog's core tables are present (`schema_migrations`, `repos`, `agents`,
+  `locks`, `tasks`, `event_log`);
+- the applied migrations and row counts are recorded in the manifest.
+
+A copy that fails any check is never published. `restore` writes only a new
+file and refuses an existing path, including the live database and its
+`-wal`/`-shm` files. Swapping a restored database into place is a deliberate
+step you take on the Frog side.
+
+**Agenda editions.** The generator commits `manifest.json`
+(`ragbaz.daily-agenda-manifest.v1`) last, under an exclusive `.publish.lock`, and
+that manifest is the owner's validator. Rebsync copies an edition as follows:
+
+1. It takes a shared lock on `.publish.lock`, so an edition is never copied
+   while it is being replaced.
+2. It copies every listed file plus the manifest.
+3. It re-verifies each SHA-256 and size on the private copy.
+
+Only `ready` editions are published unless `require_ready = false`. `restore`
+recreates the edition in a new directory and checks it again.
+
+```toml
+[frog]
+enabled = true
+# binary = "frog"           # PATH lookup
+# db = "/data/src/AGENTS.db"
+# python = "python3"        # runs the read-only validator
+label = "local"
+restic = true
+
+[agenda]
+enabled = true
+path = "/srv/ragbaz/reports/daily-agenda"
+label = "local"
+restic = true
+require_ready = true
+```
+
+```bash
+rebsync frog publish | list | stats | verify ID | restore ID --into /new/AGENTS.db
+rebsync agenda publish | list | stats | verify ID | restore ID --into /new/edition
+```
+
+In `--apply` runs these layers report `backed-up` (restic succeeded),
+`published-local`, `blocked` or `failed`, exactly like Mneme. A
+`backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
+layer instead.
+
+## Phone sync (Rebekah)
+
+`rebsync peer` exchanges layer objects with the Rebekah Android app's
+`rebsync-peer/0` endpoint. Copy the connection string from the app's Sharing
+card. Pass it through `REBSYNC_PEER` so the token stays out of shell history:
+
+```bash
+export REBSYNC_PEER='rebsync+http://192.168.1.42:8787/v1?token=…'
+rebsync peer status                  # what the phone holds, per layer
+rebsync peer push                    # this machine → phone
+rebsync peer pull --layer frog       # phone → this machine, Frog only
+```
+
+- **Additive only.** An object present on both sides is never replaced. A size
+  mismatch is reported as a conflict, and the command exits `2`. Nothing is
+  ever deleted.
+- **Chunks travel before manifests,** so an interrupted sync never leaves a
+  snapshot whose data is missing. Running it again finishes the job; a repeat
+  sync of an up-to-date phone transfers nothing.
+- **Pulled data is untrusted:**
+  - Each chunk is re-hashed against its address.
+  - Manifests must parse.
+  - Only `mneme/`, `frog/` and `agenda/` objects are accepted.
+  - Rejected objects are listed and never stored.
+
+  Run `rebsync <layer> verify ID` before relying on a pulled snapshot.
+- **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
+  hotspot or USB tethering. Listings page with `after=`, which needs Rebekah
+  0.2.1 or later; older apps produce a clear error.
+
 ## Android compile check
 
 `apps/rebsync-app` is a small Tauri 2 shell that exercises the shared storage
@@ -278,8 +368,9 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   multipart and peer negotiation are not implemented yet.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
-- No automatic GitHub creation/forking, Frog discovery adapter, consistent remote
-  SQLite export, agenda validator, AI execution, resume engine or peer protocol.
+- No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
+  resume engine. Peer sync is manual (`rebsync peer`), local-network and
+  unencrypted; there is no discovery, scheduling or TLS yet.
 - The Mneme layer has no retention policy or garbage collection yet; `rebsync
   mneme stats` reports orphans but nothing removes them.
 - No USB enrollment, phone transport, Bluetooth or mesh autodiscovery yet.

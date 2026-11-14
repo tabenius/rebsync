@@ -1,8 +1,13 @@
 //! Preservation-first orchestration. No terminal I/O belongs in this crate.
+pub mod agenda;
 pub mod config;
+pub mod frog;
 pub mod inventory;
 pub mod journal;
+pub mod layer;
 pub mod mneme;
+#[cfg(feature = "peer-http")]
+pub mod peer;
 pub mod process;
 pub mod storage;
 pub mod sync;

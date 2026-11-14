@@ -79,6 +79,73 @@ enum Action {
         #[command(subcommand)]
         command: MnemeAction,
     },
+    /// Frog coordination database (AGENTS.db) layer.
+    Frog {
+        #[command(subcommand)]
+        command: LayerAction,
+    },
+    /// Daily Agenda edition layer.
+    Agenda {
+        #[command(subcommand)]
+        command: LayerAction,
+    },
+    /// Exchange layer objects with a Rebekah phone (rebsync-peer/0).
+    Peer {
+        #[command(subcommand)]
+        command: PeerAction,
+    },
+}
+#[derive(Subcommand)]
+enum LayerAction {
+    /// Export through the owner, validate, and publish now.
+    Publish,
+    /// List published snapshots, oldest first.
+    List {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Read-only storage accounting.
+    Stats,
+    /// Reassemble, check every chunk and validate as the owner would.
+    Verify { id: String },
+    /// Restore into a new file (frog) or directory (agenda); never overwrites.
+    Restore {
+        id: String,
+        #[arg(long)]
+        into: PathBuf,
+    },
+}
+#[derive(Args)]
+struct PeerTargetArgs {
+    /// Connection string from the app (rebsync+http://HOST:PORT/v1?token=…);
+    /// defaults to $REBSYNC_PEER so the token stays out of shell history.
+    connection: Option<String>,
+    /// File holding the token, when the connection has none.
+    #[arg(long)]
+    token_file: Option<PathBuf>,
+}
+#[derive(Subcommand)]
+enum PeerAction {
+    /// Check the peer and show what it holds per layer.
+    Status {
+        #[command(flatten)]
+        target: PeerTargetArgs,
+    },
+    /// Copy local layer objects the peer lacks (never overwrites).
+    Push {
+        #[command(flatten)]
+        target: PeerTargetArgs,
+        /// Restrict to these layers (mneme, frog, agenda); default all.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+    },
+    /// Copy the peer's layer objects this store lacks (never overwrites).
+    Pull {
+        #[command(flatten)]
+        target: PeerTargetArgs,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+    },
 }
 #[derive(Subcommand)]
 enum MnemeAction {
@@ -269,6 +336,178 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
     Ok(0)
 }
 
+#[cfg(feature = "storage")]
+fn layer_action(
+    config: &rebsync_core::Config,
+    layer: &str,
+    action: LayerAction,
+    json: bool,
+) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, agenda, frog, journal::Journal, layer as layers};
+
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let restic = if layer == "frog" {
+        config.frog.restic
+    } else {
+        config.agenda.restic
+    };
+    let value = match action {
+        LayerAction::List { label } => {
+            let items: Vec<_> = layers::list(&storage, layer, label.as_deref())?
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({"id": m.id, "created_at": m.created_at, "files": m.files.len(),
+                        "bytes": m.bytes(), "digest": m.digest, "owner": m.owner})
+                })
+                .collect();
+            if !json {
+                for item in &items {
+                    println!(
+                        "{}  {} files  {} bytes",
+                        item["id"].as_str().unwrap_or_default(),
+                        item["files"],
+                        item["bytes"]
+                    );
+                }
+                return Ok(0);
+            }
+            serde_json::json!({ "snapshots": items })
+        }
+        LayerAction::Stats => {
+            let stats = layers::stats(&storage, layer)?;
+            let code = if stats.missing_chunks > 0 { 2 } else { 0 };
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+            return Ok(code);
+        }
+        LayerAction::Publish => {
+            if restic && config.backup.repository.is_none() {
+                bail!(
+                    "{layer}.restic requires backup.repository; set {layer}.restic = false to publish locally only"
+                );
+            }
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let outcome = if layer == "frog" {
+                frog::publish(config, &storage, &mut journal)?
+            } else {
+                agenda::publish(config, &storage, &mut journal)?
+            };
+            serde_json::to_value(outcome)?
+        }
+        LayerAction::Verify { id } => {
+            if layer == "frog" {
+                let mut journal = Journal::open(&config.rebekah_home)?;
+                frog::verify(config, &storage, &id, &mut journal)?
+            } else {
+                agenda::verify(config, &storage, &id)?
+            }
+        }
+        LayerAction::Restore { id, into } => {
+            let into = if into.is_absolute() {
+                into
+            } else {
+                std::env::current_dir()?.join(into)
+            };
+            if layer == "frog" {
+                let mut journal = Journal::open(&config.rebekah_home)?;
+                frog::restore(config, &storage, &id, &into, &mut journal)?
+            } else {
+                agenda::restore(&storage, &id, &into)?
+            }
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(0)
+}
+
+#[cfg(not(feature = "storage"))]
+fn layer_action(_: &rebsync_core::Config, _: &str, _: LayerAction, _: bool) -> Result<i32> {
+    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+}
+
+#[cfg(feature = "peer")]
+fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer};
+
+    let target_of = |args: &PeerTargetArgs| -> Result<peer::Target> {
+        let connection = args
+            .connection
+            .clone()
+            .or_else(|| std::env::var("REBSYNC_PEER").ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("give the app's connection string or set REBSYNC_PEER")
+            })?;
+        let token = args
+            .token_file
+            .as_ref()
+            .map(std::fs::read_to_string)
+            .transpose()?
+            .map(|t| t.trim().to_owned());
+        peer::parse_connection(&connection, token.as_deref())
+    };
+    let prefixes = |layers_: &[String]| -> Result<Vec<String>> {
+        if layers_.is_empty() {
+            return Ok(peer::default_prefixes());
+        }
+        layers_
+            .iter()
+            .map(|l| {
+                if layers::LAYERS.contains(&l.as_str()) {
+                    Ok(format!("{l}/"))
+                } else {
+                    bail!("unknown layer {l}; use mneme, frog or agenda")
+                }
+            })
+            .collect()
+    };
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let (report, code) = match action {
+        PeerAction::Status { target } => {
+            let remote = peer::Peer::connect(target_of(&target)?);
+            let status = remote.status()?;
+            let mut per_layer = serde_json::Map::new();
+            for prefix in peer::default_prefixes() {
+                let objects = remote.list(&prefix)?;
+                per_layer.insert(
+                    prefix.trim_end_matches('/').into(),
+                    serde_json::json!({"objects": objects.len(), "bytes": objects.values().sum::<u64>(),
+                        "snapshots": objects.keys().filter(|k| k.contains("/snapshots/")).count()}),
+                );
+            }
+            (serde_json::json!({"peer": status, "layers": per_layer}), 0)
+        }
+        PeerAction::Push { target, layers } => {
+            let remote = peer::Peer::connect(target_of(&target)?);
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let report = peer::push(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
+            let code = if report.conflicts.is_empty() && report.rejected.is_empty() {
+                0
+            } else {
+                2
+            };
+            (serde_json::to_value(report)?, code)
+        }
+        PeerAction::Pull { target, layers } => {
+            let remote = peer::Peer::connect(target_of(&target)?);
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let report = peer::pull(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
+            let code = if report.conflicts.is_empty() && report.rejected.is_empty() {
+                0
+            } else {
+                2
+            };
+            (serde_json::to_value(report)?, code)
+        }
+    };
+    let _ = json; // Sync reports are always JSON: they are meant to be read and diffed.
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(code)
+}
+
+#[cfg(not(feature = "peer"))]
+fn peer_action(_: &rebsync_core::Config, _: PeerAction, _: bool) -> Result<i32> {
+    bail!("rebsync was built without the peer feature; rebuild with --features peer")
+}
+
 #[cfg(not(feature = "storage"))]
 fn mneme_action(_config: &rebsync_core::Config, _action: MnemeAction, _json: bool) -> Result<i32> {
     bail!("rebsync was built without the storage feature; rebuild with --features storage")
@@ -338,6 +577,13 @@ fn entry() -> Result<i32> {
             StorageAction::Check => return storage_check(&config.config, cli.json),
         },
         Some(Action::Mneme { command }) => return mneme_action(&config.config, command, cli.json),
+        Some(Action::Frog { command }) => {
+            return layer_action(&config.config, "frog", command, cli.json);
+        }
+        Some(Action::Agenda { command }) => {
+            return layer_action(&config.config, "agenda", command, cli.json);
+        }
+        Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
         None => {}
     }
     let summary = rebsync_core::run(&config.config, RunOptions { apply: cli.apply })?;
