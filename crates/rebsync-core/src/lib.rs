@@ -2,6 +2,7 @@
 pub mod config;
 pub mod inventory;
 pub mod journal;
+pub mod mneme;
 pub mod process;
 pub mod storage;
 pub mod sync;

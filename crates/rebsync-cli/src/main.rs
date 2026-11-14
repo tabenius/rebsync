@@ -53,6 +53,9 @@ struct Common {
     /// Root for Rebsync-managed objects; relative paths resolve against Rebekah home.
     #[arg(long, global = true)]
     storage_root: Option<PathBuf>,
+    /// Mneme index passed to `mneme --db`; relative paths resolve against Rebekah home.
+    #[arg(long, global = true)]
+    mneme_db: Option<PathBuf>,
 }
 #[derive(Subcommand)]
 enum Action {
@@ -70,6 +73,29 @@ enum Action {
     Storage {
         #[command(subcommand)]
         command: StorageAction,
+    },
+    /// Mneme session-history layer: owner-exported index snapshots in object storage.
+    Mneme {
+        #[command(subcommand)]
+        command: MnemeAction,
+    },
+}
+#[derive(Subcommand)]
+enum MnemeAction {
+    /// Export a consistent snapshot through mneme and publish it now.
+    Publish,
+    /// List published snapshots, oldest first.
+    List {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Reassemble a snapshot, check every chunk, and run mneme's validator.
+    Verify { id: String },
+    /// Restore a snapshot into a new index; never overwrites an existing one.
+    Restore {
+        id: String,
+        #[arg(long)]
+        into: PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -155,6 +181,73 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "storage")]
+fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, journal::Journal, mneme};
+
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let value = match action {
+        MnemeAction::List { label } => {
+            let items: Vec<_> = mneme::list(&storage, label.as_deref())?
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "created_at": m.created_at,
+                        "bytes": m.bytes,
+                        "chunks": m.chunks.len(),
+                        "sha256": m.sha256,
+                        "generation": m.owner.get("generation"),
+                        "counts": m.owner.get("counts"),
+                    })
+                })
+                .collect();
+            if !json {
+                for item in &items {
+                    println!(
+                        "{}  {} bytes  {} chunks",
+                        item["id"].as_str().unwrap_or_default(),
+                        item["bytes"],
+                        item["chunks"]
+                    );
+                }
+                return Ok(0);
+            }
+            serde_json::json!({ "snapshots": items })
+        }
+        MnemeAction::Publish => {
+            if config.mneme.restic && config.backup.repository.is_none() {
+                bail!(
+                    "mneme.restic requires backup.repository; set mneme.restic = false to publish locally only"
+                );
+            }
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let outcome = mneme::publish(config, &storage, &mut journal)?;
+            serde_json::to_value(outcome)?
+        }
+        MnemeAction::Verify { id } => {
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            mneme::verify(config, &storage, &id, &mut journal)?
+        }
+        MnemeAction::Restore { id, into } => {
+            let mut journal = Journal::open(&config.rebekah_home)?;
+            let into = if into.is_absolute() {
+                into
+            } else {
+                std::env::current_dir()?.join(into)
+            };
+            mneme::restore(config, &storage, &id, &into, &mut journal)?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(0)
+}
+
+#[cfg(not(feature = "storage"))]
+fn mneme_action(_config: &rebsync_core::Config, _action: MnemeAction, _json: bool) -> Result<i32> {
+    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+}
+
 #[cfg(not(feature = "storage"))]
 fn storage_check(_config: &rebsync_core::Config, _json: bool) -> Result<i32> {
     bail!("rebsync was built without the storage feature; rebuild with --features storage")
@@ -185,6 +278,7 @@ fn entry() -> Result<i32> {
         backup_repository: cli.common.backup_repository,
         password_file: cli.common.password_file,
         storage_root: cli.common.storage_root,
+        mneme_db: cli.common.mneme_db,
     })?;
     match cli.command {
         Some(Action::Config { .. }) => {
@@ -217,6 +311,7 @@ fn entry() -> Result<i32> {
             }
             StorageAction::Check => return storage_check(&config.config, cli.json),
         },
+        Some(Action::Mneme { command }) => return mneme_action(&config.config, command, cli.json),
         None => {}
     }
     let summary = rebsync_core::run(&config.config, RunOptions { apply: cli.apply })?;

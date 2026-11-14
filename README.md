@@ -130,6 +130,58 @@ rejected, and symlinked path ancestors are refused. Filesystem publication is
 fsynced. Deletion exists for storage administration only: no synchronization
 policy propagates repository deletions between peers.
 
+## Mneme layer (session-history index)
+
+[Mneme](https://github.com/tabenius/mneme)'s index is a live SQLite WAL database,
+which repository snapshots and `directory` datasets refuse. This layer never
+copies the live files. Mneme owns the format, so Rebsync asks it to export and
+to validate:
+
+1. `mneme snapshot create` writes a consistent `VACUUM INTO` copy, runs
+   `integrity_check`, and reports schema, generation, counts and SHA-256.
+2. Rebsync re-hashes the file itself and publishes it into the object store as
+   fixed-size, content-addressed chunks plus an immutable manifest:
+
+   ```text
+   mneme/v1/chunks/sha256/<aa>/<sha256>
+   mneme/v1/snapshots/<label>/<UTC stamp>-<sha12>.json
+   ```
+
+   Chunks are create-if-absent and written before the manifest. Nothing is
+   overwritten or deleted. An unchanged index re-exports byte-identically and
+   reuses every chunk; after heavy changes `VACUUM` reorders pages, so expect
+   little reuse rather than incremental deltas.
+3. With `mneme.restic = true` (the default) the verified export and its manifest
+   are also backed up through the encrypted restic repository.
+
+```toml
+[mneme]
+enabled = true            # publish during --apply runs
+binary = "mneme"          # PATH lookup; paths resolve against rebekah_home
+# db = "/private/mneme/index.sqlite"   # else mneme's default / MNEME_DB
+label = "local"           # one key segment naming this history store
+chunk_bytes = 4194304     # 64 KiB..64 MiB
+restic = true             # requires backup.repository
+timeout_seconds = 900
+```
+
+```bash
+rebsync mneme publish                 # export + publish now (journaled)
+rebsync mneme list [--label local] [--json]
+rebsync mneme verify local/20261114T112650.973Z-d7af0bf4f612
+rebsync mneme restore ID --into /private/new/index.sqlite
+```
+
+`verify` reassembles into private staging, checks every chunk digest and the
+whole-file digest, then runs `mneme snapshot verify --sha256`. `restore` does
+the same and calls `mneme snapshot restore`, which refuses an existing index.
+
+In `--apply` runs the layer reports `backed-up` only when restic succeeded.
+`published-local` (object store only, same disk) and `blocked` (restic requested
+but no repository) keep the exit code at `2`. The object store holds plaintext
+transcripts owner-only (`0700`); treat it like the index itself. `--mneme-db`
+overrides `mneme.db` for one invocation.
+
 ## Android compile check
 
 `apps/rebsync-app` is a small Tauri 2 shell that exercises the shared storage
@@ -210,6 +262,8 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, consistent remote
   SQLite export, agenda validator, AI execution, resume engine or peer protocol.
+- Mneme layer chunks are fixed-size, not content-defined; no retention policy
+  or garbage collection of unreferenced chunks exists yet.
 - No USB enrollment, phone transport, Bluetooth or mesh autodiscovery yet.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.
