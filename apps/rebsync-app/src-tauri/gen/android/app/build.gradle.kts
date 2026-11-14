@@ -14,8 +14,37 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing, never committed: REBEKAH_KEYSTORE_PROPERTIES names a
+// properties file (storeFile, storePassword, keyAlias, keyPassword), else
+// ./keystore.properties (gitignored), else REBEKAH_STORE_FILE and friends in
+// the environment for CI. Without any of them the release APK is unsigned.
+val releaseSigning = Properties().apply {
+    val named = System.getenv("REBEKAH_KEYSTORE_PROPERTIES")?.let { file(it) }
+    val local = rootProject.file("keystore.properties")
+    when {
+        named != null && named.exists() -> named.inputStream().use { load(it) }
+        local.exists() -> local.inputStream().use { load(it) }
+        System.getenv("REBEKAH_STORE_FILE") != null -> {
+            setProperty("storeFile", System.getenv("REBEKAH_STORE_FILE"))
+            setProperty("storePassword", System.getenv("REBEKAH_STORE_PASSWORD") ?: "")
+            setProperty("keyAlias", System.getenv("REBEKAH_KEY_ALIAS") ?: "rebekah")
+            setProperty("keyPassword", System.getenv("REBEKAH_KEY_PASSWORD") ?: "")
+        }
+    }
+}
+
 android {
     compileSdk = 37
+    if (releaseSigning.getProperty("storeFile") != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseSigning.getProperty("storeFile"))
+                storePassword = releaseSigning.getProperty("storePassword")
+                keyAlias = releaseSigning.getProperty("keyAlias")
+                keyPassword = releaseSigning.getProperty("keyPassword")
+            }
+        }
+    }
     namespace = "com.tabenius.rebsync"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -40,6 +69,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             optimization {
                enable = true
             }
@@ -75,6 +105,8 @@ rust {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
+    implementation("androidx.core:core-splashscreen:1.0.1")
+    implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")
