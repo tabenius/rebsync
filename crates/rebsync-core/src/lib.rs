@@ -10,6 +10,8 @@ pub mod layer;
 pub mod mneme;
 pub mod peer;
 pub mod process;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod storage;
 pub mod sync;
 #[cfg(feature = "peer-transport")]

@@ -94,6 +94,21 @@ enum Action {
         #[command(subcommand)]
         command: GitAction,
     },
+    /// Serve a read-only instructions and status page (HTTPS on localhost by
+    /// default) and announce it via Avahi/mDNS and D-Bus where available.
+    Serve {
+        #[arg(long, default_value_t = 8790)]
+        port: u16,
+        /// Address to listen on; 0.0.0.0 shares the page on the local network.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// Serve plain HTTP instead of HTTPS with the self-signed certificate.
+        #[arg(long)]
+        plain_http: bool,
+        /// Do not announce via zeroconf or D-Bus.
+        #[arg(long)]
+        no_announce: bool,
+    },
     /// Exchange layer objects with a Rebekah phone (rebsync-peer/0).
     Peer {
         #[command(subcommand)]
@@ -614,6 +629,32 @@ fn git_action(_: &rebsync_core::Config, _: GitAction, _: bool) -> Result<i32> {
     bail!("rebsync was built without the storage feature; rebuild with --features storage")
 }
 
+#[cfg(feature = "serve")]
+fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptions) -> Result<i32> {
+    use rebsync_core::FsObjectStorage;
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let running = rebsync_core::serve::start(config, &options)?;
+    eprintln!("rebsync serving {}", running.url);
+    if let Some(fingerprint) = &running.fingerprint {
+        eprintln!("self-signed certificate SHA-256 {fingerprint}");
+    }
+    for a in &running.announcements {
+        eprintln!(
+            "  {} {}: {}",
+            if a.ok { "✓" } else { "·" },
+            a.mechanism,
+            a.detail
+        );
+    }
+    running.wait(config, &storage);
+    Ok(0)
+}
+
+#[cfg(not(feature = "serve"))]
+fn serve(_: &rebsync_core::Config, _: ()) -> Result<i32> {
+    bail!("rebsync was built without the serve feature; rebuild with --features serve")
+}
+
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
     use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer, transport};
@@ -839,6 +880,25 @@ fn entry() -> Result<i32> {
         }
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
         Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
+        Some(Action::Serve {
+            port,
+            bind,
+            plain_http,
+            no_announce,
+        }) => {
+            #[cfg(feature = "serve")]
+            let options = rebsync_core::serve::ServeOptions {
+                bind,
+                port,
+                tls: !plain_http,
+                announce: !no_announce,
+            };
+            #[cfg(not(feature = "serve"))]
+            let options = {
+                let _ = (port, bind, plain_http, no_announce);
+            };
+            return serve(&config.config, options);
+        }
         None => {}
     }
     let summary = rebsync_core::run(&config.config, RunOptions { apply: cli.apply })?;

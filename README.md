@@ -132,9 +132,11 @@ validators run through `rebsync <layer> verify ID`.
 readback, range read, HEAD and raw-prefix listing, then deletes it. It never touches
 the restic repository. Keys are limited to ASCII letters, digits, `.`, `-`, `_`
 and `/`; empty segments, traversal, leading/trailing slashes and overlong keys are
-rejected, and symlinked path ancestors are refused. Filesystem publication is
-fsynced. Deletion exists for storage administration only: no synchronization
-policy propagates repository deletions between peers.
+rejected, and symlinks at any key component, including the leaf, are refused.
+Filesystem publication is fsynced. Deletion exists for storage administration
+only: no synchronization policy propagates repository deletions between peers.
+A manifest received from a peer is removed only when its own snapshot check
+fails, so damaged metadata is not advertised as restorable.
 
 ## Mneme layer (session-history index)
 
@@ -266,6 +268,38 @@ In `--apply` runs these layers report `backed-up` (restic succeeded),
 `backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
 layer instead.
 
+## Instructions page (`rebsync serve`)
+
+```bash
+rebsync serve                        # https://localhost:8790/ (self-signed)
+rebsync serve --bind 0.0.0.0         # share the page on the local network and announce it
+rebsync serve --plain-http --port 8080 --no-announce
+```
+
+- **What it shows.** A read-only page with live status built from the
+  effective configuration: Rebekah home, object store, whether a backup is
+  configured, and the fleet authority. Each layer appears with its `--apply`
+  state, snapshot count, freshness and storage use, followed by everyday,
+  phone-sync and offline-git recipes. `/v1/status` returns the same as JSON;
+  `/healthz` is for probes.
+- **No secrets.** The backup repository URL is redacted, and tokens and
+  password files are never read. The page is served with
+  `Content-Security-Policy: default-src 'none'`.
+- **HTTPS.** HTTPS is the default. On first use rebsync generates a
+  self-signed certificate for `localhost`, `127.0.0.1`, `::1` and
+  `<hostname>.local`, and stores it owner-only under `.rebekah/rebsync/tls/`.
+  It prints the certificate's SHA-256 fingerprint, so you can check a
+  browser's warning instead of clicking through it.
+- **Announcement.** When bound beyond localhost, rebsync advertises
+  `_rebsync._tcp` (TXT `path=/`, `scheme=https|http`). It tries the system
+  Avahi daemon first (`avahi-publish-service`, which talks to Avahi over
+  D-Bus), then falls back to a built-in mDNS responder. It also posts a
+  desktop notification over the D-Bus session bus when one exists. Each
+  mechanism reports `✓` or why not; none is required. Bound to localhost,
+  it deliberately does not advertise on the network.
+- **Path exposure.** On the network the page shows this machine's paths and
+  layer status. Share it only where that is fine.
+
 ## Git layer (offline exchange)
 
 For when GitHub is down, blocked, or out of reach for weeks or months. Each
@@ -379,11 +413,44 @@ rebsync peer pull --layer frog       # phone → this machine, Frog only
   - Rejected objects are listed and never stored.
 
   Each newly pulled snapshot is then checked chunk by chunk (`verified` /
-  `verification_failed` in the report; failures exit `2`). Owner validation
+  `verification_failed` in the report; failures exit `2`). A newly received
+  manifest that fails this check is removed again (`quarantined`) so a damaged
+  snapshot is never listed as if it were restorable. Owner validation
   (SQLite integrity, edition manifests) is still `rebsync <layer> verify ID`.
 - **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
   hotspot or USB tethering. Listings page with `after=`, which needs Rebekah
   0.2.1 or later; older apps produce a clear error.
+
+### Local transports (`rebsync-peer/1`)
+
+For same-host or relayed links, `rebsync peer` can also speak a frame protocol
+over TCP, Unix stream sockets and Unix datagram sockets. The sync rules, layer
+filtering and verification are identical; only the wire changes.
+
+```bash
+# Serve this object store to another local process.
+rebsync peer serve --listen unix:///run/user/1000/rebsync.sock --token-file ~/.rebsync/token
+rebsync peer serve --listen tcp://127.0.0.1:8787 --token-file ~/.rebsync/token
+
+# Point status/push/pull at a local transport.
+export REBSYNC_PEER='rebsync+tcp://127.0.0.1:8787?token=…'
+rebsync peer status
+
+# Exercise TCP, Unix stream and Unix datagram loopback end to end.
+rebsync peer selftest
+```
+
+- **Authentication is one shared token.** It is compared in constant time and
+  must be 1–256 ASCII letters or digits. `--token-file` refuses a group- or
+  world-readable file; Unix sockets are created owner-only.
+- **Encryption is the transport's job.** TCP is not encrypted. `serve` warns
+  when a listen address is reachable beyond this host. Put a tunnel or a
+  loopback-only bridge in front of a public path; rebsync does not speak TLS.
+- **Bounded and additive.** Frames, listings, datagrams and reassembly have
+  explicit size and time limits. `put` is still create-if-absent, and the
+  server re-checks keys and chunk digests before writing.
+- **No mesh integration.** A relay must expose one of these sockets; rebsync
+  does not talk to OSHI or other mesh APIs directly.
 
 ## Android compile check
 
@@ -465,10 +532,12 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
   resume engine. Peer sync is manual (`rebsync peer`), local-network and
-  unencrypted; there is no discovery, scheduling or TLS yet.
+  unencrypted; it can use HTTP or the local TCP/Unix transports, but there is no
+  discovery, scheduling or TLS yet.
 - Retention is manual (`rebsync <layer> prune`); there is no scheduled policy, and
   pruning is not propagated to peers or restic.
-- No USB enrollment, phone transport, Bluetooth or mesh autodiscovery yet.
+- No USB enrollment, Bluetooth or mesh autodiscovery. Phone sync remains a
+  manual HTTP connection or an explicit local-transport bridge.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.
 
