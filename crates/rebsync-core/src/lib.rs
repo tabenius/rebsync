@@ -8,11 +8,12 @@ pub mod inventory;
 pub mod journal;
 pub mod layer;
 pub mod mneme;
-#[cfg(feature = "peer-http")]
 pub mod peer;
 pub mod process;
 pub mod storage;
 pub mod sync;
+#[cfg(feature = "peer-transport")]
+pub mod transport;
 
 pub use config::{Config, ConfigOverrides, EffectiveConfig, load_config};
 pub use inventory::{Inventory, Repository, discover};

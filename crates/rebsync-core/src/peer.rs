@@ -1,4 +1,4 @@
-//! Client for `rebsync-peer/0`, the object endpoint served by the Rebekah app.
+//! Object exchange with a peer, independent of how the bytes travel.
 //!
 //! `push` copies local layer objects the peer lacks; `pull` copies the peer's
 //! objects this store lacks. Both are additive: an object present on both
@@ -7,6 +7,11 @@
 //! manifest whose chunks are missing. Everything received from a peer is
 //! untrusted: content-addressed chunks are re-hashed, manifests must parse and
 //! validate, and only layer prefixes are accepted.
+//!
+//! The sync logic talks to [`PeerApi`]. The Rebekah app speaks
+//! `rebsync-peer/0` over HTTP ([`Peer`], feature `peer-http`); the local
+//! transports in [`crate::transport`] speak `rebsync-peer/1` over TCP, Unix
+//! stream sockets or Unix datagram sockets.
 
 use crate::{
     journal::Journal,
@@ -17,12 +22,29 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Read, time::Duration};
+use std::collections::BTreeMap;
+#[cfg(feature = "peer-http")]
+use std::{io::Read, time::Duration};
 
 pub const PROTOCOL: &str = "rebsync-peer/0";
+#[cfg(feature = "peer-http")]
 const PAGE: usize = 5000;
+#[cfg(feature = "peer-http")]
 const MAX_OBJECT: u64 = 64 * 1024 * 1024;
 
+/// The operations `push` and `pull` need from any peer transport.
+pub trait PeerApi {
+    /// Human-readable, token-free description used in journals and reports.
+    fn base(&self) -> &str;
+    fn status(&self) -> Result<Value>;
+    /// Every key under `prefix`, paged internally.
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>>;
+    fn get(&self, key: &str) -> Result<Vec<u8>>;
+    /// Create-if-absent on the peer. Returns true when created.
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool>;
+}
+
+#[cfg(feature = "peer-http")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     /// `http://host:port`, without a trailing slash.
@@ -32,6 +54,7 @@ pub struct Target {
 
 /// Parse `rebsync+http://host:port/v1?token=T` (as shown by the app) or a
 /// plain `http://host:port` plus a separately supplied token.
+#[cfg(feature = "peer-http")]
 pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<Target> {
     let raw = connection.trim();
     let raw = raw.strip_prefix("rebsync+").unwrap_or(raw);
@@ -65,12 +88,14 @@ pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<Target>
     })
 }
 
+#[cfg(feature = "peer-http")]
 pub struct Peer {
     agent: ureq::Agent,
     target: Target,
     page: usize,
 }
 
+#[cfg(feature = "peer-http")]
 fn encode(value: &str) -> String {
     value
         .bytes()
@@ -81,6 +106,7 @@ fn encode(value: &str) -> String {
         .collect()
 }
 
+#[cfg(feature = "peer-http")]
 impl Peer {
     pub fn connect(target: Target) -> Self {
         let agent = ureq::AgentBuilder::new()
@@ -201,10 +227,35 @@ impl Peer {
     }
 }
 
+#[cfg(feature = "peer-http")]
+impl PeerApi for Peer {
+    fn base(&self) -> &str {
+        &self.target.base
+    }
+
+    fn status(&self) -> Result<Value> {
+        Peer::status(self)
+    }
+
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        Peer::list(self, prefix)
+    }
+
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        Peer::get(self, key)
+    }
+
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        Peer::put(self, key, bytes)
+    }
+}
+
+#[cfg(feature = "peer-http")]
 fn encode_key(key: &str) -> String {
     key.split('/').map(encode).collect::<Vec<_>>().join("/")
 }
 
+#[cfg(feature = "peer-http")]
 fn describe(error: ureq::Error) -> anyhow::Error {
     match error {
         ureq::Error::Status(401, _) => anyhow::anyhow!("peer rejected the token (401)"),
@@ -240,6 +291,8 @@ pub struct SyncReport {
     pub verified: Vec<String>,
     /// Pull only: newly received snapshots that are incomplete or damaged.
     pub verification_failed: Vec<String>,
+    /// Pull only: damaged manifests removed again so they are never listed.
+    pub quarantined: Vec<String>,
 }
 
 impl SyncReport {
@@ -249,7 +302,7 @@ impl SyncReport {
 }
 
 /// Accept only layer objects, and check what can be checked before storing.
-fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
+pub(crate) fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
     ObjectKey::parse(key)?;
     let layer = key.split('/').next().unwrap_or_default();
     ensure!(
@@ -269,6 +322,21 @@ fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
     } else {
         bail!("unexpected object outside chunks/ and snapshots/");
     }
+    Ok(())
+}
+
+/// Layer-only key check for reads; the content is not available yet.
+pub(crate) fn admissible_key(key: &str) -> Result<()> {
+    ObjectKey::parse(key)?;
+    let layer = key.split('/').next().unwrap_or_default();
+    ensure!(
+        layer::LAYERS.contains(&layer) && key.starts_with(&format!("{layer}/v1/")),
+        "not a layer object"
+    );
+    ensure!(
+        key.contains("/chunks/") || key.contains("/snapshots/"),
+        "unexpected object outside chunks/ and snapshots/"
+    );
     Ok(())
 }
 
@@ -292,7 +360,7 @@ fn local_listing(storage: &dyn ObjectStorage, prefix: &str) -> Result<BTreeMap<S
 
 pub fn push(
     storage: &dyn ObjectStorage,
-    peer: &Peer,
+    peer: &dyn PeerApi,
     prefixes: &[String],
     journal: &mut Journal,
 ) -> Result<SyncReport> {
@@ -328,13 +396,13 @@ pub fn push(
             report.transferred_bytes += bytes.len() as u64;
         }
     }
-    journal.event("peer-push", &peer.target.base, json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len()}))?;
+    journal.event("peer-push", peer.base(), json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len()}))?;
     Ok(report)
 }
 
 pub fn pull(
     storage: &dyn ObjectStorage,
-    peer: &Peer,
+    peer: &dyn PeerApi,
     prefixes: &[String],
     journal: &mut Journal,
 ) -> Result<SyncReport> {
@@ -385,12 +453,24 @@ pub fn pull(
         if check.ok {
             report.verified.push(key);
         } else {
-            report
-                .verification_failed
-                .push(format!("{key}: {}", check.error.unwrap_or_default()));
+            let error = check.error.unwrap_or_default();
+            // This manifest was created by this pull and did not exist locally
+            // before. Removing it is not deletion propagation: it keeps a
+            // damaged snapshot from being listed as if it were restorable.
+            match storage.delete(&ObjectKey::parse(&key)?) {
+                Ok(()) => {
+                    report.quarantined.push(key.clone());
+                    report
+                        .verification_failed
+                        .push(format!("{key}: {error} (manifest removed)"));
+                }
+                Err(delete_error) => report.verification_failed.push(format!(
+                    "{key}: {error}; could not remove manifest: {delete_error}"
+                )),
+            }
         }
     }
-    journal.event("peer-pull", &peer.target.base, json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len()}))?;
+    journal.event("peer-pull", peer.base(), json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len(),"verified":report.verified.len(),"quarantined":report.quarantined.len()}))?;
     Ok(report)
 }
 
@@ -403,6 +483,7 @@ pub fn default_prefixes() -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "peer-http")]
     #[test]
     fn parses_app_connection_strings() {
         let t = parse_connection("rebsync+http://192.168.1.42:8787/v1?token=abc123", None).unwrap();

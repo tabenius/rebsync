@@ -203,6 +203,23 @@ enum PeerAction {
         #[arg(long = "layer")]
         layers: Vec<String>,
     },
+    /// Serve this store over local transports (rebsync-peer/1).
+    Serve(ServeArgs),
+    /// Push, pull and verify a tiny snapshot over every local transport.
+    Selftest,
+}
+#[derive(Args)]
+struct ServeArgs {
+    /// Listen address; repeat for several. tcp://HOST:PORT, unix:///path or
+    /// unix-dgram:///path.
+    #[arg(long = "listen", required = true)]
+    listen: Vec<String>,
+    /// File holding the shared token; must not be group- or world-readable.
+    #[arg(long)]
+    token_file: PathBuf,
+    /// Remove an existing socket path. A live server is never replaced.
+    #[arg(long)]
+    replace_stale: bool,
 }
 #[derive(Subcommand)]
 enum MnemeAction {
@@ -257,27 +274,39 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
         .unwrap_or_default();
     let key = ObjectKey::parse(&format!("_probes/check-{}-{nonce}", std::process::id()))?;
     let payload = b"rebsync storage probe";
-    let created = matches!(
-        storage.put_if_absent(&key, payload)?,
-        PutOutcome::Created(_)
-    );
-    if storage.get(&key)? != payload {
-        bail!("probe readback mismatch at {key}");
-    }
-    if storage.get_range(&key, 0..4)? != b"rebs" {
-        bail!("probe range read mismatch at {key}");
-    }
-    let head = storage.head(&key)?;
-    if head.size != payload.len() as u64 {
-        bail!("probe size mismatch: {} != {}", head.size, payload.len());
-    }
-    if !storage
-        .list_prefix("_probes/", 0)?
-        .iter()
-        .any(|meta| meta.key == key.as_str())
-    {
-        bail!("probe missing from raw-prefix listing");
-    }
+    // Run every check in a closure so a failure still reaches cleanup. A probe
+    // left behind on an error path would masquerade as stored data.
+    let checks = (|| -> Result<(bool, u64)> {
+        let created = matches!(
+            storage.put_if_absent(&key, payload)?,
+            PutOutcome::Created(_)
+        );
+        if storage.get(&key)? != payload {
+            bail!("probe readback mismatch at {key}");
+        }
+        if storage.get_range(&key, 0..4)? != b"rebs" {
+            bail!("probe range read mismatch at {key}");
+        }
+        let head = storage.head(&key)?;
+        if head.size != payload.len() as u64 {
+            bail!("probe size mismatch: {} != {}", head.size, payload.len());
+        }
+        if !storage
+            .list_prefix("_probes/", 0)?
+            .iter()
+            .any(|meta| meta.key == key.as_str())
+        {
+            bail!("probe missing from raw-prefix listing");
+        }
+        Ok((created, head.size))
+    })();
+    let (created, size) = match checks {
+        Ok(values) => values,
+        Err(error) => {
+            let _ = storage.delete(&key);
+            return Err(error);
+        }
+    };
     storage.delete(&key)?;
     if !matches!(storage.head(&key), Err(StorageError::NotFound(_))) {
         bail!("probe still present after delete");
@@ -289,7 +318,7 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
                 "storage_root": config.storage.root,
                 "probe_key": key.as_str(),
                 "created_if_absent": created,
-                "bytes": head.size,
+                "bytes": size,
                 "checks": ["create-if-absent", "readback", "range", "head", "raw-prefix-listing", "delete"],
                 "capabilities": {
                     "atomic_create_if_absent": capabilities.atomic_create_if_absent,
@@ -303,7 +332,7 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
         );
     } else {
         println!("Storage root: {}", config.storage.root.display());
-        println!("Probe: {key} ({} bytes, created={created})", head.size);
+        println!("Probe: {key} ({size} bytes, created={created})");
         println!("Checks: create-if-absent, readback, range, head, listing, delete");
         println!(
             "Capabilities: atomic_create={}, owner_only={}, durable_publication={}, range={}, raw_prefix_listing={}",
@@ -587,23 +616,33 @@ fn git_action(_: &rebsync_core::Config, _: GitAction, _: bool) -> Result<i32> {
 
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
-    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer};
+    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer, transport};
+    use std::sync::{Arc, atomic::AtomicBool};
 
-    let target_of = |args: &PeerTargetArgs| -> Result<peer::Target> {
+    let connection = |args: &PeerTargetArgs| -> Result<(String, Option<String>)> {
         let connection = args
             .connection
             .clone()
             .or_else(|| std::env::var("REBSYNC_PEER").ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("give the app's connection string or set REBSYNC_PEER")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("give a connection target or set REBSYNC_PEER"))?;
         let token = args
             .token_file
             .as_ref()
-            .map(std::fs::read_to_string)
-            .transpose()?
-            .map(|t| t.trim().to_owned());
-        peer::parse_connection(&connection, token.as_deref())
+            .map(|path| transport::read_token_file(path))
+            .transpose()?;
+        Ok((connection, token))
+    };
+    let remote = |args: &PeerTargetArgs| -> Result<Box<dyn peer::PeerApi>> {
+        let (connection, token) = connection(args)?;
+        let trimmed = connection.trim();
+        let bare = trimmed.strip_prefix("rebsync+").unwrap_or(trimmed);
+        if bare.starts_with("http://") || bare.starts_with("https://") {
+            let target = peer::parse_connection(&connection, token.as_deref())?;
+            Ok(Box::new(peer::Peer::connect(target)))
+        } else {
+            let (target, token) = transport::parse_connection(&connection, token.as_deref())?;
+            Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
+        }
     };
     let prefixes = |layers_: &[String]| -> Result<Vec<String>> {
         if layers_.is_empty() {
@@ -620,10 +659,9 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             })
             .collect()
     };
-    let storage = FsObjectStorage::open(&config.storage.root)?;
-    let (report, code) = match action {
+    let (value, code) = match action {
         PeerAction::Status { target } => {
-            let remote = peer::Peer::connect(target_of(&target)?);
+            let remote = remote(&target)?;
             let status = remote.status()?;
             let mut per_layer = serde_json::Map::new();
             for prefix in peer::default_prefixes() {
@@ -637,22 +675,65 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             (serde_json::json!({"peer": status, "layers": per_layer}), 0)
         }
         PeerAction::Push { target, layers } => {
-            let remote = peer::Peer::connect(target_of(&target)?);
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let remote = remote(&target)?;
             let mut journal = Journal::open(&config.rebekah_home)?;
-            let report = peer::push(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
+            let report = peer::push(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
         PeerAction::Pull { target, layers } => {
-            let remote = peer::Peer::connect(target_of(&target)?);
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let remote = remote(&target)?;
             let mut journal = Journal::open(&config.rebekah_home)?;
-            let report = peer::pull(&storage, &remote, &prefixes(&layers)?, &mut journal)?;
+            let report = peer::pull(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
+            (serde_json::to_value(report)?, code)
+        }
+        PeerAction::Serve(args) => {
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let token = transport::read_token_file(&args.token_file)?;
+            let service =
+                transport::Service::new(Arc::new(storage), token, Arc::new(AtomicBool::new(false)));
+            let mut servers = Vec::new();
+            for listen in &args.listen {
+                let target = transport::Target::parse(listen)?;
+                if target.is_public() {
+                    eprintln!(
+                        "rebsync: warning: {} is reachable beyond this host and is not encrypted",
+                        target.describe()
+                    );
+                }
+                servers.push(transport::Server::bind(
+                    &target,
+                    service.clone(),
+                    args.replace_stale,
+                )?);
+            }
+            let serving: Vec<String> = servers
+                .iter()
+                .map(|server| server.target.describe())
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "protocol": transport::PROTOCOL,
+                    "serving": serving,
+                    "note": "Additive only: create-if-absent, no overwrite and no delete.",
+                }))?
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+        PeerAction::Selftest => {
+            let report = transport::selftest()?;
+            let code = if report.ok { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
     };
     let _ = json; // Sync reports are always JSON: they are meant to be read and diffed.
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(code)
 }
 

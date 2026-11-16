@@ -318,7 +318,7 @@ mod object_store_fs {
         }
 
         fn guard(&self, key: &str) -> Result<(), StorageError> {
-            ensure_no_symlink_ancestors(&self.root, key)
+            ensure_no_symlink_components(&self.root, key)
         }
 
         fn block_on<F, T>(&self, future: F) -> Result<T, StorageError>
@@ -477,15 +477,17 @@ mod object_store_fs {
         }
     }
 
-    /// Reject a symlink anywhere above a key so a hostile or accidental link
-    /// cannot redirect storage outside the dedicated root.
-    fn ensure_no_symlink_ancestors(root: &Path, key: &str) -> Result<(), StorageError> {
+    /// Reject a symlink at any key component, including the leaf, so a hostile
+    /// or accidental link cannot redirect storage outside the dedicated root.
+    /// The leaf matters: `get`, `put` and `head` all follow it, and a link
+    /// would otherwise read or write outside the root.
+    fn ensure_no_symlink_components(root: &Path, key: &str) -> Result<(), StorageError> {
         let segments: Vec<&str> = key
             .split('/')
             .filter(|segment| !segment.is_empty())
             .collect();
         let mut current = root.to_path_buf();
-        for segment in segments.iter().take(segments.len().saturating_sub(1)) {
+        for segment in segments {
             current.push(segment);
             match std::fs::symlink_metadata(&current) {
                 Ok(meta) if meta.file_type().is_symlink() => {
@@ -654,5 +656,31 @@ mod tests {
             Err(StorageError::PermissionDenied(_))
         ));
         assert!(!outside.join("secret").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let secret = outside.join("secret");
+        std::fs::write(&secret, b"outside").unwrap();
+        let storage = FsObjectStorage::open(directory.path().join("objects")).unwrap();
+        std::os::unix::fs::symlink(&secret, storage.root().join("leaf")).unwrap();
+        let key = ObjectKey::parse("leaf").unwrap();
+        for result in [
+            storage.put(&key, b"x").map(|_| ()),
+            storage.put_if_absent(&key, b"x").map(|_| ()),
+            storage.get(&key).map(|_| ()),
+            storage.head(&key).map(|_| ()),
+            storage.delete(&key),
+        ] {
+            assert!(
+                matches!(result, Err(StorageError::PermissionDenied(_))),
+                "followed symlinked leaf: {result:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&secret).unwrap(), b"outside");
     }
 }
