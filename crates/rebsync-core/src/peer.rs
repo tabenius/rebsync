@@ -420,6 +420,12 @@ pub fn pull(
         report.peer_objects += remote.len();
         let mut missing = Vec::new();
         for (key, size) in &remote {
+            if !key.starts_with(prefix) || admissible_key(key).is_err() {
+                report
+                    .rejected
+                    .push(format!("{key}: invalid or out-of-scope listing entry"));
+                continue;
+            }
             match local.get(key) {
                 Some(local_size) if local_size == size => report.already_present += 1,
                 Some(local_size) => report.conflicts.push(format!(
@@ -430,6 +436,12 @@ pub fn pull(
         }
         for key in ordered(missing) {
             let bytes = peer.get(&key)?;
+            if bytes.len() as u64 != remote[&key] {
+                report
+                    .rejected
+                    .push(format!("{key}: body size differs from listing"));
+                continue;
+            }
             if let Err(error) = admissible(&key, &bytes) {
                 report.rejected.push(format!("{key}: {error}"));
                 continue;
@@ -482,6 +494,57 @@ pub fn default_prefixes() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "storage-object-store")]
+    #[test]
+    fn pull_rejects_untrusted_listing_entries_before_fetching() {
+        use std::cell::RefCell;
+
+        struct ListedPeer {
+            items: BTreeMap<String, u64>,
+            fetched: RefCell<Vec<String>>,
+        }
+
+        impl PeerApi for ListedPeer {
+            fn base(&self) -> &str {
+                "test-peer"
+            }
+            fn status(&self) -> Result<Value> {
+                Ok(json!({}))
+            }
+            fn list(&self, _: &str) -> Result<BTreeMap<String, u64>> {
+                Ok(self.items.clone())
+            }
+            fn get(&self, key: &str) -> Result<Vec<u8>> {
+                self.fetched.borrow_mut().push(key.into());
+                Ok(b"chunk".to_vec())
+            }
+            fn put(&self, _: &str, _: &[u8]) -> Result<bool> {
+                panic!("pull must not write to peer")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(dir.path().join("objects")).unwrap();
+        let mut journal = Journal::open(dir.path()).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"chunk"));
+        let key = format!("frog/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+        let peer = ListedPeer {
+            items: BTreeMap::from([
+                ("agenda/v1/snapshots/desk/x.json".into(), 5),
+                ("frog/v1/stray".into(), 5),
+                ("frog/../escape".into(), 5),
+                (key.clone(), 99),
+            ]),
+            fetched: RefCell::new(Vec::new()),
+        };
+        let report = pull(&storage, &peer, &["frog/".into()], &mut journal).unwrap();
+        assert_eq!(report.rejected.len(), 4, "{report:?}");
+        assert_eq!(*peer.fetched.borrow(), vec![key]);
+        assert_eq!(report.transferred, 0);
+        assert!(!report.clean());
+        assert!(storage.list_prefix("", 0).unwrap().is_empty());
+    }
 
     #[cfg(feature = "peer-http")]
     #[test]
