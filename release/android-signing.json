@@ -1,0 +1,8 @@
+{
+  "schema": "ragbaz.android-signing/1",
+  "packageName": "com.tabenius.rebsync",
+  "certificateSha256": "3a111387c0767d9611c99d826e99d665ed5605b4e015f5f8433ec92f18db84a6",
+  "openpgpFingerprint": "266E9D54DD9C99B713C3743CB26A758A8EFD36F5",
+  "publicKey": "release/keys/rebekah-release-public-key.asc",
+  "note": "New release signing identity. Not update-compatible with the previously documented 60:24:5D certificate or debug builds."
+}

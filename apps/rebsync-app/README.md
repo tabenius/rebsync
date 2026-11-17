@@ -93,13 +93,63 @@ which is gitignored, or the variables `REBEKAH_STORE_FILE`,
 `REBEKAH_STORE_PASSWORD`, `REBEKAH_KEY_ALIAS` and `REBEKAH_KEY_PASSWORD` for CI.
 Never commit a keystore. Without one, the release APK is unsigned.
 
-CI release: push a tag `rebekah-vX.Y.Z` (after bumping `version` in
-`src-tauri/tauri.conf.json`). `.github/workflows/rebekah-android.yml` then builds,
-signs, verifies and publishes a pre-release with the APK and its SHA-256. It needs
+CI release: push an immutable tag `vX.Y.Z` (after bumping the app versions in
+`src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and its lock).
+`.github/workflows/rebekah-android.yml` builds, signs, verifies and publishes a
+candidate release with the APK, SHA-256 inventory, Android metadata and an exact
+`ragbaz.release/1` manifest signed using tag-bound GitHub Actions Sigstore OIDC.
+Manual dispatch also requires that tag ref; releases are never replaced. It needs
 the repository secrets `REBEKAH_KEYSTORE_B64`, `REBEKAH_STORE_PASSWORD`,
-`REBEKAH_KEY_PASSWORD` and `REBEKAH_KEY_ALIAS`. Use the same keystore that signed
-0.2.0 (certificate SHA-256 `60:24:5D:…:F9:A9`), or Android will refuse to update
-an existing install.
+`REBEKAH_KEY_PASSWORD` and `REBEKAH_KEY_ALIAS`. Local builds may instead keep the
+keystore entirely on the operator's machine. Never export a private GnuPG key or
+store its passphrase in CI; optional OpenPGP signing uses the local gpg-agent.
+
+The new public signing identity is pinned in `release/android-signing.json` at
+the repository root. It is **not compatible** with the previously documented
+0.2.0 signing certificate (`60:24:5D:…:F9:A9`) or debug installs. The new APK
+certificate SHA-256 is
+`3A:11:13:87:C0:76:7D:96:11:C9:9D:82:6E:99:D6:65:ED:56:05:B4:E0:15:F5:F8:43:3E:C9:2F:18:DB:84:A6`.
+Existing installations signed with another key cannot be upgraded in place.
+**Back up the object store before uninstalling**: uninstalling deletes app data.
+
+### Verified direct-download inventory
+
+From the repository root, after building the exact committed version tag:
+
+```bash
+RELEASE_TAG=v0.2.3 python3 scripts/prepare_android_release.py \
+  --apk apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+  --dist /path/to/new-release-directory \
+  --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
+  --aapt "$ANDROID_HOME/build-tools/37.0.0/aapt" \
+  --openpgp-sign
+```
+
+The optional last flag asks gpg-agent to sign `SHA256SUMS`; no passphrase file
+or private-key export is used. The owner's existing ASCII-armored public key is
+tracked in `release/keys/` and included in every prepared release. Fingerprint:
+`266E9D54DD9C99B713C3743CB26A758A8EFD36F5`. This OpenPGP identity is separate
+from the Android certificate and from the CI Sigstore identity. A locally
+signed inventory alone does not satisfy the website's CI Sigstore gate.
+
+The collector rejects debug builds, incorrect app versions/certificates and
+incomplete ABI sets. `android.json` records package ID, versionCode, min/target
+SDK, native ABIs, certificate digest, APK digest and source commit. No device
+installation is claimed: releases remain candidates until separately tested.
+The protected `www.ragbaz` publisher selects `tabenius/rebsync`, product
+`rebekah`, platform `android`, and the same `vX.Y.Z` tag.
+
+### Future F-Droid and other channels
+
+An APK URL is not a subscribable repository. `www.ragbaz` must additionally
+publish a signed F-Droid index with its own stable repository key before we
+advertise a single shared subscription URL for Rebekah and future apps. The
+Android inventory above gives a distributor the package/update identity without
+coupling it to one download host. Keep versionCode increasing and retain the APK
+signing key across direct-download/custom-repository releases. Google Play
+onboarding (including its app-signing/upload-key choice) is a separate future
+step; do not silently replace the existing Android signing identity. No F-Droid
+feed or Play release is published by this workflow today.
 
 The app logic (peer endpoint, volumes, move) is tested without Tauri or GTK:
 

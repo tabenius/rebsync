@@ -1,6 +1,6 @@
 [package]
 name = "rebsync-app"
-version = "0.2.2"
+version = "0.2.3"
 description = "RAGBAZ Rebekah: Android companion for the rebsync preservation core"
 authors = ["rebsync contributors"]
 license = "MIT"
