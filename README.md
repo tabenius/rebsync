@@ -41,12 +41,14 @@ until its producer has a confirmed component identity. Repository/ref pins belon
 in the catalog's `components.lock.json`, not dependency entries. This declaration
 does not itself register edges in the authoritative fleet Frog database.
 
-CI validates against ragbaz-common commit
-`f6f44e27ae7051968897080faf820c8ad6475147`. To validate locally with that schema:
+CI validates against the checksummed public schema snapshot from ragbaz-common
+commit `f6f44e27ae7051968897080faf820c8ad6475147`, vendored in `schemas/` so
+neither CI nor local validation needs access to a private repository. To validate:
 
 ```bash
 python3 -m pip install jsonschema==4.23.0  # preferably in a virtual environment
-python3 scripts/validate_component.py --schema ../ragbaz-common/schemas/ragbaz.component.schema.json
+sha256sum --check schemas/SHA256SUMS
+python3 scripts/validate_component.py --schema schemas/ragbaz.component.schema.json
 ```
 
 ### Configuration precedence

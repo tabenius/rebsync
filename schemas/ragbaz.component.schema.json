@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragbaz.cc/schemas/ragbaz.component.schema.json",
+  "title": "RAGBAZ component manifest",
+  "description": "A project's self-description: what it is, what it needs and provides, and (since 0.2.0) how RAGBAZ surfaces present it. One file, ragbaz.component.json, at a path the project owns.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "identity"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "enum": [
+        "0.1.0",
+        "0.2.0"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "lifecycle"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "version": {
+          "type": "string"
+        },
+        "repoPath": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$",
+          "description": "GitHub owner/repo (0.2.0)."
+        },
+        "owner": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "research",
+            "prototype",
+            "demo",
+            "beta",
+            "production",
+            "retired"
+          ]
+        }
+      }
+    },
+    "commercial": {
+      "type": "object",
+      "properties": {
+        "packageTags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "personas": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pricingTags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "supportTier": {
+          "type": "string"
+        },
+        "salesStatus": {
+          "type": "string"
+        },
+        "demoUrl": {
+          "type": "string"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "provides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "supportTier": {
+                "type": "string"
+              },
+              "sensitive": {
+                "type": "boolean"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "properties": {
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "storage": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "dns": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Declared dependencies on other RAGBAZ components, classified by lifecycle phase. componentId is resolved through www.ragbaz/catalog/components.lock.json; repository and commit pins stay in that lock, not here.",
+      "items": {
+        "type": "object",
+        "required": [
+          "componentId",
+          "kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "componentId": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$",
+            "maxLength": 64
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "install",
+              "runtime",
+              "build",
+              "debug"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "optional": {
+            "type": "boolean",
+            "default": false
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "provides": {
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "cli": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "adminSurfaces": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "mcpTools": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "knobs": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "security": {
+      "type": "object"
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "contracts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How RAGBAZ surfaces (ragbaz.cc, tabenius.github.io) show this project. Plain text only; generators escape everything.",
+      "properties": {
+        "featured": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "order",
+            "status",
+            "label",
+            "title",
+            "description",
+            "panel"
+          ],
+          "properties": {
+            "order": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 999,
+              "description": "Position in the featured carousel; lower first."
+            },
+            "status": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "description": "Badge, e.g. 'live', 'beta', 'live · free'."
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60,
+              "description": "Kicker after the slide number, e.g. 'ng-5 · mímisbrunr'."
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 90,
+              "pattern": "^[^<>]*$",
+              "description": "Headline. ' / ' breaks the line; *word* is the accent span. Example: 'five-colour / noise *machine*'."
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1200
+            },
+            "tags": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              }
+            },
+            "panel": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "label",
+                "bullets"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 40
+                },
+                "icon": {
+                  "type": "string",
+                  "maxLength": 1200,
+                  "description": "Inner SVG for a 64x64 viewBox: only path, rect, circle, line, polyline elements with geometric attributes."
+                },
+                "bullets": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 6,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  }
+                }
+              }
+            },
+            "links": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "label"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "href": {
+                    "type": "string",
+                    "pattern": "^(https://|/)[^\\s\"'<>]*$",
+                    "maxLength": 300
+                  },
+                  "muted": {
+                    "type": "boolean",
+                    "description": "Render as a non-link note (no href)."
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "href"
+                    ],
+                    "not": {
+                      "required": [
+                        "muted"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "muted"
+                    ],
+                    "properties": {
+                      "muted": {
+                        "const": true
+                      }
+                    },
+                    "not": {
+                      "required": [
+                        "href"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "slug",
+            "name",
+            "tag",
+            "short"
+          ],
+          "description": "Descriptive fields for the public product catalog. Pricing, revenue and completion stay in the catalog itself.",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "tag": {
+              "type": "string",
+              "enum": [
+                "live",
+                "beta",
+                "building",
+                "research",
+                "active-embryo"
+              ]
+            },
+            "tagLabel": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "short": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "repo": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "links": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^(https://|/)[^\\s\"'<>]*$"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
