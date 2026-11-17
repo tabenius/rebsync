@@ -141,6 +141,14 @@ The protected `www.ragbaz` publisher selects `tabenius/rebsync`, product
 
 ### Future F-Droid and other channels
 
+For a lighter-weight URL subscription after the first GitHub release is
+published, [Obtainium](https://wiki.obtainium.imranr.dev/sources/#github) supports
+adding `https://github.com/tabenius/rebsync` as a GitHub source. Enable
+pre-releases to see our candidate channel and filter APK names with
+`^rebekah-.*-universal-release\.apk$`. This is a source configuration recipe,
+not a claim that installation/background updates have been tested on a device.
+Future apps can use their own source URLs without implementing an F-Droid index.
+
 An APK URL is not a subscribable repository. `www.ragbaz` must additionally
 publish a signed F-Droid index with its own stable repository key before we
 advertise a single shared subscription URL for Rebekah and future apps. The
