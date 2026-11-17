@@ -1,0 +1,51 @@
+{
+  "$schema": "https://ragbaz.cc/schemas/ragbaz.component.schema.json",
+  "schemaVersion": "0.2.0",
+  "identity": {
+    "id": "ragbaz.rebsync",
+    "name": "Rebsync",
+    "version": "0.1.0",
+    "repoPath": "rebsync",
+    "repository": "tabenius/rebsync",
+    "owner": "ragbaz",
+    "lifecycle": "prototype"
+  },
+  "capabilities": {
+    "provides": [
+      {
+        "id": "ops.preservation",
+        "label": "Preservation-first repository and dataset synchronization",
+        "version": "0.1.0",
+        "supportTier": "prototype",
+        "description": "Explicit encrypted backups, verified layer snapshots and additive peer exchange; not unattended fleet synchronization."
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "componentId": "ragbaz.frog",
+      "kind": "runtime",
+      "optional": true,
+      "reason": "The opt-in Frog layer invokes the external frog snapshot CLI to export AGENTS.db. Frog owns the live database; Rebsync validates and stores the exported snapshot."
+    },
+    {
+      "componentId": "ragbaz.mneme",
+      "kind": "runtime",
+      "optional": true,
+      "reason": "The opt-in Mneme layer invokes the external mneme snapshot create, verify and restore commands using the mneme.snapshot.v1 contract."
+    }
+  ],
+  "provides": {
+    "cli": [
+      {
+        "name": "rebsync",
+        "command": "rebsync",
+        "capabilities": ["ops.preservation"]
+      }
+    ]
+  },
+  "docs": {
+    "readme": "README.md",
+    "architecture": "docs/plan.html"
+  }
+}

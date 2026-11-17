@@ -62,6 +62,41 @@ fn config(home: &Path) -> Config {
     config
 }
 
+#[test]
+fn frog_pending_migration_is_blocked_without_publishing_or_changing_source() {
+    let t = tempfile::tempdir().unwrap();
+    let config = config(t.path());
+    frog_db(config.frog.db.as_ref().unwrap(), 1);
+    let before = fs::read(config.frog.db.as_ref().unwrap()).unwrap();
+    fs::write(
+        &config.frog.binary,
+        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"behind\":[\"016_repo_dep_kind.sql\"],\"fix\":\"frog db migrate\"}'\nexit 2\n",
+    )
+    .unwrap();
+    let mut journal = Journal::open(t.path()).unwrap();
+    let report = frog::run_layer(&config, &mut journal);
+    assert_eq!(report["status"], "blocked", "{report}");
+    assert_eq!(report["migration"]["status"], "required");
+    assert_eq!(fs::read(config.frog.db.as_ref().unwrap()).unwrap(), before);
+    let storage = FsObjectStorage::open(&config.storage.root).unwrap();
+    assert!(layer::list(&storage, "frog", None).unwrap().is_empty());
+}
+
+#[test]
+fn future_agenda_schema_signals_unavailable_migration() {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(
+        t.path().join("manifest.json"),
+        r#"{"schema":"ragbaz.daily-agenda-manifest.v999"}"#,
+    )
+    .unwrap();
+    let error = agenda::check_edition(t.path(), true).unwrap_err();
+    let blocked = error
+        .downcast_ref::<rebsync_core::migration::MigrationBlocked>()
+        .unwrap();
+    assert_eq!(blocked.status, "unavailable");
+}
+
 fn edition(dir: &Path, status: &str, html: &str) {
     fs::create_dir_all(dir).unwrap();
     let files = [

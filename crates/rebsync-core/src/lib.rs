@@ -7,6 +7,7 @@ pub mod gitlayer;
 pub mod inventory;
 pub mod journal;
 pub mod layer;
+pub mod migration;
 pub mod mneme;
 pub mod peer;
 pub mod process;

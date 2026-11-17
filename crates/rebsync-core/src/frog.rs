@@ -109,7 +109,7 @@ pub fn export(config: &Config, dir: &Path, journal: &mut Journal) -> Result<Valu
     let dest = dir.join("frog-snapshot");
     let mut cmd = frog(config);
     cmd.args(["--json", "snapshot", "--dest"]).arg(&dest);
-    let stdout = sync::checked(
+    let output = sync::execute(
         journal,
         dir,
         "frog-snapshot",
@@ -124,10 +124,13 @@ pub fn export(config: &Config, dir: &Path, journal: &mut Journal) -> Result<Valu
         ]),
         &mut cmd,
         config.frog.timeout_seconds,
+        None,
     )?;
-    let reply: Value = serde_json::from_slice(&stdout).context("frog returned non-JSON output")?;
+    let reply: Value =
+        serde_json::from_slice(&output.stdout).context("frog returned non-JSON output")?;
+    crate::migration::check_report(LAYER, &reply)?;
     ensure!(
-        reply.get("ok") == Some(&Value::Bool(true)),
+        output.success && reply.get("ok") == Some(&Value::Bool(true)),
         "frog snapshot failed: {}",
         reply
             .get("error")

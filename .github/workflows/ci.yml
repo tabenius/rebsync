@@ -1,6 +1,22 @@
 name: Rust
 on: [push, pull_request]
 jobs:
+  component:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: tabenius/ragbaz-common
+          ref: f6f44e27ae7051968897080faf820c8ad6475147
+          path: .component-schema
+          persist-credentials: false
+      - run: python -m pip install jsonschema==4.23.0
+      - run: python scripts/validate_component.py --schema .component-schema/schemas/ragbaz.component.schema.json
+      - run: python scripts/test_component.py --schema .component-schema/schemas/ragbaz.component.schema.json
   check:
     runs-on: ubuntu-latest
     steps:

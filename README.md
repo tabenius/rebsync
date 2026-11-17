@@ -26,6 +26,31 @@ instead of writing `$HOME` inside TOML/YAML.
 
 ## Configuration
 
+### RAGBAZ component dependencies
+
+[`ragbaz.component.json`](ragbaz.component.json) follows ragbaz-common's 0.2.0
+component schema and Frog's typed dependency model (`install`, `runtime`,
+`build`, `debug`), as adopted by WeftMark. Frog and Mneme are **optional runtime**
+dependencies: their owner CLIs are needed only for the corresponding layers,
+which are disabled by default. Installing or building Rebsync does not install
+either component. Tests use owner-CLI fixtures rather than sibling checkouts.
+
+External packages remain in Cargo/npm manifests, not in this component graph.
+Daily Agenda is an on-disk edition contract, not a declared component dependency
+until its producer has a confirmed component identity. Repository/ref pins belong
+in the catalog's `components.lock.json`, not dependency entries. This declaration
+does not itself register edges in the authoritative fleet Frog database.
+
+CI validates against ragbaz-common commit
+`f6f44e27ae7051968897080faf820c8ad6475147`. To validate locally with that schema:
+
+```bash
+python3 -m pip install jsonschema==4.23.0  # preferably in a virtual environment
+python3 scripts/validate_component.py --schema ../ragbaz-common/schemas/ragbaz.component.schema.json
+```
+
+### Configuration precedence
+
 Precedence, lowest first:
 
 1. Built-in defaults.
@@ -137,6 +162,38 @@ Filesystem publication is fsynced. Deletion exists for storage administration
 only: no synchronization policy propagates repository deletions between peers.
 A manifest received from a peer is removed only when its own snapshot check
 fails, so damaged metadata is not advertised as restorable.
+
+## Owner schemas and migrations
+
+Frog, Mneme and Daily Agenda own their data formats and migration logic.
+Rebsync does **not** run SQL migrations, invoke `frog db migrate`, bypass
+`FROG_ALLOW_SCHEMA_SKEW`, or change an existing/live database. Applied migration
+names in a Frog snapshot are evidence of its history, not proof that the
+installed owner can use it.
+
+Owner export/validation JSON may include this optional extension:
+
+```json
+{"migration": {"status": "unavailable", "reason": "A compatible owner migrator is not installed"}}
+```
+
+`current` permits the remaining integrity checks; `required`, `unavailable`,
+`unknown`, and unrecognized states block the operation. Rebsync also understands
+Frog's existing nonempty `behind` (migration required) and `ahead` (compatible
+tooling unavailable) reports, including nonzero export exits. Unknown Mneme
+snapshot or Agenda manifest schemas are migration/compatibility blockers, not
+generic corruption. A normal apply run reports `status: blocked` with a
+structured `migration` field; direct commands return exit `2` and `--json`
+prints the blocker. Failed owner commands without such a signal remain failures.
+
+Legacy owner reports without migration metadata retain existing behavior:
+compatibility is **unknown**, not certified current. Frog's read-only SQLite
+validator cannot discover migrations shipped by an arbitrary installed Frog
+binary. Mneme restore now runs the installed owner's snapshot verifier before
+invoking restore. A blocked migration must be resolved with compatible owner
+tooling on an independently preserved copy; automatic staged migration is not
+implemented. New converted data must be revalidated and published as a new
+snapshot, never overwrite the old immutable objects.
 
 ## Mneme layer (session-history index)
 

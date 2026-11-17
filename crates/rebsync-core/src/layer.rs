@@ -543,9 +543,7 @@ pub fn status_value(name: &str, result: Result<PublishOutcome>) -> Value {
             };
             serde_json::json!({"name": name, "kind": name, "status": status, "snapshot": outcome})
         }
-        Err(error) => {
-            serde_json::json!({"name": name, "kind": name, "status": "failed", "error": format!("{error:#}")})
-        }
+        Err(error) => crate::migration::failure(name, &error),
     }
 }
 

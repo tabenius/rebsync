@@ -136,10 +136,7 @@ fn mneme(config: &Config, db: Option<&Path>) -> Command {
 
 fn owner_json(bytes: &[u8]) -> Result<Value> {
     let value: Value = serde_json::from_slice(bytes).context("mneme returned non-JSON output")?;
-    ensure!(
-        value.get("schema").and_then(Value::as_str) == Some(OWNER_SCHEMA),
-        "mneme snapshot schema is not {OWNER_SCHEMA}; upgrade mneme"
-    );
+    crate::migration::require_schema("mneme", &value, OWNER_SCHEMA)?;
     ensure!(
         value.get("integrity").and_then(Value::as_str) == Some("ok"),
         "mneme did not report a passing integrity check"
@@ -370,9 +367,7 @@ pub fn run_layer(config: &Config, journal: &mut Journal) -> Value {
                 };
                 json!({"name":"mneme","kind":"mneme","status":status,"snapshot":outcome})
             }
-            Err(error) => {
-                json!({"name":"mneme","kind":"mneme","status":"failed","error":format!("{error:#}")})
-            }
+            Err(error) => crate::migration::failure("mneme", &error),
         }
     }
     #[cfg(not(feature = "storage-object-store"))]
@@ -555,6 +550,9 @@ pub fn restore(
     target: &Path,
     journal: &mut Journal,
 ) -> Result<Value> {
+    // Ask the installed owner to validate compatibility before it can create
+    // the destination. A migration refusal must not leave a restored index.
+    verify(config, storage, id, journal)?;
     let manifest = load(storage, id)?;
     let stage = staging(config)?;
     let path = stage.path().join(SNAPSHOT_FILE);
@@ -590,6 +588,22 @@ pub fn restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_schema_and_migration_refusals_are_typed() {
+        for body in [
+            br#"{"schema":"mneme.snapshot.v999","integrity":"ok"}"#.as_slice(),
+            br#"{"schema":"mneme.snapshot.v1","integrity":"ok","migration":{"status":"required"}}"#
+                .as_slice(),
+        ] {
+            let error = owner_json(body).unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::migration::MigrationBlocked>()
+                    .is_some()
+            );
+        }
+    }
 
     #[test]
     fn keys_and_labels_are_constrained() {

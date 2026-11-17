@@ -816,6 +816,19 @@ fn main() {
     match entry() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
+            if let Some(migration) =
+                error.downcast_ref::<rebsync_core::migration::MigrationBlocked>()
+            {
+                if std::env::args().any(|arg| arg == "--json") {
+                    println!(
+                        "{}",
+                        serde_json::json!({"status": "blocked", "migration": migration})
+                    );
+                } else {
+                    eprintln!("rebsync: {error:#}");
+                }
+                std::process::exit(2);
+            }
             eprintln!("rebsync: {error:#}");
             std::process::exit(1);
         }

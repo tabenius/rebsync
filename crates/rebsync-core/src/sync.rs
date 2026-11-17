@@ -130,6 +130,11 @@ pub(crate) fn checked(
     timeout: u64,
 ) -> Result<Vec<u8>> {
     let out = execute(j, p, action, args, cmd, timeout, None)?;
+    if action.starts_with("mneme-snapshot-")
+        && let Ok(report) = serde_json::from_slice::<Value>(&out.stdout)
+    {
+        crate::migration::check_report("mneme", &report)?;
+    }
     if !out.success {
         bail!("{action} failed (exit {:?}); see journal", out.code);
     }

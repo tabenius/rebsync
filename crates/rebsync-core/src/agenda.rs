@@ -58,10 +58,7 @@ pub fn check_edition(dir: &Path, require_ready: bool) -> Result<(Value, Vec<Stri
         &std::fs::read(dir.join(MANIFEST)).context("edition has no manifest.json")?,
     )
     .context("edition manifest is not JSON")?;
-    ensure!(
-        manifest.get("schema").and_then(Value::as_str) == Some(OWNER_SCHEMA),
-        "unsupported edition manifest schema; expected {OWNER_SCHEMA}"
-    );
+    crate::migration::require_schema(LAYER, &manifest, OWNER_SCHEMA)?;
     let status = manifest
         .pointer("/generation/status")
         .and_then(Value::as_str)
