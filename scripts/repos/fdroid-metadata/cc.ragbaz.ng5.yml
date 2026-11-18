@@ -8,12 +8,25 @@ SourceCode: https://github.com/tabenius/BAZ.NG-5
 IssueTracker: https://github.com/tabenius/BAZ.NG-5/issues
 
 Name: BAZ NG-5
-Summary: Local-first noise machine for sleep
+Summary: Healthy noise generator synth for sleep, rest and focus
 Description: |-
-  BAZ NG-5, model MÍMISBRUNR, is a noise instrument in the spirit of 1970s synths
-  and the TR-909 era. White, pink, brown, blue and violet voices ring-modulate and
-  convolve each other over a slow breathing tide, with an optional delta-band pulse
-  and a sleep timer that fades out.
+  BAZ NG-5, model MÍMISBRUNR, is a healthy noise generator: a noise synth for
+  sleep, rest and focus, in the spirit of 1970s synths and the TR-909 era, with a
+  cobalt panel and orange keys.
 
-  Nine colour themes include three for colour vision differences. Everything stays
-  on the device: no accounts, no analytics, settings in local storage only.
+  White, pink, brown, blue and violet voices ring-modulate and convolve each other
+  over a slow breathing tide. An optional delta-band pulse steps down from alpha
+  towards delta, and a sleep timer fades everything out.
+
+  * masking noise in five colours, each with level, tone, pan and a breathing swell
+  * a slow breathing guide, six breaths a minute by default
+  * sleep timer with a gentle fade, and a dark DUSK screen for the bedroom
+  * BAKE TAPE renders a seamless loop that keeps playing, and fading, with the screen locked
+  * nine colour themes, three of them for colour vision differences
+  * patches as links or JSON, and a night log with quick ratings
+
+  Local-first: no account, no ads, no tracking. It works offline and keeps your
+  settings, patches and night log on the device. Free and open source.
+
+  Evidence for brainwave entrainment is mixed; the masking noise and slow
+  breathing are the sturdier parts.
