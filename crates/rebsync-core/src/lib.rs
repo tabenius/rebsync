@@ -10,6 +10,7 @@ pub mod layer;
 pub mod migration;
 pub mod mneme;
 pub mod peer;
+pub mod phone;
 pub mod process;
 #[cfg(feature = "serve")]
 pub mod serve;

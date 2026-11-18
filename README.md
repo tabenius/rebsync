@@ -446,6 +446,65 @@ rebsync agenda prune --label local --keep-last 30 --apply
   pull from it afterwards. Restic snapshots of the same data are untouched;
   remove those with `restic forget --prune`.
 
+## Phone diagnostics and Chromebook connections
+
+```bash
+rebsync phone diagnose --json                 # local lsusb/sysfs + IP routes
+rebsync phone diagnose --mtp                  # opt in to MTP storage metadata
+rebsync phone diagnose --adb-serial SERIAL    # authorized phone's IPs + df
+rebsync phone diagnose --include-identifiers  # opt in to USB/ADB serial output
+rebsync phone instructions --chromebook       # print all connection guides
+rebsync phone instructions --chromebook --transport usb
+rebsync phone instructions --chromebook --transport tcp
+rebsync phone instructions --chromebook --transport bluetooth
+```
+
+Diagnostics/guides do not load backup configuration, create journals/object
+stores, copy files, enable debugging, enroll peers, change permissions or scan
+the LAN. These commands are also available without default Cargo features;
+explicit HTTP peer probes require the `peer` feature. Missing helpers and
+unknown space are reported, never converted into zero free bytes or a claim
+that a device is trusted. Requested probes that are incomplete exit `2`.
+
+- **Linux USB:** `usbutils` supplies `lsusb`. VID/PID/model/interface hints find
+  MTP/PTP candidates; they do not prove the device is a phone. Bus/device numbers
+  change when replugged. Serial numbers are omitted unless requested.
+- **MTP:** install `gvfs-backends` (and optionally `libmtp-runtime` for
+  `mtp-detect`), unlock Android and choose File transfer. `--mtp` may open a GIO
+  mount but does not unmount somebody else's session. It enumerates storage
+  roots and queries capacity/free bytes, not their contents. Backends, phone
+  lock state, competing clients and USB permissions can prevent reporting.
+  Helper calls time out; enumeration is bounded to 32 USB observations, four
+  MTP candidates and eight storage roots each. MTP is not a synchronization or
+  live-database-export transport.
+- **USB peer sync:** the printed guide uses an explicitly authorized ADB device
+  and a loopback `adb -s SERIAL forward --no-rebind` tunnel to Rebekah Sharing.
+  `--adb-serial SERIAL` only queries an already authorized device's `ip addr`
+  and `df -k`; it never pairs, enables debugging or creates tunnels. ADB itself
+  may start its local helper server. The data/emulated-storage rows can be views
+  of the same underlying filesystem; do not sum them as independent disks.
+- **TCP/IP:** use Rebekah's displayed reachable IP/port on trusted Wi-Fi, a
+  hotspot, USB tethering or another explicitly established link. To check only
+  that endpoint: `rebsync phone diagnose --peer http://PHONE_IP:PORT --token-file
+  /private/peer-token`. HTTP peer JSON is size-bounded, error bodies are
+  suppressed and connection tokens are not included in diagnostic output.
+- **Bluetooth:** print the host pairing/PAN guide. If ChromeOS and Android offer
+  Bluetooth tethering/PAN, an established IP link can carry the existing peer
+  protocol. Pairing/Phone Hub alone does not establish that link. Native
+  RFCOMM/BLE/OBEX exchange and automatic PAN setup are not implemented.
+- **ChromeOS boundary:** share the Android USB device with Linux in host
+  settings if offered. Crostini's `100.115.92.x` gateway is virtual, not a phone
+  IP. Inspect the ChromeOS network settings for the host connection; there is
+  no standard Linux API that authenticates Phone Hub identity or proves that
+  USB, hotspot provider and Rebekah peer are the same phone. Authorized ADB IP
+  observations can help a person correlate them, but Rebsync deliberately keeps
+  `same_physical_phone: unknown` and does not enroll on that basis.
+
+Guides are printed, not executed: read them, replace placeholders, approve
+debugging/pairing on both devices and remove only tunnels you created. See
+[Android's ADB documentation](https://developer.android.com/tools/adb) and
+[ChromeOS Linux guidance](https://support.google.com/chromebook/answer/9145439).
+
 ## Phone sync (Rebekah)
 
 `rebsync peer` exchanges layer objects with the Rebekah Android app's

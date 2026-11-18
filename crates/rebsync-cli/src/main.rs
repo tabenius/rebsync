@@ -59,6 +59,11 @@ struct Common {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Read-only phone diagnostics and printable Linux/Chromebook connection guides.
+    Phone {
+        #[command(subcommand)]
+        command: PhoneAction,
+    },
     /// Print effective configuration and field origins; does not run synchronization.
     Config {
         #[command(subcommand)]
@@ -114,6 +119,179 @@ enum Action {
         #[command(subcommand)]
         command: PeerAction,
     },
+}
+#[derive(Subcommand)]
+enum PhoneAction {
+    /// Observe USB/network metadata; never enrolls a peer or transfers files.
+    Diagnose {
+        /// Open read-only MTP storage sessions using GIO (requires gvfs-backends).
+        #[arg(long)]
+        mtp: bool,
+        /// Include USB serial numbers; omit when sharing a diagnostic report.
+        #[arg(long)]
+        include_identifiers: bool,
+        /// Query IPs/free space on this explicitly selected, authorized ADB device.
+        #[arg(long)]
+        adb_serial: Option<String>,
+        /// Probe only this explicit HTTP peer; never scans the network.
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, requires = "peer")]
+        token_file: Option<PathBuf>,
+    },
+    /// Print instructions only; USB, TCP/IP and Bluetooth/PAN limitations are explicit.
+    Instructions {
+        #[arg(long, value_parser = ["all", "usb", "tcp", "bluetooth"], default_value = "all")]
+        transport: String,
+        #[arg(long)]
+        chromebook: bool,
+    },
+}
+
+fn phone_action(action: &PhoneAction, json: bool) -> Result<i32> {
+    use rebsync_core::phone;
+    match action {
+        PhoneAction::Instructions {
+            transport,
+            chromebook,
+        } => {
+            let guide = phone::instructions(transport, *chromebook)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"schema":"rebsync.phone.instructions.v1", "transport":transport, "chromebook":chromebook, "instructions":guide})
+                );
+            } else {
+                print!("{guide}");
+            }
+            Ok(0)
+        }
+        PhoneAction::Diagnose {
+            mtp,
+            include_identifiers,
+            adb_serial,
+            peer,
+            token_file,
+        } => {
+            let mut report = phone::diagnose(*mtp, *include_identifiers);
+            if let Some(serial) = adb_serial {
+                report.adb = Some(phone::probe_adb(serial, *include_identifiers)?);
+            }
+            if let Some(connection) = peer {
+                #[cfg(feature = "peer")]
+                {
+                    let token = token_file
+                        .as_ref()
+                        .map(|path| rebsync_core::transport::read_token_file(path))
+                        .transpose()?;
+                    match phone::probe_peer(connection, token.as_deref()) {
+                        Ok(peer) => report.peer = Some(peer),
+                        Err(error) => report
+                            .issues
+                            .push(format!("Explicit peer probe failed: {error:#}")),
+                    }
+                }
+                #[cfg(not(feature = "peer"))]
+                {
+                    let _ = (connection, token_file);
+                    report
+                        .issues
+                        .push("Peer probing unavailable: built without the peer feature.".into());
+                }
+            }
+            let incomplete = !report.issues.is_empty()
+                || report
+                    .adb
+                    .as_ref()
+                    .is_some_and(|adb| !adb.authorized || !adb.issues.is_empty())
+                || report
+                    .usb
+                    .iter()
+                    .filter_map(|device| device.mtp.as_ref())
+                    .any(|mtp| mtp.status != "space_reported" || !mtp.issues.is_empty());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Phone diagnostics (observations only; physical-device match: unknown)");
+                for device in &report.usb {
+                    println!(
+                        "USB {:03}:{:03} {}:{} {}{}",
+                        device.bus,
+                        device.device,
+                        device.vendor_id,
+                        device.product_id,
+                        device.description,
+                        if device.mtp_candidate {
+                            " [MTP/PTP candidate]"
+                        } else {
+                            ""
+                        }
+                    );
+                    if let Some(serial) = &device.serial {
+                        println!("  USB serial (not authentication): {serial}");
+                    }
+                    if let Some(mtp) = &device.mtp {
+                        println!("  MTP: {} ({})", mtp.status, mtp.uri);
+                        for storage in &mtp.storages {
+                            println!(
+                                "  {}: capacity={} free={} bytes",
+                                storage.uri,
+                                storage
+                                    .capacity_bytes
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "unknown".into()),
+                                storage
+                                    .free_bytes
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "unknown".into())
+                            );
+                        }
+                        for issue in &mtp.issues {
+                            println!("  ! {issue}");
+                        }
+                    }
+                }
+                for route in &report.network.default_routes {
+                    println!(
+                        "Default route: {} via {}",
+                        route.interface,
+                        route.gateway.as_deref().unwrap_or("unknown")
+                    );
+                }
+                if report.network.crostini_gateway_observed {
+                    println!(
+                        "Crostini virtual gateway observed; this is not an identified phone address."
+                    );
+                }
+                if let Some(peer) = &report.peer {
+                    println!("Explicit peer: {peer}");
+                }
+                if let Some(adb) = &report.adb {
+                    println!(
+                        "Explicit ADB device: authorized={} phone_addresses={:?}",
+                        adb.authorized, adb.phone_addresses
+                    );
+                    for storage in &adb.storages {
+                        println!(
+                            "  ADB df: capacity={:?} free={:?} bytes",
+                            storage.capacity_bytes, storage.free_bytes
+                        );
+                    }
+                    for issue in &adb.issues {
+                        println!("  ! {issue}");
+                    }
+                }
+                for issue in &report.issues {
+                    println!("! {issue}");
+                }
+                for note in &report.safety {
+                    println!("Note: {note}");
+                }
+                println!("Guide: rebsync phone instructions --chromebook");
+            }
+            Ok(if incomplete { 2 } else { 0 })
+        }
+    }
 }
 #[derive(Args)]
 struct PruneArgs {
@@ -836,6 +1014,11 @@ fn main() {
 }
 fn entry() -> Result<i32> {
     let cli = Cli::parse();
+    // Diagnostics/guides are independent of backup config and must not create
+    // state directories, journals or object stores just to inspect a phone.
+    if let Some(Action::Phone { command }) = &cli.command {
+        return phone_action(command, cli.json);
+    }
     let config = load_config(ConfigOverrides {
         rebekah_home: cli.home,
         config: cli.common.config,
@@ -853,6 +1036,7 @@ fn entry() -> Result<i32> {
         mneme_db: cli.common.mneme_db,
     })?;
     match cli.command {
+        Some(Action::Phone { .. }) => unreachable!("phone actions return before config loading"),
         Some(Action::Config { .. }) => {
             let mut value = serde_json::to_value(&config)?;
             // Repository URLs can contain inline credentials; don't expose them in explain output.

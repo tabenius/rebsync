@@ -127,6 +127,16 @@ impl Peer {
         self
     }
 
+    /// Bound explicit diagnostic probes without reducing bulk-transfer timeouts.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.agent = ureq::AgentBuilder::new()
+            .timeout_connect(timeout)
+            .timeout(timeout)
+            .redirects(0)
+            .build();
+        self
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.target.base)
     }
@@ -142,7 +152,17 @@ impl Peer {
             .auth(self.agent.get(&self.url(path)))
             .call()
             .map_err(describe)?;
-        Ok(response.into_json()?)
+        let mut bytes = Vec::new();
+        const MAX_JSON: u64 = 16 * 1024 * 1024;
+        response
+            .into_reader()
+            .take(MAX_JSON + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_JSON,
+            "peer JSON response exceeds 16 MiB"
+        );
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn status(&self) -> Result<Value> {
@@ -265,12 +285,10 @@ fn describe(error: ureq::Error) -> anyhow::Error {
         ureq::Error::Status(503, _) => {
             anyhow::anyhow!("peer is moving its data; retry when the move finishes")
         }
-        ureq::Error::Status(code, response) => {
-            let body = response.into_string().unwrap_or_default();
-            anyhow::anyhow!(
-                "peer returned {code}: {}",
-                body.chars().take(200).collect::<String>()
-            )
+        // Untrusted error pages can echo Authorization tokens or stream an
+        // unbounded body. Do not read or publish them as diagnostic messages.
+        ureq::Error::Status(code, _) => {
+            anyhow::anyhow!("peer returned HTTP {code}; response body suppressed")
         }
         ureq::Error::Transport(transport) => anyhow::anyhow!("cannot reach peer: {transport}"),
     }
@@ -494,6 +512,15 @@ pub fn default_prefixes() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "peer-http")]
+    #[test]
+    fn http_error_pages_cannot_echo_credentials_into_reports() {
+        let response = ureq::Response::new(500, "Error", "private-token-in-error-page").unwrap();
+        let error = describe(ureq::Error::Status(500, response));
+        assert!(error.to_string().contains("500"));
+        assert!(!error.to_string().contains("private-token"));
+    }
 
     #[cfg(feature = "storage-object-store")]
     #[test]
