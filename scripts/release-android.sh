@@ -9,6 +9,7 @@
 #   scripts/release-android.sh install-sdk     install those packages with sdkmanager
 #   scripts/release-android.sh keystore-from-env   decode RBQ_KEYSTORE_B64 into a private temp file; prints its path
 #   scripts/release-android.sh build           doctor, then the signed universal release APK
+#   scripts/release-android.sh check-signer    compare the built APK's signer with the pin
 #   scripts/release-android.sh collect         verify the APK and write dist/ (prepare_android_release.py)
 #   scripts/release-android.sh sign-inventory  Sigstore-sign dist/release.json when an OIDC identity exists
 #   scripts/release-android.sh publish         create the GitHub candidate release from dist/ (needs gh + GH_TOKEN)
@@ -241,6 +242,21 @@ build() {
     || die build "tauri android build failed (see the Gradle/Cargo output above)" "rerun 'doctor'; if it passes, the error above is in the app build itself"
   [ -f "$APP/$APK_REL" ] || die build "build finished but $APK_REL is missing (unsigned?)" "the keystore was not applied: check RBQ_STORE_FILE/RBQ_KEYSTORE_PROPERTIES"
   ok "built $APK_REL"
+  check_apk_signer
+}
+
+# The APK's signer, parsed exactly as prepare_android_release.py parses it,
+# compared with the pin. Catches "Gradle ignored the keystore" right after the
+# build instead of at collect.
+check_apk_signer() {
+  local sdk got want
+  sdk=$(sdk_root) || die sdk "no Android SDK found" "set ANDROID_HOME"
+  want=$(pinned_cert)
+  got=$("$sdk/build-tools/$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APP/$APK_REL" 2>/dev/null \
+    | python3 -c 'import re,sys; t=sys.stdin.read(); print(",".join(sorted(set(d.lower() for d in re.findall(r"^(?:Signer #[0-9]+|V[0-9.]+ Signer(?: #[0-9]+)?:) certificate SHA-256 digest: ([0-9a-fA-F]{64})$", t, re.M)))))')
+  [ -n "$got" ] || die sign-check "apksigner found no signer in $APK_REL" "the APK is unsigned: Gradle saw no keystore (RBQ_STORE_FILE/RBQ_KEYSTORE_PROPERTIES unset in the build environment?)"
+  [ "$got" = "$want" ] || die sign-check "APK is signed by $got, release pin is $want" "Gradle used another key: a gen/android/keystore.properties or RBQ_KEYSTORE_PROPERTIES file takes precedence over RBQ_STORE_FILE; remove it or point it at the release key"
+  ok "APK signer matches the pinned release certificate"
 }
 
 collect() {
@@ -289,6 +305,7 @@ case "${1:-}" in
   install-sdk) install_sdk ;;
   keystore-from-env) keystore_from_env ;;
   build) build ;;
+  check-signer) check_apk_signer ;;
   collect) collect ;;
   sign-inventory) sign_inventory ;;
   publish) publish ;;

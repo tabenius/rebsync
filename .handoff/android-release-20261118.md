@@ -24,6 +24,33 @@ release; it covers what has already been worked out.
 - GitHub Actions minutes and artifact storage were exhausted around this
   date. Expect CI failures that are about GitHub, not about the code.
 
+## v0.2.3 cannot pass its own verifier — read this first
+
+`scripts/prepare_android_release.py` *at tag v0.2.3* only understands the
+old apksigner line `Signer #1 certificate SHA-256 digest:`. build-tools
+37.0.0 prints `V2 Signer: certificate SHA-256 digest:` (or `V3.0 Signer:`),
+and for minSdk 24 it never adds a v1 signature, so re-signing does not
+help. The tag's verifier finds no signer and refuses a **correctly signed**
+APK with "APK signing certificate differs from the pinned release
+identity". The message is misleading. Do not chase the keystore, and never edit
+`android-signing.json` over it.
+
+Confirmed on 2026-11-18 by a full local run with a throwaway key: the APK was
+signed with exactly the pinned test cert and the tag's verifier still
+refused it. Fixed in tabenius/rebsync#8. The parser accepts both formats,
+counts one signer once across schemes, and names the digest it found.
+`release-android.sh build` now also checks the signer straight after
+Gradle (`check-signer`).
+
+The verifier reads the repo it lives in and refuses tracked changes, so you
+cannot drop the fixed copy into the tag checkout. Options, for the owner to
+choose:
+1. **Recommended:** merge #8 and release the next version from main (bump
+   `version` in `tauri.conf.json`; v0.2.3 was never published, so nothing
+   is lost). This also restores the CI path.
+2. Publish v0.2.3 by hand without `prepare_android_release.py`, as the
+   SIGN-AND-RELEASE.md route. This skips the inventory guard. Not recommended.
+
 ## The local keystore
 
 - File: `~/.config/rebekah-signing/rebekah-release.jks`. The directory and

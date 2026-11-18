@@ -20,15 +20,25 @@ def run(args, cwd=None):
 
 def apk_metadata(badging, certificates, expected, version):
     package = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)' versionName='([^']+)'", badging, re.M)
-    signers = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]+)$", certificates, re.M)
+    # apksigner prints "Signer #1 certificate SHA-256 digest: …" when v1 is in
+    # play and "V2 Signer: certificate SHA-256 digest: …" (build-tools 37,
+    # v2-only) otherwise. One signer may appear once per scheme.
+    count = re.search(r"^Number of signers: ([0-9]+)$", certificates, re.M)
+    signers = sorted(set(d.lower() for d in re.findall(
+        r"^(?:Signer #[0-9]+|V[0-9.]+ Signer(?: #[0-9]+)?:) certificate SHA-256 digest: ([0-9a-fA-F]{64})$",
+        certificates, re.M)))
+    if count and count[1] != '1':
+        raise ValueError(f'APK has {count[1]} signers; a release has exactly one')
     if not package or package[1] != expected['packageName'] or package[3] != version:
         raise ValueError('APK package/version does not match the release')
     if not 0 < int(package[2]) <= 2100000000:
         raise ValueError('APK versionCode is outside the Android/Play update range')
     if 'application-debuggable' in badging:
         raise ValueError('Debuggable APK is not a release')
-    if len(signers) != 1 or signers[0].lower() != expected['certificateSha256']:
-        raise ValueError('APK signing certificate differs from the pinned release identity')
+    if len(signers) != 1 or signers[0] != expected['certificateSha256']:
+        found = ', '.join(signers) or 'none parsed from apksigner output'
+        raise ValueError('APK signing certificate differs from the pinned release identity: '
+                         f"found {found}, pinned {expected['certificateSha256']}")
     minimum = re.search(r"^sdkVersion:'([0-9]+)'", badging, re.M)
     target = re.search(r"^targetSdkVersion:'([0-9]+)'", badging, re.M)
     native = re.search(r"^native-code: (.+)$", badging, re.M)
@@ -38,7 +48,7 @@ def apk_metadata(badging, certificates, expected, version):
     return {'schema': 'ragbaz.android-release/1', 'packageName': package[1],
             'versionCode': int(package[2]), 'versionName': package[3],
             'minSdk': int(minimum[1]), 'targetSdk': int(target[1]), 'abis': sorted(abis),
-            'certificateSha256': signers[0].lower(),
+            'certificateSha256': signers[0],
             'openpgpFingerprint': expected['openpgpFingerprint']}
 
 
