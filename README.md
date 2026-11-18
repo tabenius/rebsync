@@ -682,6 +682,24 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
 The core crate owns operational behavior; the clap CLI only parses/renders and
 maps exit codes. No terminal printing or prompting is performed by the core.
 
+## Install from the RAGBAZ package repositories
+
+**Debian/Ubuntu (APT)**, signed with the RAGBAZ release OpenPGP key:
+
+```bash
+curl -fsSL https://ragbaz.cc/apt/ragbaz-archive-keyring.gpg | sudo tee /usr/share/keyrings/ragbaz-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/ragbaz-archive-keyring.gpg] https://ragbaz.cc/apt stable main" | sudo tee /etc/apt/sources.list.d/ragbaz.list
+sudo apt update && sudo apt install rbq
+```
+
+**Android (F-Droid)**: add `https://ragbaz.cc/fdroid/repo` in F-Droid's Repositories
+settings. Compare the repository fingerprint with the one published next to it.
+
+Maintainers build, sign, verify and upload both repositories with
+`scripts/publish-repos.sh` (see its header). It runs on the owner's machine: APT
+is signed by the local gpg-agent and the F-Droid index by a dedicated repo key.
+
+
 ## License
 
 Copyright (C) 2026 Tobias Abenius.
