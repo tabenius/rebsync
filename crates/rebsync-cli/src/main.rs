@@ -1162,7 +1162,7 @@ fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
             if layer::LAYERS.contains(&l.as_str()) {
                 Ok(format!("{l}/"))
             } else {
-                bail!("unknown layer {l}; use mneme, frog, agenda or git")
+                bail!("unknown layer {l}; use mneme, frog, agenda, git or hypomnema (explicit opt-in)")
             }
         })
         .collect()
