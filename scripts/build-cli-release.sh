@@ -22,6 +22,7 @@ for pair in "x86_64-unknown-linux-musl x86_64" "aarch64-unknown-linux-musl aarch
   mkdir -p "$dist/$name"
   cp "$bin" "$dist/$name/rbq"
   install -m 0755 scripts/rbq-sync-install.sh "$dist/$name/install.sh"
+  printf '%s\n' "$2" > "$dist/$name/ARCH"
   printf 'rbq-sync %s (source %s): the rbq command\nStatic Linux %s build. Run ./install.sh, or copy rbq onto your PATH.\nrebsync is the olden name; install.sh links it to rbq.\n' "$version" "$commit" "$2" > "$dist/$name/README.txt"
   tar -C "$dist" -czf "$dist/$name.tar.gz" "$name"
   rm -rf "$dist/$name"
