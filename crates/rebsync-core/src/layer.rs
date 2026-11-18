@@ -30,7 +30,7 @@ use std::{
 
 pub const SNAPSHOT_SCHEMA: &str = "rbq.layer.snapshot.v1";
 /// Layers whose objects Rebeqah publishes and exchanges with peers.
-pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git"];
+pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git", "hypomnema"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
