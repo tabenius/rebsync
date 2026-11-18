@@ -573,6 +573,20 @@ pub fn push(
             }
         }
         for key in ordered(missing) {
+            // Publishing a manifest promises that *all* of its chunks are
+            // locally recoverable. Valid JSON alone is not enough. Never send
+            // an incomplete manifest to a carrying peer (e.g. a phone).
+            if key.contains("/snapshots/") {
+                let layer_name = key.split('/').next().unwrap_or_default();
+                let check = layer::check_snapshot(storage, layer_name, &key);
+                if !check.ok {
+                    report.rejected.push(format!(
+                        "{key}: snapshot is not recoverable: {}",
+                        check.error.unwrap_or_else(|| "unknown integrity error".to_owned())
+                    ));
+                    continue;
+                }
+            }
             let bytes = storage.get(&ObjectKey::parse(&key)?)?;
             if let Err(error) = admissible(&key, &bytes) {
                 report.rejected.push(format!("{key}: {error}"));
