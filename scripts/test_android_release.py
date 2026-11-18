@@ -7,19 +7,19 @@ class AndroidReleaseTests(unittest.TestCase):
     def setUp(self):
         self.expected = {'packageName': 'com.tabenius.rebeqah', 'certificateSha256': 'a' * 64,
                          'openpgpFingerprint': 'B' * 40}
-        self.badging = ("package: name='com.tabenius.rebeqah' versionCode='2003' versionName='0.2.3'\n"
+        self.badging = ("package: name='com.tabenius.rebeqah' versionCode='2004' versionName='0.2.4'\n"
                         "sdkVersion:'24'\ntargetSdkVersion:'37'\n"
                         "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'\n")
         self.certs = 'Signer #1 certificate SHA-256 digest: ' + 'a' * 64 + '\n'
 
     def test_inventory_records_android_update_identity(self):
-        meta = apk_metadata(self.badging, self.certs, self.expected, '0.2.3')
-        self.assertEqual(meta['versionCode'], 2003)
+        meta = apk_metadata(self.badging, self.certs, self.expected, '0.2.4')
+        self.assertEqual(meta['versionCode'], 2004)
         self.assertEqual(meta['minSdk'], 24)
 
     def test_wrong_certificate_is_refused(self):
         with self.assertRaises(ValueError):
-            apk_metadata(self.badging, self.certs.replace('a', 'b'), self.expected, '0.2.3')
+            apk_metadata(self.badging, self.certs.replace('a', 'b'), self.expected, '0.2.4')
 
     def test_build_tools_37_v2_only_output_is_accepted(self):
         # apksigner 37 on a v2-only APK, as Gradle 9 / AGP 9 signs it.
@@ -44,10 +44,10 @@ class AndroidReleaseTests(unittest.TestCase):
     def test_debug_wrong_package_version_and_incomplete_abis_are_refused(self):
         for badging in [self.badging + 'application-debuggable\n',
                         self.badging.replace('com.tabenius.rebeqah', 'com.tabenius.rebeqah.debug'),
-                        self.badging.replace('0.2.3', '0.2.2'),
+                        self.badging.replace('0.2.4', '0.2.3'),
                         self.badging.replace(" 'x86_64'", '')]:
             with self.assertRaises(ValueError):
-                apk_metadata(badging, self.certs, self.expected, '0.2.3')
+                apk_metadata(badging, self.certs, self.expected, '0.2.4')
 
 
 if __name__ == '__main__':

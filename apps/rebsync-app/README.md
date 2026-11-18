@@ -149,7 +149,7 @@ Existing installations signed with another key cannot be upgraded in place.
 From the repository root, after building the exact committed version tag:
 
 ```bash
-RELEASE_TAG=v0.2.3 python3 scripts/prepare_android_release.py \
+RELEASE_TAG=v0.2.4 python3 scripts/prepare_android_release.py \
   --apk apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
   --dist /path/to/new-release-directory \
   --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
