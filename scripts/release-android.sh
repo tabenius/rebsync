@@ -285,17 +285,51 @@ sign_inventory() {
   fi
 }
 
+# Resumable publish for slow or flaky links: the release is created once as
+# a draft without assets, each file is uploaded on its own with retries and
+# backoff, files already present with the right size are skipped, and the
+# draft is published only when every size matches. Re-run after any failure;
+# it continues where it stopped. RBQ_UPLOAD_TRIES (default 8) per file,
+# RBQ_UPLOAD_WAIT seconds before the first retry (default 10, doubling to 300).
 publish() {
-  local tag
+  local tag f name size remote tries try wait
   tag=$(release_tag)
   [ -d "$DIST" ] || die publish "no $DIST" "run 'collect' first"
   command -v gh >/dev/null || die publish "gh CLI not found" "install GitHub CLI, or upload $DIST/* to the release by hand"
   [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ] || gh auth status >/dev/null 2>&1 || die publish "gh is not authenticated" "set GH_TOKEN or run 'gh auth login'"
-  if gh release view "$tag" >/dev/null 2>&1; then die publish "release $tag already exists" "releases are immutable; bump the version and tag a new one"; fi
-  gh release create "$tag" "$DIST"/* --prerelease \
-    --title "RAGBAZ Rebeqah ${tag#v} (Android candidate)" \
-    --notes "Signed universal APK (arm64, armv7, x86_64; Android 7+). Candidate: installation on a physical device has not been verified. See android.json for the package/versionCode/signing identity and release.json (plus release.sigstore.json when CI-signed) for verification." \
-    || die publish "gh release create failed" "check the token's contents:write permission; the tag must exist on GitHub"
+  if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+    die publish "release $tag is already published" "releases are immutable; bump the version and tag a new one"
+  fi
+  if ! gh release view "$tag" >/dev/null 2>&1; then
+    gh release create "$tag" --draft --prerelease --verify-tag \
+      --title "RAGBAZ Rebeqah ${tag#v} (Android candidate)" \
+      --notes "Signed universal APK (arm64, armv7, x86_64; Android 7+). Candidate: installation on a physical device has not been verified. See android.json for the package/versionCode/signing identity and release.json (plus release.sigstore.json when CI-signed) for verification." \
+      || die publish "could not create draft release $tag" "check the token's contents:write permission; the tag must exist on GitHub"
+    note "created draft release $tag; uploading files one by one"
+  else
+    note "draft release $tag exists; resuming uploads"
+  fi
+  tries=${RBQ_UPLOAD_TRIES:-8}
+  for f in "$DIST"/*; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f"); size=$(stat -c %s "$f")
+    remote=$(gh release view "$tag" --json assets --jq ".assets[] | select(.name == \"$name\") | .size" 2>/dev/null || true)
+    if [ "$remote" = "$size" ]; then ok "$name already uploaded ($size bytes)"; continue; fi
+    try=1; wait=${RBQ_UPLOAD_WAIT:-10}
+    while :; do
+      note "uploading $name ($size bytes), attempt $try/$tries"
+      if gh release upload "$tag" "$f" --clobber; then
+        remote=$(gh release view "$tag" --json assets --jq ".assets[] | select(.name == \"$name\") | .size" 2>/dev/null || true)
+        [ "$remote" = "$size" ] && { ok "uploaded $name"; break; }
+        note "$name: GitHub reports ${remote:-no} size, expected $size"
+      fi
+      [ "$try" -ge "$tries" ] && die publish "$name did not upload after $tries attempts" "re-run 'publish' when the connection is better; finished files are kept and skipped"
+      note "retrying $name in ${wait}s"; sleep "$wait"
+      try=$((try + 1)); wait=$(( wait * 2 > 300 ? 300 : wait * 2 ))
+    done
+  done
+  gh release edit "$tag" --draft=false \
+    || die publish "all files uploaded but publishing the draft failed" "re-run 'publish', or publish the draft $tag in the GitHub web UI"
   ok "published release $tag"
 }
 
