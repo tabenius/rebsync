@@ -565,7 +565,28 @@ pub fn push(
         let mut missing = Vec::new();
         for (key, size) in &local {
             match remote.get(key) {
-                Some(remote_size) if remote_size == size => report.already_present += 1,
+                Some(remote_size) if remote_size == size => {
+                    // An inventory is a size hint, not proof of byte identity.
+                    // Even matching sizes must not conceal a damaged replica.
+                    let source = storage.get(&ObjectKey::parse(key)?)?;
+                    if source.len() as u64 != *size || admissible(key, &source).is_err() {
+                        report.rejected.push(format!("{key}: local object integrity failure"));
+                        continue;
+                    }
+                    if key.contains("/snapshots/") {
+                        let layer_name = key.split('/').next().unwrap_or_default();
+                        if !layer::check_snapshot(storage, layer_name, key).ok {
+                            report.rejected.push(format!("{key}: local snapshot not recoverable"));
+                            continue;
+                        }
+                    }
+                    let replica = peer.get(key)?;
+                    if replica == source {
+                        report.already_present += 1;
+                    } else {
+                        report.conflicts.push(format!("{key}: existing peer object differs from source"));
+                    }
+                }
                 Some(remote_size) => report.conflicts.push(format!(
                     "{key}: local {size} bytes, peer {remote_size} bytes"
                 )),
@@ -631,7 +652,23 @@ pub fn pull(
                 continue;
             }
             match local.get(key) {
-                Some(local_size) if local_size == size => report.already_present += 1,
+                Some(local_size) if local_size == size => {
+                    // Never mistake matching object sizes for a verified copy.
+                    // A peer may lie or be corrupted; inspect both byte strings.
+                    let existing = storage.get(&ObjectKey::parse(key)?)?;
+                    let incoming = peer.get(key)?;
+                    if existing.len() as u64 != *size
+                        || incoming.len() as u64 != *size
+                        || admissible(key, &existing).is_err()
+                        || admissible(key, &incoming).is_err()
+                    {
+                        report.rejected.push(format!("{key}: existing object fails integrity validation"));
+                    } else if existing == incoming {
+                        report.already_present += 1;
+                    } else {
+                        report.conflicts.push(format!("{key}: same-size local and peer objects differ"));
+                    }
+                }
                 Some(local_size) => report.conflicts.push(format!(
                     "{key}: local {local_size} bytes, peer {size} bytes"
                 )),
