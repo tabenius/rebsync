@@ -85,7 +85,9 @@ collect() { # collect DEST: download and verify release assets
   for t in $tags; do
     mkdir -p "$dest/dl/$t"
     gh release download "$t" -R "$repo" -D "$dest/dl/$t" -p '*.apk' -p 'rbq_*.deb' -p SHA256SUMS --clobber 2>/dev/null || true
-    ls "$dest/dl/$t"/*.apk "$dest/dl/$t"/*.deb >/dev/null 2>&1 || continue
+    # A release may carry APKs, .debs or both; skip only one that has neither.
+    shopt -s nullglob; local pkgs=("$dest/dl/$t"/*.apk "$dest/dl/$t"/rbq_*.deb); shopt -u nullglob
+    [ ${#pkgs[@]} -gt 0 ] || continue
     [ -f "$dest/dl/$t/SHA256SUMS" ] || die "release $t has packages but no SHA256SUMS" "attach SHA256SUMS to the release"
     (cd "$dest/dl/$t" && sha256sum --check --ignore-missing --quiet SHA256SUMS) || die "checksum mismatch in release $t" "re-download or re-upload the release assets"
     cp "$dest/dl/$t"/*.apk "$dest/apk/" 2>/dev/null || true
@@ -115,16 +117,29 @@ upload() {
     case "$1" in
       *.apk) type=application/vnd.android.package-archive ;; *.deb) type=application/vnd.debian.binary-package ;;
       *.json) type=application/json ;; *.jar) type=application/java-archive ;; *.png) type=image/png ;;
-      *.gz) type=application/gzip ;; *.html) type="text/html; charset=utf-8" ;; *.gpg) type=application/pgp-keys ;;
+      *.gz) type=application/gzip ;; *.html) type="text/html; charset=utf-8" ;; *.xml) type=application/xml ;;
+      */Release.gpg) type=application/pgp-signature ;; *.gpg) type=application/pgp-keys ;;
       *) type="text/plain; charset=utf-8" ;;
     esac
     npx --yes wrangler@4 r2 object put "$R2_BUCKET/$2" --file "$1" --content-type "$type" --remote >/dev/null \
       || die "upload of $2 failed" "re-run with --upload; packages are re-sent, indexes go last"
   }
-  # Packages first, indexes last: a client never sees an index naming a file that is not there yet.
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt/pool" "$out/fdroid/repo" -type f \( -name '*.deb' -o -name '*.apk' -o -path '*/icons*' \))
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt" "$out/fdroid/repo" -type f ! -name '*.deb' ! -name '*.apk' ! -path '*/icons*' ! -path '*/dists/*' ! -name 'entry.*' ! -name 'index-v*')
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt/dists" "$out/fdroid/repo" -type f \( -path '*/dists/*' -o -name 'index-v*' -o -name 'entry.*' \))
+  # Three phases, so a client never sees an index naming a file (or hash) that is not there yet:
+  # 1 packages and other assets, 2 indexes, 3 the signed entry points that pin the indexes' hashes.
+  phase() {
+    case "$1" in
+      */dists/*/InRelease|*/dists/*/Release|*/dists/*/Release.gpg|*/entry.jar|*/entry.json|*/index-v1.jar|*/index.jar) echo 3 ;;
+      */dists/*|*/index-v*|*/index.xml|*/diff/*) echo 2 ;;
+      *) echo 1 ;;
+    esac
+  }
+  local p
+  for p in 1 2 3; do
+    while IFS= read -r f; do
+      [ "$(phase "$f")" = "$p" ] || continue
+      rel=${f#"$out/"}; put "$f" "repos/$rel"
+    done < <(find "$out/apt" "$out/fdroid/repo" -type f | sort)
+  done
   ok "uploaded to r2://$R2_BUCKET/repos/ (served at https://ragbaz.cc/apt and /fdroid/repo)"
 }
 
