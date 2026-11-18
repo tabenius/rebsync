@@ -1,4 +1,4 @@
-//! Owner-controlled migration signals. Rebsync never migrates a live database.
+//! Owner-controlled migration signals. Rebeqah never migrates a live database.
 use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -14,7 +14,7 @@ impl std::fmt::Display for MigrationBlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} migration {}: {}; use the owner tooling; rebsync does not migrate live data",
+            "{} migration {}: {}; use the owner tooling; rbq does not migrate live data",
             self.layer, self.status, self.report
         )
     }
@@ -59,7 +59,7 @@ pub fn require_schema(layer: &str, report: &Value, expected: &str) -> Result<()>
             layer: layer.into(),
             status: "unavailable".into(),
             report: json!({"expected_schema": expected, "observed_schema": report.get("schema"),
-                "reason": "No supported conversion for this owner export schema; upgrade compatible owner/rebsync tooling."}),
+                "reason": "No supported conversion for this owner export schema; upgrade compatible owner/rbq tooling."}),
         });
     }
     Ok(())

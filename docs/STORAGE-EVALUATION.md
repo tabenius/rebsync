@@ -8,7 +8,7 @@ their dependency lockfile remain unchanged by this experiment.
 
 ## Decision to make
 
-Choose the implementation beneath a small Rebsync-owned storage contract, not an
+Choose the implementation beneath a small Rebeqah-owned storage contract, not an
 entire synchronization system. It must support filesystem storage and S3-family
 clients, initially AWS S3 and Cloudflare R2. Incoming S3 and restic REST protocols
 are separate server adapters. A client library is not a wire-protocol server.
@@ -98,7 +98,7 @@ Advertise separately:
 
 - Client access to a backend, versus an incoming protocol endpoint.
 - Software support, current availability, caller permission and limits.
-- Rebsync source/sink/hop roles and the supported protocol/profile versions.
+- Rebeqah source/sink/hop roles and the supported protocol/profile versions.
 - Receipt, local durability, verification and upstream replication state.
 
 Do not serialize a dependency's entire capability structure as our permanent peer
@@ -136,7 +136,7 @@ Results are recorded as JSON under
 [`evaluations/storage/results`](../evaluations/storage/results). Each result is
 bound to the probe source, manifest and lockfile by SHA-256 and records the
 compiler. An unexpected semantic observation is a finding, not an assertion that
-the backend meets Rebsync's contract. Execution failures stop the runner.
+the backend meets Rebeqah's contract. Execution failures stop the runner.
 
 ### Findings and recommendation
 
@@ -187,7 +187,7 @@ Source review identifies important issues to verify with the local probes:
   or safe offline replication automatically.
 
 **Provisional direction:** prefer `object_store` as the first FS/S3-focused
-candidate behind a narrow Rebsync-owned interface. Both candidates pass the local
+candidate behind a narrow Rebeqah-owned interface. Both candidates pass the local
 baseline, so the remaining differentiation is API fit rather than local
 correctness: `object_store` exposes explicit create modes, object-specific
 pagination and a lower-level multipart contract, while OpenDAL offers broader
@@ -201,7 +201,7 @@ RAM use, binary size, availability or provider reliability.
 
 ## Provisional adoption
 
-`object_store` 0.14.2 is now the first adapter behind a Rebsync-owned
+`object_store` 0.14.2 is now the first adapter behind a Rebeqah-owned
 `ObjectStorage` trait, but only for a local filesystem root and only behind the
 `storage-object-store` feature in `rebsync-core`. The CLI enables that feature by
 default; `--no-default-features` omits it. This is an interface and durability

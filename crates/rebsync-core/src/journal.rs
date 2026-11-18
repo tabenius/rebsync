@@ -23,7 +23,7 @@ impl Journal {
             now.format("%Y%m%dT%H%M%S%.9fZ"),
             std::process::id()
         );
-        let base = format!("rebsync_{}", now.format("%Y-%m-%d_%H%M%S"));
+        let base = format!("rbq_{}", now.format("%Y-%m-%d_%H%M%S"));
         let mut path = home.join(format!("{base}.jsonl"));
         if path.exists() {
             path = home.join(format!("{base}_{}.jsonl", run_id));
@@ -39,7 +39,7 @@ impl Journal {
     }
     pub fn event(&mut self, kind: &str, subject: impl Serialize, detail: Value) -> Result<()> {
         self.sequence += 1;
-        let event = json!({"schema":"rebsync.event.v1", "run_id":self.run_id, "sequence":self.sequence, "at":Utc::now().to_rfc3339(), "kind":kind, "subject":subject, "detail":detail});
+        let event = json!({"schema":"rbq.event.v1", "run_id":self.run_id, "sequence":self.sequence, "at":Utc::now().to_rfc3339(), "kind":kind, "subject":subject, "detail":detail});
         serde_json::to_writer(&mut self.file, &event)?;
         self.file.write_all(b"\n")?;
         self.file.sync_data()?;
@@ -61,7 +61,7 @@ mod tests {
         for path in [&first.path, &second.path] {
             for line in std::fs::read_to_string(path)?.lines() {
                 let value: Value = serde_json::from_str(line)?;
-                assert_eq!(value["schema"], "rebsync.event.v1");
+                assert_eq!(value["schema"], "rbq.event.v1");
             }
         }
         Ok(())

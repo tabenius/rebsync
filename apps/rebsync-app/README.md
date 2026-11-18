@@ -1,6 +1,6 @@
-# RAGBAZ Rebekah (rebsync app)
+# RAGBAZ Rebeqah (rbq app)
 
-Rebekah is the Android companion for rebsync. It keeps a rebsync object
+Rebeqah is the Android companion for rbq. It keeps a rbq object
 store on the phone, on internal storage, an SD card or a USB drive. It can
 share that store with peers on a network you trust, and it shows who is
 connected and how much space is left.
@@ -10,14 +10,14 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
 ## What it does
 
 - **Splash.** A native Android 12+ splash (`core-splashscreen`) shows the
-  monogram, with a *RAGBAZ Rebekah* wordmark on API 31+. It hands off to a
+  monogram, with a *RAGBAZ Rebeqah* wordmark on API 31+. It hands off to a
   matching in-app splash.
 - **Sharing and connection strings.** A switch starts the experimental
-  `rebsync-peer/0` endpoint (port 8787, or a free port if 8787 is taken).
+  `rbq-peer/0` endpoint (port 8787, or a free port if 8787 is taken).
   - The endpoint offers read, list and create-if-absent. It has no overwrite
     and no delete.
   - Every network interface gets a URL, a QR code and a copyable connection
-    string: `rebsync+http://ADDRESS:PORT/v1?token=…`. Interfaces are Wi-Fi,
+    string: `rbq+http://ADDRESS:PORT/v1?token=…`. Interfaces are Wi-Fi,
     hotspot, USB tethering, Ethernet and VPN; mobile data is listed last.
   - Requests need `Authorization: Bearer TOKEN`, or `?token=` in the URL. The
     token is 192 bits from the system RNG, compared in constant time and
@@ -45,20 +45,20 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   - An interrupted move can be resumed. Identical files are kept, and a
     conflicting file is never overwritten.
 - **Layer snapshots.** The app shows the count and storage use of Mneme, Frog
-  and agenda snapshots, pushed with `rebsync peer push` or pulled back with
-  `rebsync peer pull`.
+  and agenda snapshots, pushed with `rbq peer push` or pulled back with
+  `rbq peer pull`.
 
 ## Limits, stated plainly
 
 - **Uninstall deletes the data.** Android deletes the app's folders when
-  Rebekah is uninstalled, including on SD cards and USB drives. Keep another
+  Rebeqah is uninstalled, including on SD cards and USB drives. Keep another
   copy of anything that matters.
 - **The connection is not encrypted.** Sharing uses plain HTTP, so anyone on
   the same network can read the token. Use networks you control, a hotspot or
   USB tethering.
 - **Removable media has fewer guarantees.** FAT and exFAT have no hard links
   and no Unix permissions, so the core falls back to check-then-rename. That is
-  safe with one writer, and Rebekah is the only writer. The app shows a warning
+  safe with one writer, and Rebeqah is the only writer. The app shows a warning
   for such volumes. Anyone holding the card can read it, and Mneme snapshots
   contain private transcripts.
 - **Some USB drives aren't usable.** Some devices expose USB drives only through
@@ -83,32 +83,32 @@ npx tauri android build --debug --apk --target aarch64
 Release, as a universal APK for arm64, armv7 and x86_64:
 
 ```bash
-export REBEKAH_KEYSTORE_PROPERTIES=/private/path/keystore.properties
+export RBQ_KEYSTORE_PROPERTIES=/private/path/keystore.properties
 npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
 ```
 
 `keystore.properties` contains `storeFile`, `storePassword`, `keyAlias` and
 `keyPassword`. Gradle can also read `src-tauri/gen/android/keystore.properties`,
-which is gitignored, or the variables `REBEKAH_STORE_FILE`,
-`REBEKAH_STORE_PASSWORD`, `REBEKAH_KEY_ALIAS` and `REBEKAH_KEY_PASSWORD` for CI.
+which is gitignored, or the variables `RBQ_STORE_FILE`,
+`RBQ_STORE_PASSWORD`, `RBQ_KEY_ALIAS` and `RBQ_KEY_PASSWORD` for CI.
 Never commit a keystore. Without one, the release APK is unsigned.
 
 CI release: push an immutable tag `vX.Y.Z` (after bumping the app versions in
 `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and its lock).
-`.github/workflows/rebekah-android.yml` builds, signs, verifies and publishes a
+`.github/workflows/rebeqah-android.yml` builds, signs, verifies and publishes a
 candidate release with the APK, SHA-256 inventory, Android metadata and an exact
 `ragbaz.release/1` manifest signed using tag-bound GitHub Actions Sigstore OIDC.
 Manual dispatch also requires that tag ref; releases are never replaced. It needs
-the repository secrets `REBEKAH_KEYSTORE_B64`, `REBEKAH_STORE_PASSWORD`,
-`REBEKAH_KEY_PASSWORD` and `REBEKAH_KEY_ALIAS`. Local builds may instead keep the
+the repository secrets `RBQ_KEYSTORE_B64`, `RBQ_STORE_PASSWORD`,
+`RBQ_KEY_PASSWORD` and `RBQ_KEY_ALIAS`. Local builds may instead keep the
 keystore entirely on the operator's machine. Never export a private GnuPG key or
 store its passphrase in CI; optional OpenPGP signing uses the local gpg-agent.
 
-The new public signing identity is pinned in `release/android-signing.json` at
+The Rebeqah public signing identity is pinned in `release/android-signing.json` at
 the repository root. It is **not compatible** with the previously documented
 0.2.0 signing certificate (`60:24:5D:…:F9:A9`) or debug installs. The new APK
 certificate SHA-256 is
-`3A:11:13:87:C0:76:7D:96:11:C9:9D:82:6E:99:D6:65:ED:56:05:B4:E0:15:F5:F8:43:3E:C9:2F:18:DB:84:A6`.
+`B0:93:A2:77:10:D4:E1:73:61:DE:BE:C5:B1:02:0A:AC:11:DE:FC:E0:30:2D:7A:5D:38:26:31:06:8C:E0:EF:4A`.
 Existing installations signed with another key cannot be upgraded in place.
 **Back up the object store before uninstalling**: uninstalling deletes app data.
 
@@ -137,7 +137,7 @@ incomplete ABI sets. `android.json` records package ID, versionCode, min/target
 SDK, native ABIs, certificate digest, APK digest and source commit. No device
 installation is claimed: releases remain candidates until separately tested.
 The protected `www.ragbaz` publisher selects `tabenius/rebsync`, product
-`rebekah`, platform `android`, and the same `vX.Y.Z` tag.
+`rebeqah`, platform `android`, and the same `vX.Y.Z` tag.
 
 ### Future F-Droid and other channels
 
@@ -145,13 +145,13 @@ For a lighter-weight URL subscription after the first GitHub release is
 published, [Obtainium](https://wiki.obtainium.imranr.dev/sources/#github) supports
 adding `https://github.com/tabenius/rebsync` as a GitHub source. Enable
 pre-releases to see our candidate channel and filter APK names with
-`^rebekah-.*-universal-release\.apk$`. This is a source configuration recipe,
+`^rebeqah-.*-universal-release\.apk$`. This is a source configuration recipe,
 not a claim that installation/background updates have been tested on a device.
 Future apps can use their own source URLs without implementing an F-Droid index.
 
 An APK URL is not a subscribable repository. `www.ragbaz` must additionally
 publish a signed F-Droid index with its own stable repository key before we
-advertise a single shared subscription URL for Rebekah and future apps. The
+advertise a single shared subscription URL for Rebeqah and future apps. The
 Android inventory above gives a distributor the package/update identity without
 coupling it to one download host. Keep versionCode increasing and retain the APK
 signing key across direct-download/custom-repository releases. Google Play
@@ -165,7 +165,7 @@ The app logic (peer endpoint, volumes, move) is tested without Tauri or GTK:
 cargo test --manifest-path logic-tests/Cargo.toml
 ```
 
-## Peer API (`rebsync-peer/0`, experimental)
+## Peer API (`rbq-peer/0`, experimental)
 
 | Request | Result |
 |---|---|

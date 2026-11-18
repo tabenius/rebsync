@@ -6,9 +6,9 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(path)
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Rebsync Test")
+        .env("GIT_AUTHOR_NAME", "Rebeqah Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Rebsync Test")
+        .env("GIT_COMMITTER_NAME", "Rebeqah Test")
         .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
         .args([
             "-c",
@@ -84,7 +84,7 @@ fn dry_run_is_non_mutating_and_missing_backup_blocks_apply() -> Result<()> {
     config.scan.roots = vec![repo.clone()];
     let dry = run(&config, RunOptions::default())?;
     assert_eq!(before, git(&repo, &["show-ref"])?);
-    assert!(!t.path().join(".rebekah").exists());
+    assert!(!t.path().join(".rebeqah").exists());
     assert!(dry.dry_run);
     let applied = run(&config, RunOptions { apply: true })?;
     assert_eq!(before, git(&repo, &["show-ref"])?);
@@ -338,10 +338,10 @@ fn encrypted_backup_can_restore_dirty_work_and_history() -> Result<()> {
     );
     assert!(!extracted.join("deleted.txt").exists());
     assert!(!extracted.join("ignored-secret").exists());
-    assert!(!extracted.join(".rebekah").exists());
+    assert!(!extracted.join(".rebeqah").exists());
     assert!(files.iter().any(|e| e.file_name() == "staged.patch"));
     assert!(files.iter().any(|e| e.file_name() == "unstaged.patch"));
-    let staging = repo.join(".rebekah/rebsync/staging");
+    let staging = repo.join(".rebeqah/rbq/staging");
     assert_eq!(fs::read_dir(staging)?.count(), 0);
     Ok(())
 }

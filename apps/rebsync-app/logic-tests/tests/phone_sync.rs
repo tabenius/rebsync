@@ -1,5 +1,5 @@
-//! End to end: the real `rebsync peer` client against the real app server.
-use rebekah_logic_tests::peer::{Clients, Peer as PhoneServer, SharedStorage};
+//! End to end: the real `rbq peer` client against the real app server.
+use rebeqah_logic_tests::peer::{Clients, Peer as PhoneServer, SharedStorage};
 use rebsync_core::{
     FsObjectStorage, ObjectKey, ObjectStorage,
     journal::Journal,
@@ -46,7 +46,7 @@ fn push_to_phone_then_pull_to_another_machine() {
         Arc::new(AtomicBool::new(false)),
     )
     .unwrap();
-    let connection = format!("rebsync+http://127.0.0.1:{}/v1?token=tok3n", server.port);
+    let connection = format!("rbq+http://127.0.0.1:{}/v1?token=tok3n", server.port);
     let client =
         || Peer::connect(peer::parse_connection(&connection, None).unwrap()).with_page_size(7);
     let mut journal = Journal::open(t.path()).unwrap();

@@ -11,7 +11,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
-    pub rebekah_home: PathBuf,
+    pub rbq_home: PathBuf,
     pub scan: Scan,
     pub git: Git,
     pub backup: Backup,
@@ -59,20 +59,20 @@ pub struct Dataset {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
-    /// Root of Rebsync-managed objects. Relative paths resolve against
-    /// rebekah_home. This is not a source checkout or a restic repository.
+    /// Root of Rebeqah-managed objects. Relative paths resolve against
+    /// rbq_home. This is not a source checkout or a restic repository.
     pub root: PathBuf,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root: PathBuf::from(".rebsync/objects"),
+            root: PathBuf::from(".rbq/objects"),
         }
     }
 }
 /// The Mneme layer: an owner-produced, owner-validated session-history index
-/// snapshot, published as content-addressed chunks into Rebsync object storage.
+/// snapshot, published as content-addressed chunks into Rebeqah object storage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MnemeConfig {
@@ -123,14 +123,14 @@ impl Config {
     pub fn defaults(home: PathBuf) -> Self {
         Self {
             version: 1,
-            rebekah_home: home,
+            rbq_home: home,
             scan: Scan {
                 roots: vec![],
                 max_depth: 14,
                 exclude: [
                     ".git",
-                    ".rebekah",
-                    ".rebsync",
+                    ".rebeqah",
+                    ".rbq",
                     ".cache",
                     ".cargo",
                     ".rustup",
@@ -179,7 +179,7 @@ impl Config {
     }
     pub fn roots(&self) -> Vec<PathBuf> {
         if self.scan.roots.is_empty() {
-            vec![self.rebekah_home.clone()]
+            vec![self.rbq_home.clone()]
         } else {
             self.scan.roots.clone()
         }
@@ -247,7 +247,7 @@ impl Config {
 
 #[derive(Default, Debug)]
 pub struct ConfigOverrides {
-    pub rebekah_home: Option<PathBuf>,
+    pub rbq_home: Option<PathBuf>,
     pub config: Option<PathBuf>,
     pub roots: Option<Vec<PathBuf>>,
     pub fetch: Option<bool>,
@@ -363,7 +363,7 @@ pub fn load_config_at(
     let mut origins = BTreeMap::new();
     mark(&value, "", "default", &mut origins);
     let mut files = vec![];
-    if let Some(path) = select(&config_home.join("rebsync"), "config")? {
+    if let Some(path) = select(&config_home.join("rbq"), "config")? {
         merge(
             &mut value,
             parse(&path)?,
@@ -375,28 +375,28 @@ pub fn load_config_at(
     }
     let explicit = overrides.config.as_ref().map(|p| parse(p)).transpose()?;
     let selected_home = overrides
-        .rebekah_home
+        .rbq_home
         .clone()
         .or_else(|| {
             explicit
                 .as_ref()
-                .and_then(|v| v.get("rebekah_home"))
+                .and_then(|v| v.get("rbq_home"))
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
         })
         .or_else(|| {
             value
-                .get("rebekah_home")
+                .get("rbq_home")
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
         })
         .unwrap_or(home);
     let selected_home = absolute(selected_home, &cwd);
-    if let Some(path) = select(&selected_home, "rebsync")? {
+    if let Some(path) = select(&selected_home, "rbq")? {
         let patch = parse(&path)?;
-        if patch.get("rebekah_home").is_some() {
+        if patch.get("rbq_home").is_some() {
             bail!(
-                "home-local configuration cannot redirect rebekah_home; use user config, --config or the positional argument"
+                "home-local configuration cannot redirect rbq_home; use user config, --config or the positional argument"
             );
         }
         merge(
@@ -420,8 +420,8 @@ pub fn load_config_at(
         files.push(path.clone());
     }
     let mut cli = serde_json::json!({});
-    if let Some(path) = overrides.rebekah_home {
-        cli["rebekah_home"] = serde_json::to_value(path)?;
+    if let Some(path) = overrides.rbq_home {
+        cli["rbq_home"] = serde_json::to_value(path)?;
     }
     if let Some(roots) = overrides.roots {
         cli["scan"]["roots"] = serde_json::to_value(roots)?;
@@ -449,35 +449,35 @@ pub fn load_config_at(
     }
     merge(&mut value, cli, "", "CLI", &mut origins);
     let mut config: Config = serde_json::from_value(value).context("invalid configuration")?;
-    config.rebekah_home = absolute(config.rebekah_home, &cwd);
-    config.storage.root = absolute(config.storage.root, &config.rebekah_home);
+    config.rbq_home = absolute(config.rbq_home, &cwd);
+    config.storage.root = absolute(config.storage.root, &config.rbq_home);
     config.scan.roots = config
         .scan
         .roots
         .into_iter()
-        .map(|p| absolute(p, &config.rebekah_home))
+        .map(|p| absolute(p, &config.rbq_home))
         .collect();
     if let Some(path) = config.backup.password_file.take() {
-        config.backup.password_file = Some(absolute(path, &config.rebekah_home));
+        config.backup.password_file = Some(absolute(path, &config.rbq_home));
     }
     if let Some(path) = config.mneme.db.take() {
-        config.mneme.db = Some(absolute(path, &config.rebekah_home));
+        config.mneme.db = Some(absolute(path, &config.rbq_home));
     }
     // A bare program name stays a PATH lookup; anything with a separator is a path.
     if config.mneme.binary.components().count() > 1 {
-        config.mneme.binary = absolute(config.mneme.binary.clone(), &config.rebekah_home);
+        config.mneme.binary = absolute(config.mneme.binary.clone(), &config.rbq_home);
     }
     if let Some(path) = config.frog.db.take() {
-        config.frog.db = Some(absolute(path, &config.rebekah_home));
+        config.frog.db = Some(absolute(path, &config.rbq_home));
     }
     for program in [&mut config.frog.binary, &mut config.frog.python] {
         if program.components().count() > 1 {
-            *program = absolute(program.clone(), &config.rebekah_home);
+            *program = absolute(program.clone(), &config.rbq_home);
         }
     }
-    config.agenda.path = absolute(config.agenda.path.clone(), &config.rebekah_home);
+    config.agenda.path = absolute(config.agenda.path.clone(), &config.rbq_home);
     for dataset in &mut config.backup.datasets {
-        dataset.path = absolute(dataset.path.clone(), &config.rebekah_home);
+        dataset.path = absolute(dataset.path.clone(), &config.rbq_home);
     }
     config.validate()?;
     Ok(EffectiveConfig {
@@ -496,10 +496,10 @@ mod tests {
         let home = t.path().join("home");
         let xdg = t.path().join("xdg");
         fs::create_dir_all(&home)?;
-        fs::create_dir_all(xdg.join("rebsync"))?;
-        fs::write(xdg.join("rebsync/config.toml"), "[git]\npush = false\n")?;
+        fs::create_dir_all(xdg.join("rbq"))?;
+        fs::write(xdg.join("rbq/config.toml"), "[git]\npush = false\n")?;
         fs::write(
-            home.join("rebsync.yaml"),
+            home.join("rbq.yaml"),
             "git:\n  push: true\nscan:\n  roots: [src]\n",
         )?;
         let explicit = t.path().join("explicit.toml");
@@ -533,9 +533,9 @@ mod tests {
     #[test]
     fn rejects_unknown_keys_and_ambiguous_formats() -> Result<()> {
         let t = tempfile::tempdir()?;
-        fs::write(t.path().join("rebsync.toml"), "[git]\nforce_push = true\n")?;
+        fs::write(t.path().join("rbq.toml"), "[git]\nforce_push = true\n")?;
         assert!(load_config_at(t.path().into(), t.path().join("xdg"), Default::default()).is_err());
-        fs::write(t.path().join("rebsync.yaml"), "version: 1\n")?;
+        fs::write(t.path().join("rbq.yaml"), "version: 1\n")?;
         assert!(load_config_at(t.path().into(), t.path().join("xdg"), Default::default()).is_err());
         Ok(())
     }

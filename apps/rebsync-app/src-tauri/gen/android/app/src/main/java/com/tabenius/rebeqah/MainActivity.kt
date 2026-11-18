@@ -1,4 +1,4 @@
-package com.tabenius.rebsync
+package com.tabenius.rebeqah
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -16,7 +16,7 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Hosts the Rebekah web UI. Before the Rust side starts, it tells the native
+ * Hosts the Rebeqah web UI. Before the Rust side starts, it tells the native
  * code where private files live and which volumes (internal, SD card, USB
  * drive) this app may write to, and keeps that list current as media is
  * mounted and removed.
@@ -31,7 +31,7 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     installSplashScreen()
     enableEdgeToEdge()
-    Os.setenv("REBSYNC_FILES_DIR", filesDir.absolutePath, true)
+    Os.setenv("RBQ_FILES_DIR", filesDir.absolutePath, true)
     publishVolumes()
     super.onCreate(savedInstanceState)
     val filter = IntentFilter().apply {
@@ -78,7 +78,7 @@ class MainActivity : TauriActivity() {
       val temp = File(filesDir, "volumes.json.tmp")
       temp.writeText(volumes.toString())
       temp.renameTo(target)
-      Os.setenv("REBSYNC_VOLUMES_FILE", target.absolutePath, true)
+      Os.setenv("RBQ_VOLUMES_FILE", target.absolutePath, true)
     }
   }
 }

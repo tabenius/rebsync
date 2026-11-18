@@ -1,4 +1,4 @@
-# rebsync
+# rbq
 
 Preserve work, safely exchange Git branches, and report what remains at risk.
 
@@ -14,12 +14,12 @@ Requires Rust/Cargo, Git, and GNU tar. Encrypted backup additionally requires
 ```bash
 cargo test --workspace
 cargo install --path crates/rebsync-cli --locked
-rebsync --help
-rebsync --root src/ragbaz
-rebsync . --dry-run --json
+rbq --help
+rbq --root src/ragbaz
+rbq . --dry-run --json
 ```
 
-`rebsync .` sets Rebekah home to the current directory. Otherwise it defaults to
+`rbq .` sets Rebeqah home to the current directory. Otherwise it defaults to
 `$HOME`. Relative scan roots, password-file and dataset paths resolve against that
 home. Configuration values do not perform shell expansion; use an absolute path
 instead of writing `$HOME` inside TOML/YAML.
@@ -32,7 +32,7 @@ instead of writing `$HOME` inside TOML/YAML.
 component schema and Frog's typed dependency model (`install`, `runtime`,
 `build`, `debug`), as adopted by WeftMark. Frog and Mneme are **optional runtime**
 dependencies: their owner CLIs are needed only for the corresponding layers,
-which are disabled by default. Installing or building Rebsync does not install
+which are disabled by default. Installing or building Rebeqah does not install
 either component. Tests use owner-CLI fixtures rather than sibling checkouts.
 
 External packages remain in Cargo/npm manifests, not in this component graph.
@@ -56,22 +56,22 @@ python3 scripts/validate_component.py --schema schemas/ragbaz.component.schema.j
 Precedence, lowest first:
 
 1. Built-in defaults.
-2. `$XDG_CONFIG_HOME/rebsync/config.toml`, `.yaml` or `.yml` (default config home:
+2. `$XDG_CONFIG_HOME/rbq/config.toml`, `.yaml` or `.yml` (default config home:
    `$HOME/.config`).
-3. `<rebekah_home>/rebsync.toml`, `.yaml` or `.yml`.
+3. `<rbq_home>/rbq.toml`, `.yaml` or `.yml`.
 4. `--config PATH`.
 5. Explicit CLI overrides.
 
 Lists replace earlier lists. Unknown keys and competing formats at one layer are
-errors. User/explicit configuration may set `rebekah_home`; a home-local file may
-not redirect it. Relative `rebekah_home` resolves against the invoking directory.
+errors. User/explicit configuration may set `rbq_home`; a home-local file may
+not redirect it. Relative `rbq_home` resolves against the invoking directory.
 
 ```bash
-rebsync config explain
-rebsync --config examples/rebsync.toml --no-push --dry-run
+rbq config explain
+rbq --config examples/rbq.toml --no-push --dry-run
 ```
 
-See [the working TOML example](examples/rebsync.toml). YAML has the same structure.
+See [the working TOML example](examples/rbq.toml). YAML has the same structure.
 Configuration explain redacts the backup repository URL, since URLs can contain
 credentials. Never put secrets into configuration or source control.
 
@@ -82,8 +82,8 @@ Configure an **existing** restic repository and a separate password file (or
 
 ```toml
 [backup]
-repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rebsync"
-password_file = "/private/path/rebsync-restic-password"
+repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rbq"
+password_file = "/private/path/rbq-restic-password"
 ```
 
 Supply bucket-scoped `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the
@@ -94,8 +94,8 @@ created or inferred.
 Initialize only when deliberately creating a new repository:
 
 ```bash
-rebsync backup-init --confirm --config /path/to/rebsync.toml
-rebsync --config /path/to/rebsync.toml --apply
+rbq backup-init --confirm --config /path/to/rbq.toml
+rbq --config /path/to/rbq.toml --apply
 ```
 
 Each repository snapshot contains:
@@ -119,12 +119,12 @@ policies. Selected quiescent directories can be declared as `backup.datasets`.
 Agenda editions and the Frog database have their own owner-validated layers (see below).
 
 A filesystem restic repository may be useful for tests or an enrolled USB drive,
-but rebsync does not assert that it is independent of this machine. It never
+but rbq does not assert that it is independent of this machine. It never
 prunes backups or propagates deletions.
 
 ## Local object storage
 
-`rebsync` can publish Rebsync-managed objects into a local filesystem root behind
+`rbq` can publish Rebeqah-managed objects into a local filesystem root behind
 a narrow `ObjectStorage` trait. This is the **client-side** contract for future
 S3/R2 adapters, not an S3 server, not a restic REST server, and not a change to how
 restic stores or encrypts existing snapshots.
@@ -136,24 +136,24 @@ not use this layer.
 
 ```toml
 [storage]
-# Relative paths resolve against rebekah_home. Default shown.
-root = ".rebsync/objects"
+# Relative paths resolve against rbq_home. Default shown.
+root = ".rbq/objects"
 ```
 
 `--storage-root PATH` overrides the file for one invocation, which is the easiest
 way to keep experiments away from real home storage:
 
 ```bash
-rebsync storage path
-rebsync storage path --storage-root /mnt/backup/rebsync --json
-rebsync storage check --storage-root /tmp/rebsync-probe --json
+rbq storage path
+rbq storage path --storage-root /mnt/backup/rbq --json
+rbq storage check --storage-root /tmp/rbq-probe --json
 ```
 
 `storage fsck [--layer L]` reads every layer snapshot (Mneme and multi-file
 formats), streams each chunk and checks chunk and whole-file digests, and reports
 damaged, missing or unreadable snapshots plus unreferenced chunks. It writes
 nothing and exits `2` on any failure. It is a structural check; the owners'
-validators run through `rebsync <layer> verify ID`.
+validators run through `rbq <layer> verify ID`.
 
 `storage check` writes a `_probes/check-*` object, verifies create-if-absent,
 readback, range read, HEAD and raw-prefix listing, then deletes it. It never touches
@@ -168,7 +168,7 @@ fails, so damaged metadata is not advertised as restorable.
 ## Owner schemas and migrations
 
 Frog, Mneme and Daily Agenda own their data formats and migration logic.
-Rebsync does **not** run SQL migrations, invoke `frog db migrate`, bypass
+Rebeqah does **not** run SQL migrations, invoke `frog db migrate`, bypass
 `FROG_ALLOW_SCHEMA_SKEW`, or change an existing/live database. Applied migration
 names in a Frog snapshot are evidence of its history, not proof that the
 installed owner can use it.
@@ -180,7 +180,7 @@ Owner export/validation JSON may include this optional extension:
 ```
 
 `current` permits the remaining integrity checks; `required`, `unavailable`,
-`unknown`, and unrecognized states block the operation. Rebsync also understands
+`unknown`, and unrecognized states block the operation. Rebeqah also understands
 Frog's existing nonempty `behind` (migration required) and `ahead` (compatible
 tooling unavailable) reports, including nonzero export exits. Unknown Mneme
 snapshot or Agenda manifest schemas are migration/compatibility blockers, not
@@ -201,12 +201,12 @@ snapshot, never overwrite the old immutable objects.
 
 [Mneme](https://github.com/tabenius/mneme)'s index is a live SQLite WAL database,
 which repository snapshots and `directory` datasets refuse. This layer never
-copies the live files. Mneme owns the format, so Rebsync asks it to export and
+copies the live files. Mneme owns the format, so Rebeqah asks it to export and
 to validate:
 
 1. `mneme snapshot create` writes a consistent `VACUUM INTO` copy, runs
    `integrity_check`, and reports schema, generation, counts and SHA-256.
-2. Rebsync re-hashes the file itself and publishes it into the object store as
+2. Rebeqah re-hashes the file itself and publishes it into the object store as
    fixed-size, content-addressed chunks plus an immutable manifest:
 
    ```text
@@ -223,7 +223,7 @@ to validate:
 ```toml
 [mneme]
 enabled = true            # publish during --apply runs
-binary = "mneme"          # PATH lookup; paths resolve against rebekah_home
+binary = "mneme"          # PATH lookup; paths resolve against rbq_home
 # db = "/private/mneme/index.sqlite"   # else mneme's default / MNEME_DB
 label = "local"           # one key segment naming this history store
 chunk_bytes = 65536       # multiple of 4096, 4 KiB..64 MiB
@@ -232,11 +232,11 @@ timeout_seconds = 900
 ```
 
 ```bash
-rebsync mneme publish                 # export + publish now (journaled)
-rebsync mneme list [--label local] [--json]
-rebsync mneme stats [--json]          # read-only: dedup, orphan and missing chunks
-rebsync mneme verify local/20261114T112650.973Z-d7af0bf4f612
-rebsync mneme restore ID --into /private/new/index.sqlite
+rbq mneme publish                 # export + publish now (journaled)
+rbq mneme list [--label local] [--json]
+rbq mneme stats [--json]          # read-only: dedup, orphan and missing chunks
+rbq mneme verify local/20261114T112650.973Z-d7af0bf4f612
+rbq mneme restore ID --into /private/new/index.sqlite
 ```
 
 **Chunk size.** `VACUUM INTO` writes whole 4 KiB SQLite pages, so chunks that
@@ -275,7 +275,7 @@ The same owner-export pattern as the Mneme layer, stored under `frog/v1/…` and
 **Frog (`AGENTS.db`).** `frog --db DB --json snapshot --dest <private staging>`
 makes a consistent copy with SQLite's online backup API. (As always, Frog also
 records a `workspace.snapshot` event in the live database.) Frog has no snapshot
-validator, so Rebsync checks the copy itself, through Python's standard `sqlite3`
+validator, so Rebeqah checks the copy itself, through Python's standard `sqlite3`
 module opened read-only and immutable:
 
 - `PRAGMA integrity_check`;
@@ -290,7 +290,7 @@ step you take on the Frog side.
 
 **Agenda editions.** The generator commits `manifest.json`
 (`ragbaz.daily-agenda-manifest.v1`) last, under an exclusive `.publish.lock`, and
-that manifest is the owner's validator. Rebsync copies an edition as follows:
+that manifest is the owner's validator. Rebeqah copies an edition as follows:
 
 1. It takes a shared lock on `.publish.lock`, so an edition is never copied
    while it is being replaced.
@@ -318,8 +318,8 @@ require_ready = true
 ```
 
 ```bash
-rebsync frog publish | list | stats | verify ID | restore ID --into /new/AGENTS.db
-rebsync agenda publish | list | stats | verify ID | restore ID --into /new/edition
+rbq frog publish | list | stats | verify ID | restore ID --into /new/AGENTS.db
+rbq agenda publish | list | stats | verify ID | restore ID --into /new/edition
 ```
 
 In `--apply` runs these layers report `backed-up` (restic succeeded),
@@ -327,16 +327,16 @@ In `--apply` runs these layers report `backed-up` (restic succeeded),
 `backup.datasets` entry with `kind = "agenda"` now points to the `[agenda]`
 layer instead.
 
-## Instructions page (`rebsync serve`)
+## Instructions page (`rbq serve`)
 
 ```bash
-rebsync serve                        # https://localhost:8790/ (self-signed)
-rebsync serve --bind 0.0.0.0         # share the page on the local network and announce it
-rebsync serve --plain-http --port 8080 --no-announce
+rbq serve                        # https://localhost:8790/ (self-signed)
+rbq serve --bind 0.0.0.0         # share the page on the local network and announce it
+rbq serve --plain-http --port 8080 --no-announce
 ```
 
 - **What it shows.** A read-only page with live status built from the
-  effective configuration: Rebekah home, object store, whether a backup is
+  effective configuration: Rebeqah home, object store, whether a backup is
   configured, and the fleet authority. Each layer appears with its `--apply`
   state, snapshot count, freshness and storage use, followed by everyday,
   phone-sync and offline-git recipes. `/v1/status` returns the same as JSON;
@@ -344,13 +344,13 @@ rebsync serve --plain-http --port 8080 --no-announce
 - **No secrets.** The backup repository URL is redacted, and tokens and
   password files are never read. The page is served with
   `Content-Security-Policy: default-src 'none'`.
-- **HTTPS.** HTTPS is the default. On first use rebsync generates a
+- **HTTPS.** HTTPS is the default. On first use rbq generates a
   self-signed certificate for `localhost`, `127.0.0.1`, `::1` and
-  `<hostname>.local`, and stores it owner-only under `.rebekah/rebsync/tls/`.
+  `<hostname>.local`, and stores it owner-only under `.rebeqah/rbq/tls/`.
   It prints the certificate's SHA-256 fingerprint, so you can check a
   browser's warning instead of clicking through it.
-- **Announcement.** When bound beyond localhost, rebsync advertises
-  `_rebsync._tcp` (TXT `path=/`, `scheme=https|http`). It tries the system
+- **Announcement.** When bound beyond localhost, rbq advertises
+  `_rbq._tcp` (TXT `path=/`, `scheme=https|http`). It tries the system
   Avahi daemon first (`avahi-publish-service`, which talks to Avahi over
   D-Bus), then falls back to a built-in mDNS responder. It also posts a
   desktop notification over the D-Bus session bus when one exists. Each
@@ -363,22 +363,22 @@ rebsync serve --plain-http --port 8080 --no-announce
 
 For when GitHub is down, blocked, or out of reach for weeks or months. Each
 discovered repository's committed history is published as Git bundles into the
-object store, the phone carries them (`rebsync peer push` / `pull`), and another
+object store, the phone carries them (`rbq peer push` / `pull`), and another
 machine fetches them. No server and no network beyond the local link.
 
 ```bash
-rebsync git publish                         # every repository whose refs changed
-rebsync peer push                           # laptop A → phone
+rbq git publish                         # every repository whose refs changed
+rbq peer push                           # laptop A → phone
 # … later, on laptop B …
-rebsync peer pull --layer git               # phone → laptop B
-rebsync git list
-rebsync git fetch ID --repo ~/src/project --as laptop-a
-git log rebsync-laptop-a/main               # review, then merge deliberately
-rebsync git restore ID --into ~/src/new-copy   # or clone a repository B never had
+rbq peer pull --layer git               # phone → laptop B
+rbq git list
+rbq git fetch ID --repo ~/src/project --as laptop-a
+git log rbq-laptop-a/main               # review, then merge deliberately
+rbq git restore ID --into ~/src/new-copy   # or clone a repository B never had
 ```
 
 - **Owner export.** Git produces each bundle itself (`git bundle create`
-  for branches, tags and HEAD), and rebsync checks it with `git bundle verify`.
+  for branches, tags and HEAD), and rbq checks it with `git bundle verify`.
   Each repository gets a stable label, `<name>-<hash of its GitHub identity or
   path>`.
 - **Incremental chains.** The first snapshot is a full bundle. Later ones
@@ -397,14 +397,14 @@ rebsync git restore ID --into ~/src/new-copy   # or clone a repository B never h
   the chain is an error, never a silent gap. A missing link is named, with a
   hint to pull it from a peer.
 - **Never rewrites your work.** `fetch` writes branches to
-  `refs/remotes/rebsync-<name>/*` and tags to `refs/rebsync/<name>/tags/*`
+  `refs/remotes/rbq-<name>/*` and tags to `refs/rbq/<name>/tags/*`
   only. Local branches, local tags and the worktree are untouched, which
   makes it safe when both sides kept committing offline. `restore` only
   creates a new directory and removes its temporary remote. Git hooks are
   disabled throughout.
-- **Retention and checks.** `rebsync git prune` keeps the entire chain behind
+- **Retention and checks.** `rbq git prune` keeps the entire chain behind
   every kept snapshot, so pruning cannot make a survivor unrestorable.
-  `rebsync storage fsck` checks git snapshots like any other layer.
+  `rbq storage fsck` checks git snapshots like any other layer.
 - **Scope.** Committed history only. Uncommitted work and stashes are covered
   by the encrypted repository snapshots (restic), not by this layer. Bundles
   contain whatever history contains, including any secret ever committed; the
@@ -425,9 +425,9 @@ Snapshots are kept until you prune them. Pruning matters after
 `mneme erase`, because older snapshots still contain the erased sessions.
 
 ```bash
-rebsync mneme prune --keep-last 7                  # dry run: shows what would go
-rebsync frog prune --keep-last 3 --keep-days 14 --apply
-rebsync agenda prune --label local --keep-last 30 --apply
+rbq mneme prune --keep-last 7                  # dry run: shows what would go
+rbq frog prune --keep-last 3 --keep-days 14 --apply
+rbq agenda prune --label local --keep-last 30 --apply
 ```
 
 - **Dry-run by default.** `--apply` deletes, and the deletion is journaled.
@@ -441,22 +441,42 @@ rebsync agenda prune --label local --keep-last 30 --apply
   because its chunks might still be in use.
 - **Locking.** Publish and prune take the same per-layer lock, so they never
   interleave.
-- **Local only.** Peers keep their own copies, and `rebsync peer pull` would
+- **Local only.** Peers keep their own copies, and `rbq peer pull` would
   bring pruned snapshots back. Prune the phone's copies separately, or don't
   pull from it afterwards. Restic snapshots of the same data are untouched;
   remove those with `restic forget --prune`.
 
+## Terminal interface and shell completions
+
+`rbq` uses color when attached to a terminal and honors `NO_COLOR`/`TERM=dumb`.
+JSON, completion scripts and piped output stay uncolored and machine-readable.
+
+```bash
+rbq --color auto peer status           # default; detect terminal capability
+rbq --color always peer status         # force styling
+rbq --color never peer status          # plain text
+rbq completions bash > ~/.local/share/bash-completion/completions/rbq
+rbq completions fish > ~/.config/fish/completions/rbq.fish
+rbq peer push --retries 5 --timeout-seconds 90
+```
+
+Peer commands retry only transient DNS/connection failures, timeouts and
+`408/502/503/504` responses, with bounded exponential backoff and small jitter.
+Authentication failures, validation errors, malformed responses and write
+conflicts fail immediately. A lost create response is safe to retry: a second
+identical `put` reports `already present` rather than transferring again.
+
 ## Phone diagnostics and Chromebook connections
 
 ```bash
-rebsync phone diagnose --json                 # local lsusb/sysfs + IP routes
-rebsync phone diagnose --mtp                  # opt in to MTP storage metadata
-rebsync phone diagnose --adb-serial SERIAL    # authorized phone's IPs + df
-rebsync phone diagnose --include-identifiers  # opt in to USB/ADB serial output
-rebsync phone instructions --chromebook       # print all connection guides
-rebsync phone instructions --chromebook --transport usb
-rebsync phone instructions --chromebook --transport tcp
-rebsync phone instructions --chromebook --transport bluetooth
+rbq phone diagnose --json                 # local lsusb/sysfs + IP routes
+rbq phone diagnose --mtp                  # opt in to MTP storage metadata
+rbq phone diagnose --adb-serial SERIAL    # authorized phone's IPs + df
+rbq phone diagnose --include-identifiers  # opt in to USB/ADB serial output
+rbq phone instructions --chromebook       # print all connection guides
+rbq phone instructions --chromebook --transport usb
+rbq phone instructions --chromebook --transport tcp
+rbq phone instructions --chromebook --transport bluetooth
 ```
 
 Diagnostics/guides do not load backup configuration, create journals/object
@@ -478,14 +498,14 @@ that a device is trusted. Requested probes that are incomplete exit `2`.
   MTP candidates and eight storage roots each. MTP is not a synchronization or
   live-database-export transport.
 - **USB peer sync:** the printed guide uses an explicitly authorized ADB device
-  and a loopback `adb -s SERIAL forward --no-rebind` tunnel to Rebekah Sharing.
+  and a loopback `adb -s SERIAL forward --no-rebind` tunnel to Rebeqah Sharing.
   `--adb-serial SERIAL` only queries an already authorized device's `ip addr`
   and `df -k`; it never pairs, enables debugging or creates tunnels. ADB itself
   may start its local helper server. The data/emulated-storage rows can be views
   of the same underlying filesystem; do not sum them as independent disks.
-- **TCP/IP:** use Rebekah's displayed reachable IP/port on trusted Wi-Fi, a
+- **TCP/IP:** use Rebeqah's displayed reachable IP/port on trusted Wi-Fi, a
   hotspot, USB tethering or another explicitly established link. To check only
-  that endpoint: `rebsync phone diagnose --peer http://PHONE_IP:PORT --token-file
+  that endpoint: `rbq phone diagnose --peer http://PHONE_IP:PORT --token-file
   /private/peer-token`. HTTP peer JSON is size-bounded, error bodies are
   suppressed and connection tokens are not included in diagnostic output.
 - **Bluetooth:** print the host pairing/PAN guide. If ChromeOS and Android offer
@@ -496,8 +516,8 @@ that a device is trusted. Requested probes that are incomplete exit `2`.
   settings if offered. Crostini's `100.115.92.x` gateway is virtual, not a phone
   IP. Inspect the ChromeOS network settings for the host connection; there is
   no standard Linux API that authenticates Phone Hub identity or proves that
-  USB, hotspot provider and Rebekah peer are the same phone. Authorized ADB IP
-  observations can help a person correlate them, but Rebsync deliberately keeps
+  USB, hotspot provider and Rebeqah peer are the same phone. Authorized ADB IP
+  observations can help a person correlate them, but Rebeqah deliberately keeps
   `same_physical_phone: unknown` and does not enroll on that basis.
 
 Guides are printed, not executed: read them, replace placeholders, approve
@@ -505,17 +525,17 @@ debugging/pairing on both devices and remove only tunnels you created. See
 [Android's ADB documentation](https://developer.android.com/tools/adb) and
 [ChromeOS Linux guidance](https://support.google.com/chromebook/answer/9145439).
 
-## Phone sync (Rebekah)
+## Phone sync (Rebeqah)
 
-`rebsync peer` exchanges layer objects with the Rebekah Android app's
-`rebsync-peer/0` endpoint. Copy the connection string from the app's Sharing
-card. Pass it through `REBSYNC_PEER` so the token stays out of shell history:
+`rbq peer` exchanges layer objects with the Rebeqah Android app's
+`rbq-peer/0` endpoint. Copy the connection string from the app's Sharing
+card. Pass it through `RBQ_PEER` so the token stays out of shell history:
 
 ```bash
-export REBSYNC_PEER='rebsync+http://192.168.1.42:8787/v1?token=…'
-rebsync peer status                  # what the phone holds, per layer
-rebsync peer push                    # this machine → phone
-rebsync peer pull --layer frog       # phone → this machine, Frog only
+export RBQ_PEER='rbq+http://192.168.1.42:8787/v1?token=…'
+rbq peer status                  # what the phone holds, per layer
+rbq peer push                    # this machine → phone
+rbq peer pull --layer frog       # phone → this machine, Frog only
 ```
 
 - **Additive only.** An object present on both sides is never replaced. A size
@@ -534,28 +554,28 @@ rebsync peer pull --layer frog       # phone → this machine, Frog only
   `verification_failed` in the report; failures exit `2`). A newly received
   manifest that fails this check is removed again (`quarantined`) so a damaged
   snapshot is never listed as if it were restorable. Owner validation
-  (SQLite integrity, edition manifests) is still `rebsync <layer> verify ID`.
+  (SQLite integrity, edition manifests) is still `rbq <layer> verify ID`.
 - **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
-  hotspot or USB tethering. Listings page with `after=`, which needs Rebekah
-  0.2.1 or later; older apps produce a clear error.
+  hotspot or USB tethering. Listings page with `after=`, which needs Rebeqah
+  0.2.3 or later; Rebekah installs use an incompatible protocol and are refused.
 
-### Local transports (`rebsync-peer/1`)
+### Local transports (`rbq-peer/1`)
 
-For same-host or relayed links, `rebsync peer` can also speak a frame protocol
+For same-host or relayed links, `rbq peer` can also speak a frame protocol
 over TCP, Unix stream sockets and Unix datagram sockets. The sync rules, layer
 filtering and verification are identical; only the wire changes.
 
 ```bash
 # Serve this object store to another local process.
-rebsync peer serve --listen unix:///run/user/1000/rebsync.sock --token-file ~/.rebsync/token
-rebsync peer serve --listen tcp://127.0.0.1:8787 --token-file ~/.rebsync/token
+rbq peer serve --listen unix:///run/user/1000/rbq.sock --token-file ~/.rbq/token
+rbq peer serve --listen tcp://127.0.0.1:8787 --token-file ~/.rbq/token
 
 # Point status/push/pull at a local transport.
-export REBSYNC_PEER='rebsync+tcp://127.0.0.1:8787?token=…'
-rebsync peer status
+export RBQ_PEER='rbq+tcp://127.0.0.1:8787?token=…'
+rbq peer status
 
 # Exercise TCP, Unix stream and Unix datagram loopback end to end.
-rebsync peer selftest
+rbq peer selftest
 ```
 
 - **Authentication is one shared token.** It is compared in constant time and
@@ -563,11 +583,11 @@ rebsync peer selftest
   world-readable file; Unix sockets are created owner-only.
 - **Encryption is the transport's job.** TCP is not encrypted. `serve` warns
   when a listen address is reachable beyond this host. Put a tunnel or a
-  loopback-only bridge in front of a public path; rebsync does not speak TLS.
+  loopback-only bridge in front of a public path; rbq does not speak TLS.
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.
-- **No mesh integration.** A relay must expose one of these sockets; rebsync
+- **No mesh integration.** A relay must expose one of these sockets; rbq
   does not talk to OSHI or other mesh APIs directly.
 
 ## Android compile check
@@ -613,20 +633,20 @@ transport and peer protocol.
 - Disables Git hooks for its own operations. This is not a sandbox for malicious
   repositories or arbitrary Git configurations; run only on trusted local repos.
 
-An advisory shared-Git-directory lock coordinates rebsync instances. Ordinary
+An advisory shared-Git-directory lock coordinates rbq instances. Ordinary
 editors and Git commands do not honor that lock; keep repositories quiescent
 during preservation. Fingerprints catch ordinary concurrent modifications but do
 not promise an atomic filesystem snapshot.
 
 ## Journals and reconciliation
 
-Writes `<rebekah_home>/rebsync_YYYY-MM-DD_HHMMSS.jsonl` in UTC, with collision-safe
+Writes `<rbq_home>/rbq_YYYY-MM-DD_HHMMSS.jsonl` in UTC, with collision-safe
 filenames, action intents/results and before/after branch IDs. Dry-runs write a
 journal but do not mutate repository refs, fetch, push or back up. Logs exclude
 raw subprocess output and unknown remote URLs to avoid leaking credentials.
 
 Applied runs leave reconciliation instructions under
-`.rebekah/rebsync/reconcile/<repository-id>/<run-id>/rebekah-repo-reconcile-merge.md`.
+`.rebeqah/rbq/reconcile/<repository-id>/<run-id>/rbq-repo-reconcile-merge.md`.
 Automatic OpenCode execution and default-branch publication are not implemented.
 
 The fleet authority is **kali-1**, not whichever GitHub tip is freshest. This
@@ -649,10 +669,10 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
-  resume engine. Peer sync is manual (`rebsync peer`), local-network and
+  resume engine. Peer sync is manual (`rbq peer`), local-network and
   unencrypted; it can use HTTP or the local TCP/Unix transports, but there is no
   discovery, scheduling or TLS yet.
-- Retention is manual (`rebsync <layer> prune`); there is no scheduled policy, and
+- Retention is manual (`rbq <layer> prune`); there is no scheduled policy, and
   pruning is not propagated to peers or restic.
 - No USB enrollment, Bluetooth or mesh autodiscovery. Phone sync remains a
   manual HTTP connection or an explicit local-transport bridge.

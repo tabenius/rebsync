@@ -8,9 +8,9 @@
 //! untrusted: content-addressed chunks are re-hashed, manifests must parse and
 //! validate, and only layer prefixes are accepted.
 //!
-//! The sync logic talks to [`PeerApi`]. The Rebekah app speaks
-//! `rebsync-peer/0` over HTTP ([`Peer`], feature `peer-http`); the local
-//! transports in [`crate::transport`] speak `rebsync-peer/1` over TCP, Unix
+//! The sync logic talks to [`PeerApi`]. The Rebeqah app speaks
+//! `rbq-peer/0` over HTTP ([`Peer`], feature `peer-http`); the local
+//! transports in [`crate::transport`] speak `rbq-peer/1` over TCP, Unix
 //! stream sockets or Unix datagram sockets.
 
 use crate::{
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "peer-http")]
 use std::{io::Read, time::Duration};
 
-pub const PROTOCOL: &str = "rebsync-peer/0";
+pub const PROTOCOL: &str = "rbq-peer/0";
 #[cfg(feature = "peer-http")]
 const PAGE: usize = 5000;
 #[cfg(feature = "peer-http")]
@@ -52,15 +52,15 @@ pub struct Target {
     pub token: String,
 }
 
-/// Parse `rebsync+http://host:port/v1?token=T` (as shown by the app) or a
+/// Parse `rbq+http://host:port/v1?token=T` (as shown by the app) or a
 /// plain `http://host:port` plus a separately supplied token.
 #[cfg(feature = "peer-http")]
 pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<Target> {
     let raw = connection.trim();
-    let raw = raw.strip_prefix("rebsync+").unwrap_or(raw);
+    let raw = raw.strip_prefix("rbq+").unwrap_or(raw);
     ensure!(
         raw.starts_with("http://"),
-        "peer connections are http://HOST:PORT (rebsync-peer/0 has no TLS yet)"
+        "peer connections are http://HOST:PORT (rbq-peer/0 has no TLS yet)"
     );
     let (location, query) = raw.split_once('?').unwrap_or((raw, ""));
     let location = location.trim_end_matches('/');
@@ -93,6 +93,89 @@ pub struct Peer {
     agent: ureq::Agent,
     target: Target,
     page: usize,
+    retries: u8,
+}
+
+#[cfg(feature = "peer-http")]
+struct AttemptError {
+    error: anyhow::Error,
+    transient: bool,
+}
+
+#[cfg(feature = "peer-http")]
+impl From<ureq::Error> for AttemptError {
+    fn from(error: ureq::Error) -> Self {
+        let transient = match &error {
+            ureq::Error::Status(code, _) => matches!(code, 408 | 502 | 503 | 504),
+            ureq::Error::Transport(transport) => matches!(
+                transport.kind(),
+                ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io
+            ),
+        };
+        Self {
+            error: describe(error),
+            transient,
+        }
+    }
+}
+
+#[cfg(feature = "peer-http")]
+impl From<std::io::Error> for AttemptError {
+    fn from(error: std::io::Error) -> Self {
+        let transient = matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+        );
+        Self {
+            error: error.into(),
+            transient,
+        }
+    }
+}
+
+#[cfg(feature = "peer-http")]
+impl From<anyhow::Error> for AttemptError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            transient: false,
+        }
+    }
+}
+
+#[cfg(feature = "peer-http")]
+fn retry<T>(
+    retries: u8,
+    mut operation: impl FnMut() -> std::result::Result<T, AttemptError>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<T> {
+    for attempt in 0..=retries.min(6) {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if error.transient && attempt < retries.min(6) => {
+                let base = 250_u64.saturating_mul(1 << attempt).min(8000);
+                // Jitter is scheduling noise, not a security primitive.
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64 % (base / 4 + 1))
+                    .unwrap_or(0);
+                sleep(Duration::from_millis(base + jitter));
+            }
+            Err(error) => {
+                return Err(error.error.context(format!(
+                    "peer request failed after {} attempt(s)",
+                    attempt + 1
+                )));
+            }
+        }
+    }
+    unreachable!("bounded retry loop always returns")
 }
 
 #[cfg(feature = "peer-http")]
@@ -118,12 +201,19 @@ impl Peer {
             agent,
             target,
             page: PAGE,
+            retries: 3,
         }
     }
 
     /// Smaller pages exercise pagination in tests; servers cap at 10 000.
     pub fn with_page_size(mut self, page: usize) -> Self {
         self.page = page.clamp(1, 10_000);
+        self
+    }
+
+    /// Additional attempts (maximum six), only for transient HTTP/I/O errors.
+    pub fn with_retries(mut self, retries: u8) -> Self {
+        self.retries = retries.min(6);
         self
     }
 
@@ -144,25 +234,31 @@ impl Peer {
     fn auth(&self, request: ureq::Request) -> ureq::Request {
         request
             .set("Authorization", &format!("Bearer {}", self.target.token))
-            .set("User-Agent", concat!("rebsync/", env!("CARGO_PKG_VERSION")))
+            .set("User-Agent", concat!("rbq/", env!("CARGO_PKG_VERSION")))
     }
 
     fn json(&self, path: &str) -> Result<Value> {
-        let response = self
-            .auth(self.agent.get(&self.url(path)))
-            .call()
-            .map_err(describe)?;
-        let mut bytes = Vec::new();
-        const MAX_JSON: u64 = 16 * 1024 * 1024;
-        response
-            .into_reader()
-            .take(MAX_JSON + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() as u64 <= MAX_JSON,
-            "peer JSON response exceeds 16 MiB"
-        );
-        Ok(serde_json::from_slice(&bytes)?)
+        retry(
+            self.retries,
+            || {
+                let response = self
+                    .auth(self.agent.get(&self.url(path)))
+                    .call()
+                    .map_err(AttemptError::from)?;
+                let mut bytes = Vec::new();
+                const MAX_JSON: u64 = 16 * 1024 * 1024;
+                response
+                    .into_reader()
+                    .take(MAX_JSON + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_JSON {
+                    return Err(anyhow::anyhow!("peer JSON response exceeds 16 MiB").into());
+                }
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| AttemptError::from(anyhow::Error::from(e)))
+            },
+            std::thread::sleep,
+        )
     }
 
     pub fn status(&self) -> Result<Value> {
@@ -189,6 +285,10 @@ impl Peer {
                 .get("items")
                 .and_then(Value::as_array)
                 .context("malformed listing")?;
+            ensure!(
+                items.len() <= self.page,
+                "peer exceeded the listing page limit"
+            );
             let mut last = None;
             for item in items {
                 let key = item
@@ -200,50 +300,83 @@ impl Peer {
                     .and_then(Value::as_u64)
                     .context("malformed listing")?;
                 ensure!(
-                    key > after.as_str(),
-                    "peer ignored pagination; update the Rebekah app to 0.2.1 or later"
+                    key > last.as_deref().unwrap_or(after.as_str()),
+                    "peer ignored pagination; use Rebeqah 0.2.3 or later"
+                );
+                admissible_key(key)?;
+                ensure!(
+                    key.starts_with(prefix) && size <= MAX_OBJECT,
+                    "out-of-scope or oversized listing entry"
+                );
+                ensure!(
+                    found.len() < 100_000,
+                    "peer inventory exceeds 100000 objects; narrow the layer filter"
                 );
                 found.insert(key.to_owned(), size);
                 last = Some(key.to_owned());
             }
-            match (page.get("truncated").and_then(Value::as_bool), last) {
-                (Some(true), Some(last)) => after = last,
-                _ => break,
+            match (
+                page.get("truncated")
+                    .and_then(Value::as_bool)
+                    .context("peer omitted pagination flag; upgrade Rebeqah")?,
+                last,
+            ) {
+                (true, Some(last)) => after = last,
+                (true, None) => bail!("peer returned an empty truncated page"),
+                (false, _) => break,
             }
         }
         Ok(found)
     }
 
     pub fn get(&self, key: &str) -> Result<Vec<u8>> {
-        let response = self
-            .auth(
-                self.agent
-                    .get(&self.url(&format!("/v1/objects/{}", encode_key(key)))),
-            )
-            .call()
-            .map_err(describe)?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_OBJECT + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() as u64 <= MAX_OBJECT,
-            "{key}: object exceeds 64 MiB"
-        );
-        Ok(bytes)
+        retry(
+            self.retries,
+            || {
+                let response = self
+                    .auth(
+                        self.agent
+                            .get(&self.url(&format!("/v1/objects/{}", encode_key(key)))),
+                    )
+                    .call()
+                    .map_err(AttemptError::from)?;
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .take(MAX_OBJECT + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_OBJECT {
+                    return Err(anyhow::anyhow!("{key}: object exceeds 64 MiB").into());
+                }
+                Ok(bytes)
+            },
+            std::thread::sleep,
+        )
     }
 
     /// Create-if-absent on the peer. Returns true when created.
     pub fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
-        let response = self
-            .auth(
-                self.agent
-                    .put(&self.url(&format!("/v1/objects/{}", encode_key(key)))),
-            )
-            .send_bytes(bytes)
-            .map_err(describe)?;
-        Ok(response.status() == 201)
+        retry(
+            self.retries,
+            || {
+                let response = self
+                    .auth(
+                        self.agent
+                            .put(&self.url(&format!("/v1/objects/{}", encode_key(key)))),
+                    )
+                    .send_bytes(bytes)
+                    .map_err(AttemptError::from)?;
+                match response.status() {
+                    201 => Ok(true),
+                    200 => Ok(false),
+                    code => Err(anyhow::anyhow!(
+                        "unexpected create-if-absent response: HTTP {code}"
+                    )
+                    .into()),
+                }
+            },
+            std::thread::sleep,
+        )
     }
 }
 
@@ -321,7 +454,7 @@ impl SyncReport {
 
 /// Accept only layer objects, and check what can be checked before storing.
 pub(crate) fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
-    ObjectKey::parse(key)?;
+    admissible_key(key)?;
     let layer = key.split('/').next().unwrap_or_default();
     ensure!(
         layer::LAYERS.contains(&layer) && key.starts_with(&format!("{layer}/v1/")),
@@ -335,8 +468,18 @@ pub(crate) fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
         );
     } else if key.contains("/snapshots/") {
         ensure!(key.ends_with(".json"), "unexpected snapshot object");
+        let id = key
+            .split_once("/snapshots/")
+            .context("invalid snapshot key")?
+            .1
+            .strip_suffix(".json")
+            .context("invalid snapshot extension")?;
         let value: Value = serde_json::from_slice(bytes).context("manifest is not JSON")?;
-        ensure!(value.get("schema").is_some(), "manifest without schema");
+        if layer == "mneme" && value["schema"] == crate::mneme::LAYER_SCHEMA {
+            crate::mneme::check_manifest(&serde_json::from_value(value)?, id)?;
+        } else {
+            layer::check_manifest(&serde_json::from_value(value)?, layer, id)?;
+        }
     } else {
         bail!("unexpected object outside chunks/ and snapshots/");
     }
@@ -351,11 +494,37 @@ pub(crate) fn admissible_key(key: &str) -> Result<()> {
         layer::LAYERS.contains(&layer) && key.starts_with(&format!("{layer}/v1/")),
         "not a layer object"
     );
-    ensure!(
-        key.contains("/chunks/") || key.contains("/snapshots/"),
-        "unexpected object outside chunks/ and snapshots/"
-    );
+    let rest = key
+        .strip_prefix(&format!("{layer}/v1/"))
+        .context("invalid layer key")?;
+    if let Some(address) = rest.strip_prefix("chunks/sha256/") {
+        let (shard, digest) = address.split_once('/').context("missing digest shard")?;
+        ensure!(
+            layer::valid_sha256(digest) && shard == &digest[..2],
+            "invalid chunk address"
+        );
+    } else if let Some(id) = rest
+        .strip_prefix("snapshots/")
+        .and_then(|s| s.strip_suffix(".json"))
+    {
+        ensure!(
+            layer::manifest_key(layer, id)?.as_str() == key,
+            "invalid snapshot key"
+        );
+    } else {
+        bail!("unexpected object outside chunks/ and snapshots/");
+    }
     Ok(())
+}
+
+/// Receiver-side validation shared by the Android app and other peer servers.
+pub fn validate_received_object(key: &str, bytes: &[u8]) -> Result<()> {
+    admissible(key, bytes)
+}
+
+/// Restrict peer reads/listings to canonical layer object addresses.
+pub fn validate_peer_key(key: &str) -> Result<()> {
+    admissible_key(key)
 }
 
 /// Chunks first, manifests last, each group in key order.
@@ -409,9 +578,12 @@ pub fn push(
                 report.rejected.push(format!("{key}: {error}"));
                 continue;
             }
-            peer.put(&key, &bytes)?;
-            report.transferred += 1;
-            report.transferred_bytes += bytes.len() as u64;
+            if peer.put(&key, &bytes)? {
+                report.transferred += 1;
+                report.transferred_bytes += bytes.len() as u64;
+            } else {
+                report.already_present += 1;
+            }
         }
     }
     journal.event("peer-push", peer.base(), json!({"transferred":report.transferred,"bytes":report.transferred_bytes,"conflicts":report.conflicts.len(),"rejected":report.rejected.len()}))?;
@@ -515,6 +687,71 @@ mod tests {
 
     #[cfg(feature = "peer-http")]
     #[test]
+    fn retry_backoff_is_exponential_bounded_and_fail_closed() {
+        let mut attempts = 0;
+        let mut delays = vec![];
+        let value = retry(
+            3,
+            || {
+                attempts += 1;
+                if attempts < 4 {
+                    Err(AttemptError {
+                        error: anyhow::anyhow!("temporary"),
+                        transient: true,
+                    })
+                } else {
+                    Ok(7)
+                }
+            },
+            |delay| delays.push(delay),
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        for (delay, base) in delays.iter().zip([250, 500, 1000]) {
+            assert!(delay.as_millis() >= base && delay.as_millis() <= base + base / 4);
+        }
+        let mut attempts = 0;
+        let failure = retry::<()>(
+            6,
+            || {
+                attempts += 1;
+                Err(AttemptError {
+                    error: anyhow::anyhow!("permanent"),
+                    transient: false,
+                })
+            },
+            |_| panic!("permanent errors must not sleep"),
+        );
+        assert!(failure.is_err());
+        assert_eq!(attempts, 1);
+        let mut attempts = 0;
+        assert!(
+            retry::<()>(
+                2,
+                || {
+                    attempts += 1;
+                    Err(AttemptError {
+                        error: anyhow::anyhow!("offline"),
+                        transient: true,
+                    })
+                },
+                |_| {}
+            )
+            .is_err()
+        );
+        assert_eq!(attempts, 3);
+        for code in [400, 401, 403, 404, 409, 413, 429, 500] {
+            let response = ureq::Response::new(code, "error", "untrusted").unwrap();
+            assert!(!AttemptError::from(ureq::Error::Status(code, response)).transient);
+        }
+        for code in [408, 502, 503, 504] {
+            let response = ureq::Response::new(code, "temporary", "untrusted").unwrap();
+            assert!(AttemptError::from(ureq::Error::Status(code, response)).transient);
+        }
+    }
+
+    #[cfg(feature = "peer-http")]
+    #[test]
     fn http_error_pages_cannot_echo_credentials_into_reports() {
         let response = ureq::Response::new(500, "Error", "private-token-in-error-page").unwrap();
         let error = describe(ureq::Error::Status(500, response));
@@ -576,7 +813,7 @@ mod tests {
     #[cfg(feature = "peer-http")]
     #[test]
     fn parses_app_connection_strings() {
-        let t = parse_connection("rebsync+http://192.168.1.42:8787/v1?token=abc123", None).unwrap();
+        let t = parse_connection("rbq+http://192.168.1.42:8787/v1?token=abc123", None).unwrap();
         assert_eq!(t.base, "http://192.168.1.42:8787");
         assert_eq!(t.token, "abc123");
         let t = parse_connection("http://[fe80::1]:8787/", Some("x9")).unwrap();
@@ -594,7 +831,7 @@ mod tests {
         let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
         assert!(admissible(&key, data).is_ok());
         assert!(admissible(&key, b"tampered").is_err());
-        assert!(admissible("frog/v1/snapshots/local/x.json", br#"{"schema":"s"}"#).is_ok());
+        assert!(admissible("frog/v1/snapshots/local/x.json", br#"{"schema":"s"}"#).is_err());
         assert!(admissible("frog/v1/snapshots/local/x.json", b"not json").is_err());
         assert!(admissible("_probes/x", b"x").is_err());
         assert!(admissible("other/v1/chunks/sha256/aa/bb", b"x").is_err());

@@ -29,5 +29,5 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo test -p rebsync-core --features storage-object-store --locked
       - run: cargo check -p rebsync-cli --no-default-features --locked
-      - name: Rebekah app logic (no Tauri/GTK needed)
+      - name: Rebeqah app logic (no Tauri/GTK needed)
         run: cargo test --manifest-path apps/rebsync-app/logic-tests/Cargo.toml

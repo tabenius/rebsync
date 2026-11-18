@@ -14,21 +14,21 @@ val tauriProperties = Properties().apply {
     }
 }
 
-// Release signing, never committed: REBEKAH_KEYSTORE_PROPERTIES names a
+// Release signing, never committed: RBQ_KEYSTORE_PROPERTIES names a
 // properties file (storeFile, storePassword, keyAlias, keyPassword), else
-// ./keystore.properties (gitignored), else REBEKAH_STORE_FILE and friends in
+// ./keystore.properties (gitignored), else RBQ_STORE_FILE and friends in
 // the environment for CI. Without any of them the release APK is unsigned.
 val releaseSigning = Properties().apply {
-    val named = System.getenv("REBEKAH_KEYSTORE_PROPERTIES")?.let { file(it) }
+    val named = System.getenv("RBQ_KEYSTORE_PROPERTIES")?.let { file(it) }
     val local = rootProject.file("keystore.properties")
     when {
         named != null && named.exists() -> named.inputStream().use { load(it) }
         local.exists() -> local.inputStream().use { load(it) }
-        System.getenv("REBEKAH_STORE_FILE") != null -> {
-            setProperty("storeFile", System.getenv("REBEKAH_STORE_FILE"))
-            setProperty("storePassword", System.getenv("REBEKAH_STORE_PASSWORD") ?: "")
-            setProperty("keyAlias", System.getenv("REBEKAH_KEY_ALIAS") ?: "rebekah")
-            setProperty("keyPassword", System.getenv("REBEKAH_KEY_PASSWORD") ?: "")
+        System.getenv("RBQ_STORE_FILE") != null -> {
+            setProperty("storeFile", System.getenv("RBQ_STORE_FILE"))
+            setProperty("storePassword", System.getenv("RBQ_STORE_PASSWORD") ?: "")
+            setProperty("keyAlias", System.getenv("RBQ_KEY_ALIAS") ?: "rbq")
+            setProperty("keyPassword", System.getenv("RBQ_KEY_PASSWORD") ?: "")
         }
     }
 }
@@ -45,10 +45,10 @@ android {
             }
         }
     }
-    namespace = "com.tabenius.rebsync"
+    namespace = "com.tabenius.rebeqah"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.tabenius.rebsync"
+        applicationId = "com.tabenius.rebeqah"
         minSdk = 24
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

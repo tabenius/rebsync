@@ -1,4 +1,4 @@
-//! A narrow storage contract for Rebsync-managed objects.
+//! A narrow storage contract for Rebeqah-managed objects.
 //!
 //! This is the client-side interface, not an S3 or restic REST server. The
 //! filesystem adapter publishes through Apache `object_store`, so publication,
@@ -176,7 +176,7 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-/// The operations Rebsync needs from an object store.
+/// The operations Rebeqah needs from an object store.
 ///
 /// Methods are synchronous so the rest of the crate stays runtime-agnostic and
 /// the CLI does not become an async program. Adapters may own an internal
@@ -232,12 +232,9 @@ mod object_store_fs {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        let source = root.join(format!(
-            ".rebsync-link-probe-{}-{nonce}",
-            std::process::id()
-        ));
+        let source = root.join(format!(".rbq-link-probe-{}-{nonce}", std::process::id()));
         let link = root.join(format!(
-            ".rebsync-link-probe-{}-{nonce}.link",
+            ".rbq-link-probe-{}-{nonce}.link",
             std::process::id()
         ));
         let supported =

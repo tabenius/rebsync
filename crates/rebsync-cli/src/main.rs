@@ -1,16 +1,18 @@
 use anyhow::{Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use rebsync_core::{ConfigOverrides, RunOptions, load_config};
 use std::path::PathBuf;
+mod ui;
 
 #[derive(Parser)]
 #[command(
-    name = "rebsync",
+    name = "rbq",
     version,
+    styles = ui::styles(),
     about = "Preserve work, safely exchange Git branches, report unresolved risks"
 )]
 struct Cli {
-    /// Rebekah home; defaults to $HOME. Bare invocation is a dry-run.
+    /// Rebeqah home; defaults to $HOME. Bare invocation is a dry-run.
     home: Option<PathBuf>,
     #[command(flatten)]
     common: Common,
@@ -21,6 +23,9 @@ struct Cli {
     dry_run: bool,
     #[arg(long, global = true)]
     json: bool,
+    /// Terminal styling; JSON and completion scripts always remain uncolored.
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    color: ui::ColorMode,
     #[command(subcommand)]
     command: Option<Action>,
 }
@@ -28,7 +33,7 @@ struct Cli {
 struct Common {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
-    /// Restrict discovery to these roots (relative to Rebekah home).
+    /// Restrict discovery to these roots (relative to Rebeqah home).
     #[arg(long, global = true)]
     root: Vec<PathBuf>,
     #[arg(long, global = true)]
@@ -50,15 +55,20 @@ struct Common {
     backup_repository: Option<String>,
     #[arg(long, global = true)]
     password_file: Option<PathBuf>,
-    /// Root for Rebsync-managed objects; relative paths resolve against Rebekah home.
+    /// Root for Rebeqah-managed objects; relative paths resolve against Rebeqah home.
     #[arg(long, global = true)]
     storage_root: Option<PathBuf>,
-    /// Mneme index passed to `mneme --db`; relative paths resolve against Rebekah home.
+    /// Mneme index passed to `mneme --db`; relative paths resolve against Rebeqah home.
     #[arg(long, global = true)]
     mneme_db: Option<PathBuf>,
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Generate a shell completion script on stdout, without reading configuration.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Read-only phone diagnostics and printable Linux/Chromebook connection guides.
     Phone {
         #[command(subcommand)]
@@ -114,7 +124,7 @@ enum Action {
         #[arg(long)]
         no_announce: bool,
     },
-    /// Exchange layer objects with a Rebekah phone (rebsync-peer/0).
+    /// Exchange layer objects with a Rebeqah phone (rbq-peer/0).
     Peer {
         #[command(subcommand)]
         command: PeerAction,
@@ -159,7 +169,7 @@ fn phone_action(action: &PhoneAction, json: bool) -> Result<i32> {
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"schema":"rebsync.phone.instructions.v1", "transport":transport, "chromebook":chromebook, "instructions":guide})
+                    serde_json::json!({"schema":"rbq.phone.instructions.v1", "transport":transport, "chromebook":chromebook, "instructions":guide})
                 );
             } else {
                 print!("{guide}");
@@ -287,7 +297,7 @@ fn phone_action(action: &PhoneAction, json: bool) -> Result<i32> {
                 for note in &report.safety {
                     println!("Note: {note}");
                 }
-                println!("Guide: rebsync phone instructions --chromebook");
+                println!("Guide: rbq phone instructions --chromebook");
             }
             Ok(if incomplete { 2 } else { 0 })
         }
@@ -354,7 +364,7 @@ enum GitAction {
         #[arg(long)]
         into: PathBuf,
     },
-    /// Fetch a bundle's branches/tags into refs/remotes/rebsync-NAME/* of an
+    /// Fetch a bundle's branches/tags into refs/remotes/rbq-NAME/* of an
     /// existing repository; local branches, tags and the worktree are untouched.
     Fetch {
         id: String,
@@ -367,12 +377,18 @@ enum GitAction {
 }
 #[derive(Args)]
 struct PeerTargetArgs {
-    /// Connection string from the app (rebsync+http://HOST:PORT/v1?token=…);
-    /// defaults to $REBSYNC_PEER so the token stays out of shell history.
+    /// Connection string from the app (rbq+http://HOST:PORT/v1?token=…);
+    /// defaults to $RBQ_PEER so the token stays out of shell history.
     connection: Option<String>,
     /// File holding the token, when the connection has none.
     #[arg(long)]
     token_file: Option<PathBuf>,
+    /// Additional HTTP attempts on transient connection/502/503/504/408 failures.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=6))]
+    retries: u8,
+    /// HTTP timeout per attempt, including body transfer (retry budget is bounded).
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=300))]
+    timeout_seconds: u64,
 }
 #[derive(Subcommand)]
 enum PeerAction {
@@ -396,7 +412,7 @@ enum PeerAction {
         #[arg(long = "layer")]
         layers: Vec<String>,
     },
-    /// Serve this store over local transports (rebsync-peer/1).
+    /// Serve this store over local transports (rbq-peer/1).
     Serve(ServeArgs),
     /// Push, pull and verify a tiny snapshot over every local transport.
     Selftest,
@@ -466,7 +482,7 @@ fn storage_check(config: &rebsync_core::Config, json: bool) -> Result<i32> {
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
     let key = ObjectKey::parse(&format!("_probes/check-{}-{nonce}", std::process::id()))?;
-    let payload = b"rebsync storage probe";
+    let payload = b"rbq storage probe";
     // Run every check in a closure so a failure still reaches cleanup. A probe
     // left behind on an error path would masquerade as stored data.
     let checks = (|| -> Result<(bool, u64)> {
@@ -602,16 +618,16 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
                     "mneme.restic requires backup.repository; set mneme.restic = false to publish locally only"
                 );
             }
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let outcome = mneme::publish(config, &storage, &mut journal)?;
             serde_json::to_value(outcome)?
         }
         MnemeAction::Verify { id } => {
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             mneme::verify(config, &storage, &id, &mut journal)?
         }
         MnemeAction::Restore { id, into } => {
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let into = if into.is_absolute() {
                 into
             } else {
@@ -638,7 +654,7 @@ fn prune_layer(config: &rebsync_core::Config, layer: &str, args: PruneArgs) -> R
     };
     let report = layers::prune(&storage, layer, &retention, args.apply)?;
     if args.apply {
-        let mut journal = Journal::open(&config.rebekah_home)?;
+        let mut journal = Journal::open(&config.rbq_home)?;
         journal.event(
             "layer-pruned",
             layer,
@@ -699,7 +715,7 @@ fn layer_action(
                     "{layer}.restic requires backup.repository; set {layer}.restic = false to publish locally only"
                 );
             }
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let outcome = if layer == "frog" {
                 frog::publish(config, &storage, &mut journal)?
             } else {
@@ -709,7 +725,7 @@ fn layer_action(
         }
         LayerAction::Verify { id } => {
             if layer == "frog" {
-                let mut journal = Journal::open(&config.rebekah_home)?;
+                let mut journal = Journal::open(&config.rbq_home)?;
                 frog::verify(config, &storage, &id, &mut journal)?
             } else {
                 agenda::verify(config, &storage, &id)?
@@ -722,7 +738,7 @@ fn layer_action(
                 std::env::current_dir()?.join(into)
             };
             if layer == "frog" {
-                let mut journal = Journal::open(&config.rebekah_home)?;
+                let mut journal = Journal::open(&config.rbq_home)?;
                 frog::restore(config, &storage, &id, &into, &mut journal)?
             } else {
                 agenda::restore(&storage, &id, &into)?
@@ -735,7 +751,7 @@ fn layer_action(
 
 #[cfg(not(feature = "storage"))]
 fn layer_action(_: &rebsync_core::Config, _: &str, _: LayerAction, _: bool) -> Result<i32> {
-    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 #[cfg(feature = "storage")]
@@ -751,7 +767,7 @@ fn git_action(config: &rebsync_core::Config, action: GitAction, json: bool) -> R
     };
     let value = match action {
         GitAction::Publish => {
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let outcomes = gitlayer::publish_all(config, &storage, &mut journal)?;
             let failed = outcomes.iter().any(|o| o.status == "failed");
             println!("{}", serde_json::to_string_pretty(&outcomes)?);
@@ -783,11 +799,11 @@ fn git_action(config: &rebsync_core::Config, action: GitAction, json: bool) -> R
         GitAction::Prune(args) => return prune_layer(config, gitlayer::LAYER, args),
         GitAction::Verify { id } => gitlayer::verify(config, &storage, &id)?,
         GitAction::Restore { id, into } => {
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             gitlayer::restore(config, &storage, &id, &absolute(into)?, &mut journal)?
         }
         GitAction::Fetch { id, repo, name } => {
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             gitlayer::fetch(
                 config,
                 &storage,
@@ -804,7 +820,7 @@ fn git_action(config: &rebsync_core::Config, action: GitAction, json: bool) -> R
 
 #[cfg(not(feature = "storage"))]
 fn git_action(_: &rebsync_core::Config, _: GitAction, _: bool) -> Result<i32> {
-    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 #[cfg(feature = "serve")]
@@ -812,7 +828,7 @@ fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptio
     use rebsync_core::FsObjectStorage;
     let storage = FsObjectStorage::open(&config.storage.root)?;
     let running = rebsync_core::serve::start(config, &options)?;
-    eprintln!("rebsync serving {}", running.url);
+    eprintln!("rbq serving {}", running.url);
     if let Some(fingerprint) = &running.fingerprint {
         eprintln!("self-signed certificate SHA-256 {fingerprint}");
     }
@@ -830,7 +846,7 @@ fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptio
 
 #[cfg(not(feature = "serve"))]
 fn serve(_: &rebsync_core::Config, _: ()) -> Result<i32> {
-    bail!("rebsync was built without the serve feature; rebuild with --features serve")
+    bail!("rbq was built without the serve feature; rebuild with --features serve")
 }
 
 #[cfg(feature = "peer")]
@@ -842,8 +858,8 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         let connection = args
             .connection
             .clone()
-            .or_else(|| std::env::var("REBSYNC_PEER").ok())
-            .ok_or_else(|| anyhow::anyhow!("give a connection target or set REBSYNC_PEER"))?;
+            .or_else(|| std::env::var("RBQ_PEER").ok())
+            .ok_or_else(|| anyhow::anyhow!("give a connection target or set RBQ_PEER"))?;
         let token = args
             .token_file
             .as_ref()
@@ -854,10 +870,14 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
     let remote = |args: &PeerTargetArgs| -> Result<Box<dyn peer::PeerApi>> {
         let (connection, token) = connection(args)?;
         let trimmed = connection.trim();
-        let bare = trimmed.strip_prefix("rebsync+").unwrap_or(trimmed);
+        let bare = trimmed.strip_prefix("rbq+").unwrap_or(trimmed);
         if bare.starts_with("http://") || bare.starts_with("https://") {
             let target = peer::parse_connection(&connection, token.as_deref())?;
-            Ok(Box::new(peer::Peer::connect(target)))
+            Ok(Box::new(
+                peer::Peer::connect(target)
+                    .with_retries(args.retries)
+                    .with_timeout(std::time::Duration::from_secs(args.timeout_seconds)),
+            ))
         } else {
             let (target, token) = transport::parse_connection(&connection, token.as_deref())?;
             Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
@@ -896,7 +916,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         PeerAction::Push { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let report = peer::push(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
@@ -904,7 +924,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         PeerAction::Pull { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
-            let mut journal = Journal::open(&config.rebekah_home)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
             let report = peer::pull(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
@@ -919,7 +939,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 let target = transport::Target::parse(listen)?;
                 if target.is_public() {
                     eprintln!(
-                        "rebsync: warning: {} is reachable beyond this host and is not encrypted",
+                        "rbq: warning: {} is reachable beyond this host and is not encrypted",
                         target.describe()
                     );
                 }
@@ -951,19 +971,22 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             (serde_json::to_value(report)?, code)
         }
     };
-    let _ = json; // Sync reports are always JSON: they are meant to be read and diffed.
-    println!("{}", serde_json::to_string_pretty(&value)?);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        ui::peer_report(&value, code);
+    }
     Ok(code)
 }
 
 #[cfg(not(feature = "peer"))]
 fn peer_action(_: &rebsync_core::Config, _: PeerAction, _: bool) -> Result<i32> {
-    bail!("rebsync was built without the peer feature; rebuild with --features peer")
+    bail!("rbq was built without the peer feature; rebuild with --features peer")
 }
 
 #[cfg(not(feature = "storage"))]
 fn mneme_action(_config: &rebsync_core::Config, _action: MnemeAction, _json: bool) -> Result<i32> {
-    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 #[cfg(feature = "storage")]
@@ -982,12 +1005,12 @@ fn storage_fsck(config: &rebsync_core::Config, layers: Vec<String>) -> Result<i3
 
 #[cfg(not(feature = "storage"))]
 fn storage_fsck(_: &rebsync_core::Config, _: Vec<String>) -> Result<i32> {
-    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 #[cfg(not(feature = "storage"))]
 fn storage_check(_config: &rebsync_core::Config, _json: bool) -> Result<i32> {
-    bail!("rebsync was built without the storage feature; rebuild with --features storage")
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 fn main() {
@@ -1003,24 +1026,35 @@ fn main() {
                         serde_json::json!({"status": "blocked", "migration": migration})
                     );
                 } else {
-                    eprintln!("rebsync: {error:#}");
+                    eprintln!("rbq: {error:#}");
                 }
                 std::process::exit(2);
             }
-            eprintln!("rebsync: {error:#}");
+            eprintln!("rbq: {error:#}");
             std::process::exit(1);
         }
     }
 }
 fn entry() -> Result<i32> {
     let cli = Cli::parse();
+    ui::configure(
+        cli.color,
+        cli.json || matches!(cli.command, Some(Action::Completions { .. })),
+    );
+    if let Some(Action::Completions { shell }) = &cli.command {
+        if cli.json {
+            bail!("completions emits shell code; omit --json");
+        }
+        clap_complete::generate(*shell, &mut Cli::command(), "rbq", &mut std::io::stdout());
+        return Ok(0);
+    }
     // Diagnostics/guides are independent of backup config and must not create
     // state directories, journals or object stores just to inspect a phone.
     if let Some(Action::Phone { command }) = &cli.command {
         return phone_action(command, cli.json);
     }
     let config = load_config(ConfigOverrides {
-        rebekah_home: cli.home,
+        rbq_home: cli.home,
         config: cli.common.config,
         roots: (!cli.common.root.is_empty()).then_some(cli.common.root),
         fetch: cli.common.no_fetch.then_some(false).or(cli.common.fetch),
@@ -1036,6 +1070,9 @@ fn entry() -> Result<i32> {
         mneme_db: cli.common.mneme_db,
     })?;
     match cli.command {
+        Some(Action::Completions { .. }) => {
+            unreachable!("completions return before config loading")
+        }
         Some(Action::Phone { .. }) => unreachable!("phone actions return before config loading"),
         Some(Action::Config { .. }) => {
             let mut value = serde_json::to_value(&config)?;
@@ -1103,29 +1140,42 @@ fn entry() -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
         println!(
-            "{} — {} repositories",
-            if summary.dry_run { "DRY RUN" } else { "APPLY" },
-            summary.repositories.len()
+            "{}  {}",
+            ui::heading("RBQ"),
+            if summary.dry_run {
+                ui::heading("PLAN / DRY RUN")
+            } else {
+                ui::warning("APPLY")
+            }
+        );
+        println!(
+            "  {} repositories  ·  {}",
+            summary.repositories.len(),
+            if summary.needs_attention() {
+                ui::warning("attention required")
+            } else {
+                ui::good("checks complete")
+            }
         );
         for repo in &summary.repositories {
-            println!("\n{}", repo.path.display());
+            println!("\n{}", ui::heading(&repo.path.display().to_string()));
             if let Some(id) = &repo.backup_snapshot {
-                println!("  encrypted backup: {id}");
+                println!("  {} {id}", ui::good("encrypted backup"));
             }
             for action in &repo.actions {
                 println!("  {action}");
             }
             for issue in &repo.issues {
-                println!("  ! {issue}");
+                println!("  {} {}", ui::warning("!"), ui::warning(issue));
             }
         }
         for issue in &summary.issues {
-            println!("\n! {issue}");
+            println!("\n{} {}", ui::warning("!"), ui::warning(issue));
         }
         for dataset in &summary.datasets {
             println!("\ndataset: {dataset}");
         }
-        println!("\nJournal: {}", summary.journal.display());
+        println!("\n{} {}", ui::dim("Journal"), summary.journal.display());
     }
     Ok(if summary.needs_attention() { 2 } else { 0 })
 }

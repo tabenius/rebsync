@@ -1,4 +1,4 @@
-//! Compiles Rebekah's platform-independent modules unchanged, without Tauri,
+//! Compiles Rebeqah's platform-independent modules unchanged, without Tauri,
 //! so their tests (including a live HTTP test of the peer endpoint) run on any
 //! host and in CI without GTK or an Android toolchain.
 #[path = "../../src-tauri/src/datastore.rs"]

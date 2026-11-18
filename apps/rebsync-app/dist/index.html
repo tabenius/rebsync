@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>RAGBAZ Rebekah</title>
+<title>RAGBAZ Rebeqah</title>
 <style>
   :root {
     --ink: #0e1621; --ink-2: #16212f; --ink-3: #1f2c3d; --line: #2a3a50;
@@ -96,19 +96,19 @@
 <div id="splash" aria-hidden="true">
   <div>
     <div class="ring">R</div>
-    <div class="word"><b>RAGBAZ</b><span>Rebekah</span><small>rebsync companion</small></div>
+    <div class="word"><b>RAGBAZ</b><span>Rebeqah</span><small>rbq companion</small></div>
   </div>
 </div>
 
 <main>
   <header>
     <div class="mark">R</div>
-    <div><h1><span>RAGBAZ</span> Rebekah</h1><small id="version">rebsync companion</small></div>
+    <div><h1><span>RAGBAZ</span> Rebeqah</h1><small id="version">rbq companion</small></div>
   </header>
 
   <section id="sharing">
     <h2>Sharing <label class="switch"><input type="checkbox" id="share-toggle" /><span></span></label></h2>
-    <div id="share-off" class="muted small">Off. Turn on to let rebsync peers on a network you trust
+    <div id="share-off" class="muted small">Off. Turn on to let rbq peers on a network you trust
       read objects and add new ones. Nothing is ever overwritten or deleted by a peer.</div>
     <div id="share-on" hidden>
       <div class="row spread small"><span>Token <code id="token">••••••</code></span>
@@ -142,18 +142,18 @@
   <section id="mneme-section" hidden>
     <h2>Mneme history snapshots</h2>
     <div class="stats" id="mneme"></div>
-    <p class="small muted">Session-history snapshots published by <code>rebsync mneme</code>. They hold
+    <p class="small muted">Session-history snapshots published by <code>rbq mneme</code>. They hold
       private transcripts; keep this device locked.</p>
   </section>
 
   <section id="layers-section" hidden>
     <h2>Frog, agenda &amp; git snapshots</h2>
     <div id="layers"></div>
-    <p class="small muted">Validated owner exports synced from rebsync (<code>rebsync peer push</code>):
+    <p class="small muted">Validated owner exports synced from rbq (<code>rbq peer push</code>):
       Frog's coordination database, Daily Agenda editions and Git history for offline exchange.</p>
   </section>
 
-  <p class="small muted" style="text-align:center">rebsync · RAGBAZ · data stays on this device unless you share it</p>
+  <p class="small muted" style="text-align:center">rbq · RAGBAZ · data stays on this device unless you share it</p>
 </main>
 <div id="toast"></div>
 
@@ -185,7 +185,7 @@ let lastOverview = null;
 
 function renderOverview(o) {
   lastOverview = o;
-  $("#version").textContent = `rebsync companion · v${o.app_version}`;
+  $("#version").textContent = `rbq companion · v${o.app_version}`;
   $("#share-toggle").checked = o.sharing;
   $("#share-on").hidden = !o.sharing;
   $("#share-off").hidden = o.sharing;
@@ -267,7 +267,7 @@ function renderVolumes(list) {
         <div class="bar ${used > 0.92 ? "full" : ""}"><i style="width:${Math.round(used * 100)}%"></i></div>
         <div class="row spread small"><span>${bytes(v.available_bytes)} free of ${bytes(v.total_bytes)}</span>
           ${v.writable && !v.current ? `<button class="primary" data-move="${esc(v.path)}" data-current="0">Move data here</button>` : ""}
-          ${!v.writable ? '<span class="muted">read-only for Rebekah</span>' : ""}</div>
+          ${!v.writable ? '<span class="muted">read-only for Rebeqah</span>' : ""}</div>
         <div class="muted small mono" style="margin-top:4px;word-break:break-all">${esc(v.path)}</div>
         ${v.note ? `<div class="muted small" style="margin-top:4px">${esc(v.note)}</div>` : ""}
       </div>`;
