@@ -1,8 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Rebekah is dark in both modes; keep the night theme identical. -->
-    <style name="Theme.rebsync_app" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:windowBackground">@color/rebekah_ink</item>
-        <item name="android:statusBarColor">@color/rebekah_ink</item>
-        <item name="android:navigationBarColor">@color/rebekah_ink</item>
+    <!-- Rebeqah is dark in both modes; keep the night theme identical. -->
+    <style name="Theme.rbq_app" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/rebeqah_ink</item>
+        <item name="android:statusBarColor">@color/rebeqah_ink</item>
+        <item name="android:navigationBarColor">@color/rebeqah_ink</item>
     </style>
 </resources>

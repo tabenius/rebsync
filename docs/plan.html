@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>Rebsync — preserving work across uncertain connections</title>
+<title>Rebeqah — preserving work across uncertain connections</title>
 <link rel="stylesheet" href="assets/tufte.css">
 <style>
 html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2rem}header p,nav{width:55%}.kicker,nav,.status{font-family:system-ui,sans-serif;font-size:.85rem;line-height:1.6;letter-spacing:.025em}.kicker{text-transform:uppercase;color:#777}nav{border-block:1px solid #aaa;padding:1rem 0;margin:2.5rem 0}nav a{display:inline-block;margin-right:.9rem}.status{border-left:3px solid #999;padding-left:1rem}table{border-collapse:collapse;font-size:1.1rem;line-height:1.5}th,td{text-align:left;vertical-align:top;padding:.6rem .7rem .6rem 0;border-bottom:1px solid #aaa}th{font-weight:normal;font-style:italic}pre{white-space:pre-wrap}code{overflow-wrap:anywhere}h2{scroll-margin-top:2rem}.endnote{color:#777;font-size:1.1rem}@media(max-width:760px){header p,nav{width:100%}}@media print{body{background:white;color:black}nav{display:none}a{text-decoration:none}section{break-inside:auto}h2,h3{break-after:avoid}pre,table{break-inside:avoid}}
@@ -13,10 +13,10 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <body>
 <article>
 <header>
-<p class="kicker">Rebekah · engineering plan · 13 November 2026 · revision 2</p>
-<h1>Rebsync</h1>
+<p class="kicker">Rebeqah · engineering plan · 13 November 2026 · revision 2</p>
+<h1>Rebeqah</h1>
 <p class="subtitle">Preserving work across uncertain connections</p>
-<p>A preservation-first synchronization command, growing into a network of intermittently connected Rebekah peers.</p>
+<p>A preservation-first synchronization command, growing into a network of intermittently connected Rebeqah peers.</p>
 <p class="status">Revision 2 adds the storage stack, S3/R2 client and server roles, early restic REST interoperability, resumable uploads and authenticated capability discovery. The initial command and a feature-gated local filesystem adapter are implemented; the cloud, multipart and peer milestones below remain planned. See the <a href="#evaluation">storage evaluation</a> and repository README for evidence and current limits.</p>
 </header>
 <nav aria-label="Contents"><a href="#purpose">Purpose</a><a href="#existing">Existing foundations</a><a href="#architecture">Architecture</a><a href="#config">Configuration</a><a href="#git">Git safety</a><a href="#journal">Journaling</a><a href="#ai">Reconciliation</a><a href="#r2">Storage stack · S3 · R2 · restic</a><a href="#datasets">Frog &amp; agenda</a><a href="#peers">Peers &amp; hops</a><a href="#delivery">Delivery</a><a href="#evaluation">Rust storage evaluation</a></nav>
@@ -28,11 +28,11 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 </section>
 <section id="existing">
 <h2>2. Reuse the existing foundations</h2>
-<p>Frog already owns repository identity, discovery, workspace coordination, locks and SSH federation. Rebekah supplies runtime integration and an authenticated gateway. Dash already exchanges private instance views, including Daily Agenda. These should become adapters, not competing systems.</p>
+<p>Frog already owns repository identity, discovery, workspace coordination, locks and SSH federation. Rebeqah supplies runtime integration and an authenticated gateway. Dash already exchanges private instance views, including Daily Agenda. These should become adapters, not competing systems.</p>
 <table><thead><tr><th>Component</th><th>Responsibility to reuse</th></tr></thead><tbody>
 <tr><td>ragbaz-frog</td><td>Repository discovery, identity, coordination and SSH federation.</td></tr>
 <tr><td>update-repos.bash</td><td>Existing workflow reference; not a script to run wholesale as the new engine.</td></tr>
-<tr><td>rebekah / ragbaz-dash</td><td>Private gateway, instance connector and agenda contract.</td></tr>
+<tr><td>rebeqah / ragbaz-dash</td><td>Private gateway, instance connector and agenda contract.</td></tr>
 <tr><td>Android bridge / Indra</td><td>Starting points for authenticated phone transport, not proof of a finished Bluetooth sync system.</td></tr>
 <tr><td>WeftMark / Nostoi</td><td>Existing provenance, attestation and verification responsibilities.</td></tr>
 </tbody></table>
@@ -41,8 +41,8 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 </section>
 <section id="architecture">
 <h2>3. A Rust workspace with a reusable core</h2>
-<p>Create <code>tabenius/rebsync</code>, private initially, with exactly two application crates from day one. Organization ownership at <code>RAGBAZ/rebsync</code> is an alternative, not a reason to create duplicate projects.</p>
-<pre><code>rebsync/
+<p>Create <code>tabenius/rebsync</code>, private initially, with exactly two application crates from day one. Organization ownership at <code>RAGBAZ/rbq</code> is an alternative, not a reason to create duplicate projects.</p>
+<pre><code>rbq/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── crates/
@@ -59,16 +59,16 @@ html{scroll-behavior:smooth}body{overflow-wrap:break-word}article{padding-top:2r
 <p>The core owns configuration loading, discovery, subprocesses, files, API calls, policy, planning, execution and structured events. It knows nothing about terminal rendering or interactive prompts.</p>
 <p>The clap-based CLI parses terminal input, passes explicit overrides, displays results and maps outcomes to exit codes. A later Tauri or Dioxus interface imports the same core.</p>
 <p>Use ordinary tools first: Git, GitHub CLI, SSH and established backup utilities. Pass arguments directly rather than interpolating shell commands; construct explicit pipelines only when necessary.</p>
-<p>Keep storage providers behind a narrow Rebsync-owned interface inside the core. Client adapters, incoming server protocols and synchronization policy are separate responsibilities. The experimental storage comparison remains a standalone, unpublished workspace under <code>evaluations/storage/</code>. The production core now carries an optional <code>object_store</code> filesystem adapter behind that trait and an off-by-default feature; it is not a cloud or server implementation.</p>
+<p>Keep storage providers behind a narrow Rebeqah-owned interface inside the core. Client adapters, incoming server protocols and synchronization policy are separate responsibilities. The experimental storage comparison remains a standalone, unpublished workspace under <code>evaluations/storage/</code>. The production core now carries an optional <code>object_store</code> filesystem adapter behind that trait and an off-by-default feature; it is not a cloud or server implementation.</p>
 </section>
 <section id="config">
 <h2>4. Predictable configuration</h2>
-<p>Support TOML and YAML. Configuration precedence is built-in defaults, user configuration, Rebekah-home configuration, an explicit configuration file, then CLI options.</p>
-<pre><code>rebsync                  # rebekah_home defaults to $HOME
-rebsync .                # use this directory instead
-rebsync . --dry-run
-rebsync config explain   # effective configuration and origins</code></pre>
-<p>Discover user configuration under <code>$XDG_CONFIG_HOME/rebsync/</code> and home configuration as <code>rebsync.toml</code> or <code>rebsync.yaml</code>. Competing formats at the same layer are an error. Reject unknown keys. Replace lists by default rather than silently concatenating them.</p>
+<p>Support TOML and YAML. Configuration precedence is built-in defaults, user configuration, Rebeqah-home configuration, an explicit configuration file, then CLI options.</p>
+<pre><code>rbq                  # rbq_home defaults to $HOME
+rbq .                # use this directory instead
+rbq . --dry-run
+rbq config explain   # effective configuration and origins</code></pre>
+<p>Discover user configuration under <code>$XDG_CONFIG_HOME/rbq/</code> and home configuration as <code>rbq.toml</code> or <code>rbq.yaml</code>. Competing formats at the same layer are an error. Reject unknown keys. Replace lists by default rather than silently concatenating them.</p>
 <pre><code># Proposed configuration shape; consult the shipped example
 # for the exact fields implemented by each release.
 [github]
@@ -89,8 +89,8 @@ write_instructions = true
 publish = "after-policy-checks"
 
 [storage]
-# Rebsync-managed objects; relative to rebekah_home.
-root = ".rebsync/objects"
+# Rebeqah-managed objects; relative to rbq_home.
+root = ".rbq/objects"
 
 [backup]
 enabled = true
@@ -119,23 +119,23 @@ encrypt_private_data = true</code></pre>
 </section>
 <section id="journal">
 <h2>6. An exact, restartable journal</h2>
-<p>Write a collision-safe JSONL journal directly under the selected Rebekah home, with UTC timestamps:</p>
-<pre><code>rebsync_2026-11-13_172405.jsonl
-.rebekah/rebsync/          # separate resumable state</code></pre>
+<p>Write a collision-safe JSONL journal directly under the selected Rebeqah home, with UTC timestamps:</p>
+<pre><code>rbq_2026-11-13_172405.jsonl
+.rebeqah/rbq/          # separate resumable state</code></pre>
 <p>Each event records run and action IDs, repository or dataset identity, peer and transport, planned action, result, redacted executable arguments, timestamps, exit status, before/after refs or digests, verification and skip reasons.</p>
 <p>Write intent before mutation and completion afterward. Stop new mutations if journaling fails. Redact secrets and avoid logging file contents. Use per-repository locks, bounded retries, timeouts and stale-plan checks. An interrupted run must not look like a completed one.</p>
 </section>
 <section id="ai">
 <h2>7. OpenCode reconciliation, with limits</h2>
-<p>Enable reconciliation assistance by default. For divergence, create an isolated worktree and write <code>rebekah-repo-reconcile-merge.md</code> there, recording source refs, target, preserved tips, constraints and required tests.</p>
+<p>Enable reconciliation assistance by default. For divergence, create an isolated worktree and write <code>rbq-repo-reconcile-merge.md</code> there, recording source refs, target, preserved tips, constraints and required tests.</p>
 <p>Launch OpenCode only when available and permitted. Preserve the instructions and work when AI access is unavailable. Capture its outcome and independently inspect the resulting Git state.</p>
 <p><label for="n-ai" class="margin-toggle sidenote-number"></label><input id="n-ai" type="checkbox" class="margin-toggle"><span class="sidenote">A textual merge is not evidence of semantic correctness. Repository content is untrusted input, not authorization to alter synchronization policy.</span>Allow preparation of reconciliation commits in isolation. Do not expose unrestricted backup credentials. Enforce permissions, execution and spending budgets. Default-branch publication needs configured checks and authorization; otherwise publish a review branch and handoff.</p>
 <p><strong>AI reconciliation must never be required for backup success.</strong></p>
 </section>
 <section id="r2">
 <h2>8. A storage stack: filesystem, S3, R2 and restic</h2>
-<p><span class="newthought">Storage saves bytes.</span> Protocol adapters expose access. Rebsync decides what the bytes mean, where they should travel, and whether they are sufficiently protected. Build the lower stack early, before mesh networking or autonomous merging.</p>
-<pre><code>Rebsync orchestration
+<p><span class="newthought">Storage saves bytes.</span> Protocol adapters expose access. Rebeqah decides what the bytes mean, where they should travel, and whether they are sufficiently protected. Build the lower stack early, before mesh networking or autonomous merging.</p>
+<pre><code>Rebeqah orchestration
   Git · datasets · preservation · reconciliation · routing
                          │
               Storage interface + policies
@@ -145,13 +145,13 @@ encrypt_private_data = true</code></pre>
      USB / disk     AWS S3 / R2      restic REST server
 
 Incoming clients
-  restic REST API · S3 API subset · Rebsync peer API
+  restic REST API · S3 API subset · Rebeqah peer API
                          │
               Authorization + quotas
                          │
                 Storage interface</code></pre>
 <p>A node may act as a client, a server, or both. Serving a protocol and storing through a backend are independent capabilities. A phone might expose a restic REST endpoint backed by local storage, then relay completed backups to R2 when the internet returns.</p>
-<p><label for="n-r2" class="margin-toggle sidenote-number"></label><input id="n-r2" type="checkbox" class="margin-toggle"><span class="sidenote">R2 implements a subset of the S3 API. Prefer “S3-compatible endpoint, Rebsync object profile, tested against AWS S3 and R2” over claiming to reproduce Cloudflare’s entire service. See <a href="https://developers.cloudflare.com/r2/api/s3/api/">R2 S3 compatibility</a>.</span>Use one S3 client family with provider profiles for AWS S3, Cloudflare R2 and other compatible endpoints. Set endpoint, region, addressing, authentication and feature support explicitly; test each provider. R2 is not an ordinary Git remote and does not accept <code>git push</code>.</p>
+<p><label for="n-r2" class="margin-toggle sidenote-number"></label><input id="n-r2" type="checkbox" class="margin-toggle"><span class="sidenote">R2 implements a subset of the S3 API. Prefer “S3-compatible endpoint, Rebeqah object profile, tested against AWS S3 and R2” over claiming to reproduce Cloudflare’s entire service. See <a href="https://developers.cloudflare.com/r2/api/s3/api/">R2 S3 compatibility</a>.</span>Use one S3 client family with provider profiles for AWS S3, Cloudflare R2 and other compatible endpoints. Set endpoint, region, addressing, authentication and feature support explicitly; test each provider. R2 is not an ordinary Git remote and does not accept <code>git push</code>.</p>
 <p>The existing command delegates encrypted backup to restic and can configure its S3 backend. That is not yet a native Rust S3 adapter or a storage server. Retain restic’s encryption, repository format and restore tooling rather than inventing cryptography or a backup format.</p>
 <h3>Storage milestone 1 · reliable objects and restic REST</h3>
 <table><thead><tr><th>Operation</th><th>Minimum contract</th></tr></thead><tbody>
@@ -163,16 +163,16 @@ Incoming clients
 </tbody></table>
 <p>Distinguish not-found, forbidden, unavailable, corrupt and unsupported operations. Record consistency guarantees, checksums, limits and atomicity, not just method names. ETags are opaque validators, not universal content hashes. Do not emulate atomic create-if-absent with a separate HEAD followed by PUT.</p>
 <p>A filesystem adapter must use a dedicated object namespace with safe key mapping. Arbitrary S3 keys are not safe filesystem paths. Handle traversal, symlinks, case sensitivity and file/directory collisions; publish temporary files atomically and synchronize files and directory entries before claiming local durability.</p>
-<p>Bring <a href="https://restic.readthedocs.io/en/stable/100_references.html#rest-backend">restic REST API</a> interoperability into this milestone, before a broad S3 server. Initially, a future <code>rebsync serve</code> may supervise the established <a href="https://github.com/restic/rest-server">rest-server</a>; a native Rust adapter can follow. Repository-format compatibility is distinct from REST-protocol compatibility. Store encrypted repository objects opaquely.</p>
+<p>Bring <a href="https://restic.readthedocs.io/en/stable/100_references.html#rest-backend">restic REST API</a> interoperability into this milestone, before a broad S3 server. Initially, a future <code>rbq serve</code> may supervise the established <a href="https://github.com/restic/rest-server">rest-server</a>; a native Rust adapter can follow. Repository-format compatibility is distinct from REST-protocol compatibility. Store encrypted repository objects opaquely.</p>
 <p>Validate repository creation, config access, typed object lists, HEAD, byte ranges, writes, errors and API-version negotiation against real restic. Normal backup needs lock deletion. Append-only policy protects existing backup objects while allowing the narrowly authorized lock lifecycle; pruning remains a separate administrative operation. Do not expose a listener without authentication, namespace isolation, quotas and TLS or an authenticated encrypted tunnel.</p>
 <h3>Storage milestone 2 · resumable transfer and an S3 server profile</h3>
 <pre><code>CreateMultipartUpload · UploadPart · CompleteMultipartUpload
 AbortMultipartUpload  · ListParts  · ListMultipartUploads</code></pre>
-<p>Persist upload IDs and part receipts across process restarts. Validate part order and sizes, handle retry and uncertain completion safely, publish the completed object atomically, and expire abandoned uploads under explicit policy. Respect provider-specific part limits. Multipart is a transport mechanism, not a requirement that all Rebsync datasets use the same chunk format.</p>
+<p>Persist upload IDs and part receipts across process restarts. Validate part order and sizes, handle retry and uncertain completion safely, publish the completed object atomically, and expire abandoned uploads under explicit policy. Respect provider-specific part limits. Multipart is a transport mechanism, not a requirement that all Rebeqah datasets use the same chunk format.</p>
 <p>Implement an explicitly tested S3 wire profile: Signature Version 4 verification, HTTP/XML errors, ranges, conditional requests, pagination, supported addressing and required bucket probes such as HeadBucket. Return an explicit unsupported-operation error outside that profile. A client SDK or storage abstraction is not itself an S3 server.</p>
 <h3>Storage milestone 3 · authenticated capability discovery</h3>
 <p>Design the capability schema in milestone 1, then implement negotiation and discovery in milestone 3. Advertise software capability, currently available endpoints, caller authorization and storage guarantees separately. Report provider connections separately from incoming server protocols: “I can upload to R2” does not mean “I expose an S3 endpoint.”</p>
-<p>Each protocol advertisement includes a version/profile, endpoint, client/server role, permitted operations and limits. A hop additionally advertises its Rebsync routing role. Keep anonymous discovery minimal; bind authenticated capability responses to an enrolled identity, check freshness, and verify compatibility with conformance tests and bounded probes. Self-description alone is not proof.</p>
+<p>Each protocol advertisement includes a version/profile, endpoint, client/server role, permitted operations and limits. A hop additionally advertises its Rebeqah routing role. Keep anonymous discovery minimal; bind authenticated capability responses to an enrolled identity, check freshness, and verify compatibility with conformance tests and bounded probes. Self-description alone is not proof.</p>
 <h3>Independent recovery, not just successful transfer</h3>
 <p>A private S3 or R2 location should hold encrypted repository recovery material, dirty-work snapshots, consistent Frog backups, Daily Agenda editions, journals and recovery inventories. Validate each real endpoint through an off-machine restore. Passing a local filesystem probe is not evidence of cloud compatibility or protection against losing the laptop.</p>
 <p>Use rclone where broad transport support helps, including a later Google Drive copy. Destructive bidirectional file synchronization is not the default backup policy.</p>
@@ -186,15 +186,15 @@ AbortMultipartUpload  · ListParts  · ListMultipartUploads</code></pre>
 <p>Conflict rules for independently edited tasks come later. Copying one database over another is not reconciliation.</p>
 <h3>Whole agenda editions</h3>
 <p>Synchronize <code>snapshot.json</code>, <code>editorial.json</code> and <code>manifest.json</code> as one verified edition. Preserve original source timestamps and last-known-good editions; receiving or rerendering an old edition must not make it look fresh.</p>
-<p>Reuse Rebekah’s manifest validation and authenticated Dash connector. Do not create a public artifact directory as a shortcut.</p>
+<p>Reuse Rebeqah’s manifest validation and authenticated Dash connector. Do not create a public artifact directory as a shortcut.</p>
 </section>
 <section id="peers">
 <h2>10. Peers, sinks, sources and hops</h2>
-<p>A <em>peer</em> or <em>node</em> is an identified participant. A <em>sink</em> accepts authorized data; a <em>source</em> provides it. A <em>hop</em> can invoke its own local rebsync and participate in onward exchange.</p>
+<p>A <em>peer</em> or <em>node</em> is an identified participant. A <em>sink</em> accepts authorized data; a <em>source</em> provides it. A <em>hop</em> can invoke its own local rbq and participate in onward exchange.</p>
 <p>Separate identity, address, capability, authority and trust. One peer may be reachable through a directory, SSH, HTTPS, object storage, LAN, Bluetooth or a future mesh address. A familiar Wi-Fi SSID is a discovery hint, not authentication.</p>
 <table><thead><tr><th>Destination</th><th>First transport</th></tr></thead><tbody><tr><td>GitHub</td><td>Git over SSH/HTTPS</td></tr><tr><td>Kali</td><td>Existing Tailscale SSH</td></tr><tr><td>USB</td><td>Explicitly enrolled mounted directory</td></tr><tr><td>S3 / R2</td><td>Encrypted object backup through provider-specific profiles</td></tr><tr><td>Restic REST peer</td><td>Authenticated REST protocol over TLS or encrypted tunnel</td></tr><tr><td>Android</td><td>Termux-hosted Rust CLI over authenticated SSH, if supported</td></tr><tr><td>Dash</td><td>Existing HTTPS connector; sync endpoints later</td></tr></tbody></table>
 <p>Enroll USB devices using a stable identity and marker, not just a mount path. Never write to every removable drive automatically.</p>
-<p>Later, negotiate a versioned manifest such as <code>rebekah.peer.v0.1</code>, verify pinned identities and restrict datasets and operations. A public-key filename alone does not authenticate a phone.</p>
+<p>Later, negotiate a versioned manifest such as <code>rebeqah.peer.v0.1</code>, verify pinned identities and restrict datasets and operations. A public-key filename alone does not authenticate a phone.</p>
 <p>Store-and-forward needs deduplication, acknowledgements, quotas, expiry and hop limits. Advertise verified possession, not attempted uploads. Add Bluetooth, OSHI mesh, Plan 9 and other adapters after file and SSH exchange work reliably; inspect the actual bridge contracts first.</p>
 <pre><code>received → locally durable → verified → replicated upstream</code></pre>
 <p>A phone acknowledging local storage must not imply that R2 already has a copy. A cloud-backend profile is not a live cloud connection; an advertised feature is not permission to use it.</p>
@@ -215,7 +215,7 @@ AbortMultipartUpload  · ListParts  · ListMultipartUploads</code></pre>
 <p>Storage acceptance additionally requires publication-time exclusion under competing writers, correct raw-prefix pagination, restart-resumable multipart, range restores with real restic, and provider-specific AWS S3/R2 tests. Do not infer any of these from successful client construction or a single-machine smoke test.</p>
 <h3>The first milestone</h3>
 <p><strong>One command discovers your work, preserves otherwise-unprotected changes to an independent destination, safely exchanges eligible Git branches, and tells you exactly what remains unprotected or unresolved—even without internet or AI access.</strong></p>
-<p>Start with application stages 1–3 and storage milestone 1. Keep independent S3/R2 preservation ahead of autonomous merging. This gives immediate practical value without postponing the design needed for phones, removable media and intermittently connected Rebekah hops.</p>
+<p>Start with application stages 1–3 and storage milestone 1. Keep independent S3/R2 preservation ahead of autonomous merging. This gives immediate practical value without postponing the design needed for phones, removable media and intermittently connected Rebeqah hops.</p>
 </section>
 <section id="evaluation">
 <h2>12. Rust storage evaluation</h2>

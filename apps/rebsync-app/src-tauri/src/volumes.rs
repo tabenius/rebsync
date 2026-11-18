@@ -2,10 +2,10 @@
 //!
 //! On Android, `MainActivity` asks the system for this app's directory on every
 //! mounted volume (`getExternalFilesDirs`, which also creates them) and writes
-//! the list to a small JSON file named by `REBSYNC_VOLUMES_FILE`. It rewrites
+//! the list to a small JSON file named by `RBQ_VOLUMES_FILE`. It rewrites
 //! the file whenever media is mounted or removed, so a newly inserted SD card
 //! or USB stick appears on the next refresh. Elsewhere (desktop development),
-//! `REBSYNC_EXTRA_VOLUMES` may list extra directories, separated by `:`.
+//! `RBQ_EXTRA_VOLUMES` may list extra directories, separated by `:`.
 //!
 //! Every app-specific directory is deleted by Android when the app is
 //! uninstalled; the UI says so instead of implying permanence.
@@ -58,7 +58,7 @@ fn writable(path: &Path) -> bool {
     if std::fs::create_dir_all(path).is_err() {
         return false;
     }
-    let probe = path.join(format!(".rebekah-write-probe-{}", std::process::id()));
+    let probe = path.join(format!(".rbq-write-probe-{}", std::process::id()));
     let ok = std::fs::write(&probe, b"probe").is_ok();
     let _ = std::fs::remove_file(&probe);
     ok
@@ -122,12 +122,12 @@ pub fn list(internal: &Path, data_root: &Path) -> Vec<Volume> {
             removable: false,
             current: false,
             note: Some(
-                "Private to Rebekah; not visible to other apps. Removed on uninstall.".into(),
+                "Private to Rebeqah; not visible to other apps. Removed on uninstall.".into(),
             ),
         },
         &mut seen,
     );
-    let reported: Vec<Reported> = std::env::var_os("REBSYNC_VOLUMES_FILE")
+    let reported: Vec<Reported> = std::env::var_os("RBQ_VOLUMES_FILE")
         .and_then(|file| std::fs::read(file).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
@@ -168,7 +168,7 @@ pub fn list(internal: &Path, data_root: &Path) -> Vec<Volume> {
             &mut seen,
         );
     }
-    if let Some(extra) = std::env::var_os("REBSYNC_EXTRA_VOLUMES") {
+    if let Some(extra) = std::env::var_os("RBQ_EXTRA_VOLUMES") {
         for (index, path) in std::env::split_paths(&extra).enumerate() {
             let (total, free, available) = space(&path);
             push(
@@ -220,7 +220,7 @@ pub fn list(internal: &Path, data_root: &Path) -> Vec<Volume> {
                     writable: false,
                     removable: true,
                     current: false,
-                    note: Some("Mounted, but Android has not given Rebekah a folder here. Reopen the app after inserting; some devices only expose USB drives through the file picker.".into()),
+                    note: Some("Mounted, but Android has not given Rebeqah a folder here. Reopen the app after inserting; some devices only expose USB drives through the file picker.".into()),
                 },
                 &mut seen,
             );
@@ -257,7 +257,7 @@ mod tests {
     fn lists_internal_and_marks_current() {
         let dir = tempfile::tempdir().unwrap();
         let internal = dir.path().join("internal");
-        let list = list(&internal, &internal.join("rebekah/objects"));
+        let list = list(&internal, &internal.join("rbq/objects"));
         assert_eq!(list[0].kind, "internal");
         assert!(list[0].current && list[0].writable);
         assert!(list[0].total_bytes.unwrap() > 0);

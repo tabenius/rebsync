@@ -1,4 +1,4 @@
-//! `rebsync serve`: a local, read-only instructions and status page.
+//! `rbq serve`: a local, read-only instructions and status page.
 //!
 //! Serves HTTPS on localhost by default, with a self-signed certificate that is
 //! generated once and kept owner-only under the private state directory (its
@@ -12,7 +12,7 @@
 //! password files are never read. Nothing can be changed through it.
 //!
 //! When the network allows, the service announces itself as
-//! `_rebsync._tcp` (and `_https._tcp` / `_http._tcp`), trying in order:
+//! `_rbq._tcp` (and `_https._tcp` / `_http._tcp`), trying in order:
 //! the system Avahi daemon (`avahi-publish-service`, which talks to Avahi
 //! over D-Bus), then a built-in mDNS responder; and it posts a desktop
 //! notification over the D-Bus session bus when one exists. Each mechanism
@@ -29,7 +29,7 @@ use std::{
     process::Child,
 };
 
-pub const SERVICE_TYPE: &str = "_rebsync._tcp";
+pub const SERVICE_TYPE: &str = "_rbq._tcp";
 
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
@@ -173,7 +173,7 @@ fn hostname() -> String {
         .ok()
         .map(|h| h.trim().to_owned())
         .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "rebsync".into())
+        .unwrap_or_else(|| "rbq".into())
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -195,7 +195,7 @@ fn announce(
 ) {
     let mut report = Vec::new();
     let (mut avahi, mut mdns) = (None, None);
-    let instance = format!("rebsync on {}", hostname());
+    let instance = format!("rbq on {}", hostname());
     let scheme = if options.tls { "https" } else { "http" };
     let loopback_only = options.bind.is_loopback();
     if loopback_only {
@@ -288,10 +288,10 @@ fn announce(
                 "/org/freedesktop/Notifications",
                 "--method",
                 "org.freedesktop.Notifications.Notify",
-                "rebsync",
+                "rbq",
                 "0",
                 "",
-                "rebsync is serving instructions",
+                "rbq is serving instructions",
                 url,
                 "[]",
                 "{}",
@@ -397,9 +397,9 @@ pub fn status(config: &Config, storage: &dyn ObjectStorage) -> Value {
         })
         .collect();
     json!({
-        "service": "rebsync",
+        "service": "rbq",
         "version": env!("CARGO_PKG_VERSION"),
-        "rebekah_home": config.rebekah_home,
+        "rbq_home": config.rbq_home,
         "storage_root": config.storage.root,
         "backup": if config.backup.repository.is_some() { "configured (redacted)" } else { "not configured" },
         "fleet_authority": config.fleet.host,
@@ -455,7 +455,7 @@ pub fn page(status: &Value) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rebsync</title>
+<title>rbq</title>
 <style>
 :root {{ --ink:#0e1621; --paper:#f4efe6; --amber:#e8a33d; --muted:#6b7480; --line:#d9d2c5; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --ink:#f4efe6; --paper:#0e1621; --muted:#9aa6b6; --line:#2a3a50; }} }}
@@ -467,36 +467,36 @@ table {{ width:100%; border-collapse:collapse; font-size:14px; }} td,th {{ text-
 code,pre {{ font-family:ui-monospace,Menlo,monospace; font-size:13px; }} pre {{ background:rgba(127,127,127,.12); padding:12px; border-radius:8px; overflow-x:auto; }}
 .muted {{ color:var(--muted); font-size:14px; }}
 </style></head><body><main>
-<h1><b>RAGBAZ</b> rebsync <span class="muted">{version}</span></h1>
+<h1><b>RAGBAZ</b> rbq <span class="muted">{version}</span></h1>
 <p class="muted">Preserve work, exchange it safely, report what remains at risk. This page is read-only and shows no secrets. <a href="/v1/status">JSON status</a></p>
 <h2>This machine</h2>
-<table><tr><th>Rebekah home</th><td><code>{home}</code></td></tr>
+<table><tr><th>Rebeqah home</th><td><code>{home}</code></td></tr>
 <tr><th>Object store</th><td><code>{store}</code></td></tr>
 <tr><th>Encrypted backup</th><td>{backup}</td></tr>
 <tr><th>Fleet authority</th><td>{fleet}</td></tr></table>
 <h2>Layers</h2>
 <table><tr><th>Layer</th><th>--apply</th><th>Snapshots</th><th>Latest</th><th>Stored</th></tr>{rows}</table>
 <h2>Everyday</h2>
-<pre>rebsync                      # dry run: what would be preserved and exchanged
-rebsync --apply              # preserve repositories, exchange branches, publish enabled layers
-rebsync storage fsck         # check every stored snapshot, chunk by chunk</pre>
+<pre>rbq                      # dry run: what would be preserved and exchanged
+rbq --apply              # preserve repositories, exchange branches, publish enabled layers
+rbq storage fsck         # check every stored snapshot, chunk by chunk</pre>
 <h2>Layers by hand</h2>
-<pre>rebsync mneme publish | list | verify ID | restore ID --into PATH
-rebsync frog publish  | agenda publish | git publish
-rebsync &lt;layer&gt; prune --keep-last 7 [--apply]</pre>
-<h2>Phone (Rebekah app)</h2>
-<pre>export REBSYNC_PEER='&lt;connection string from the app's Sharing card&gt;'
-rebsync peer status
-rebsync peer push            # this machine → phone
-rebsync peer pull            # phone → this machine (every snapshot is verified)</pre>
+<pre>rbq mneme publish | list | verify ID | restore ID --into PATH
+rbq frog publish  | agenda publish | git publish
+rbq &lt;layer&gt; prune --keep-last 7 [--apply]</pre>
+<h2>Phone (Rebeqah app)</h2>
+<pre>export RBQ_PEER='&lt;connection string from the app's Sharing card&gt;'
+rbq peer status
+rbq peer push            # this machine → phone
+rbq peer pull            # phone → this machine (every snapshot is verified)</pre>
 <h2>Offline Git (GitHub down, blocked or far away)</h2>
-<pre>rebsync git publish &amp;&amp; rebsync peer push                  # laptop A
-rebsync peer pull --layer git                             # laptop B
-rebsync git fetch ID --repo ~/src/project --as laptop-a   # → refs/remotes/rebsync-laptop-a/*</pre>
-<p class="muted">Journals are written to the Rebekah home as <code>rebsync_*.jsonl</code>. Uncommitted work is covered by encrypted repository snapshots, not by the git layer.</p>
+<pre>rbq git publish &amp;&amp; rbq peer push                  # laptop A
+rbq peer pull --layer git                             # laptop B
+rbq git fetch ID --repo ~/src/project --as laptop-a   # → refs/remotes/rbq-laptop-a/*</pre>
+<p class="muted">Journals are written to the Rebeqah home as <code>rbq_*.jsonl</code>. Uncommitted work is covered by encrypted repository snapshots, not by the git layer.</p>
 </main></body></html>"#,
         version = escape(status["version"].as_str().unwrap_or("")),
-        home = field("rebekah_home"),
+        home = field("rbq_home"),
         store = field("storage_root"),
         backup = field("backup"),
         fleet = field("fleet_authority"),
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn page_escapes_paths() {
         let html = page(
-            &json!({"version":"1","rebekah_home":"/home/<x>","storage_root":"/s",
+            &json!({"version":"1","rbq_home":"/home/<x>","storage_root":"/s",
             "backup":"not configured","fleet_authority":"kali-1","layers":[]}),
         );
         assert!(html.contains("/home/&lt;x&gt;") && !html.contains("/home/<x>"));

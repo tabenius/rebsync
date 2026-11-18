@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build static rbq-sync release tarballs for Linux x86_64 and aarch64
+# Build static rbq (rbq-sync) release tarballs for Linux x86_64 and aarch64
 # (Chromebook/Crostini, servers, Raspberry Pi) without CI.
 #
 # Needs: rustup targets x86_64-unknown-linux-musl and aarch64-unknown-linux-musl,
@@ -16,13 +16,13 @@ rm -rf "$dist"; mkdir -p "$dist"
 for pair in "x86_64-unknown-linux-musl x86_64" "aarch64-unknown-linux-musl aarch64"; do
   set -- $pair
   cargo zigbuild --release --locked -p rebsync-cli --target "$1"
-  bin="target/$1/release/rbq-sync"
+  bin="target/$1/release/rbq"
   file "$bin" | grep -q "statically linked" || { echo "$bin is not static" >&2; exit 1; }
   name="rbq-sync-$version-linux-$2"
   mkdir -p "$dist/$name"
-  cp "$bin" "$dist/$name/rbq-sync"
+  cp "$bin" "$dist/$name/rbq"
   install -m 0755 scripts/rbq-sync-install.sh "$dist/$name/install.sh"
-  printf 'rbq-sync %s (source %s)\nStatic Linux %s build. Run ./install.sh, or copy rbq-sync onto your PATH.\nrebsync is the olden name; install.sh links it to rbq-sync.\n' "$version" "$commit" "$2" > "$dist/$name/README.txt"
+  printf 'rbq-sync %s (source %s): the rbq command\nStatic Linux %s build. Run ./install.sh, or copy rbq onto your PATH.\nrebsync is the olden name; install.sh links it to rbq.\n' "$version" "$commit" "$2" > "$dist/$name/README.txt"
   tar -C "$dist" -czf "$dist/$name.tar.gz" "$name"
   rm -rf "$dist/$name"
 done

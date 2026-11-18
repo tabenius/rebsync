@@ -57,7 +57,7 @@ def prepare(args, root):
     expected = json.loads((root / 'release/android-signing.json').read_text())
     tag = os.environ.get('RELEASE_TAG') or os.environ.get('GITHUB_REF_NAME', '')
     if tag != 'v' + config['version'] or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
-        raise ValueError('Use the app version tag vX.Y.Z, not a mutable branch or legacy rebekah-v tag')
+        raise ValueError('Use the app version tag vX.Y.Z, not a mutable branch or legacy rebeqah-v tag')
     event_ref = os.environ.get('GITHUB_REF')
     if event_ref and event_ref != 'refs/tags/' + tag:
         raise ValueError('CI signing identity must be the selected tag ref')
@@ -78,7 +78,7 @@ def prepare(args, root):
     if not fingerprints or fingerprints[0] != expected['openpgpFingerprint']:
         raise ValueError('Public release key does not match the pinned fingerprint')
     args.dist.mkdir(parents=True, exist_ok=False)
-    name = f"rebekah-{config['version']}-universal-release.apk"
+    name = f"rebeqah-{config['version']}-universal-release.apk"
     target = args.dist / name
     with args.apk.open('rb') as source, target.open('xb') as dest:
         import shutil
@@ -93,9 +93,9 @@ def prepare(args, root):
         subprocess.run(['gpg', '--local-user', expected['openpgpFingerprint'], '--armor',
                         '--detach-sign', '--output', str(args.dist / 'SHA256SUMS.asc'),
                         str(args.dist / 'SHA256SUMS')], check=True)
-    files = [{'name': path.name, 'path': f"releases/rebekah/{config['version']}/android/{path.name}",
+    files = [{'name': path.name, 'path': f"releases/rebeqah/{config['version']}/android/{path.name}",
               'bytes': path.stat().st_size, 'sha256': digest(path)} for path in sorted(args.dist.iterdir())]
-    manifest = {'schema': 'ragbaz.release/1', 'repository': 'tabenius/rebsync', 'product': 'rebekah',
+    manifest = {'schema': 'ragbaz.release/1', 'repository': 'tabenius/rebsync', 'product': 'rebeqah',
                 'version': config['version'], 'platform': 'android', 'channel': 'candidate',
                 'sourceCommit': commit, 'validation': {'installedSmoke': False}, 'files': files}
     write_new(args.dist / 'release.json', (json.dumps(manifest, indent=2) + '\n').encode())

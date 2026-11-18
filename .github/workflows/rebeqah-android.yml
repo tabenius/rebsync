@@ -1,12 +1,12 @@
-name: Rebekah Android release
+name: Rebeqah Android release
 # Builds the signed universal APK. Push a tag `vX.Y.Z` to publish a
 # GitHub candidate release. New releases use vX.Y.Z for registry compatibility.
 #
 # Required repository secrets (never commit the keystore):
-#   REBEKAH_KEYSTORE_B64   base64 of the .jks file
-#   REBEKAH_STORE_PASSWORD
-#   REBEKAH_KEY_PASSWORD
-#   REBEKAH_KEY_ALIAS      (optional, defaults to "rebekah")
+#   RBQ_KEYSTORE_B64   base64 of the .jks file
+#   RBQ_STORE_PASSWORD
+#   RBQ_KEY_PASSWORD
+#   RBQ_KEY_ALIAS      (optional, defaults to "rbq")
 on:
   push:
     tags: ["v*"]
@@ -59,19 +59,19 @@ jobs:
           python3 scripts/test_android_release.py
       - name: Signing keystore from secrets
         env:
-          KEYSTORE_B64: ${{ secrets.REBEKAH_KEYSTORE_B64 }}
+          KEYSTORE_B64: ${{ secrets.RBQ_KEYSTORE_B64 }}
         run: |
-          test -n "$KEYSTORE_B64" || { echo "::error::REBEKAH_KEYSTORE_B64 secret is not set"; exit 1; }
+          test -n "$KEYSTORE_B64" || { echo "::error::RBQ_KEYSTORE_B64 secret is not set"; exit 1; }
           umask 077
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rebekah-release.jks"
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rbq-release.jks"
       - name: Build release APK
         working-directory: apps/rebsync-app
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-          REBEKAH_STORE_FILE: ${{ runner.temp }}/rebekah-release.jks
-          REBEKAH_STORE_PASSWORD: ${{ secrets.REBEKAH_STORE_PASSWORD }}
-          REBEKAH_KEY_PASSWORD: ${{ secrets.REBEKAH_KEY_PASSWORD }}
-          REBEKAH_KEY_ALIAS: ${{ secrets.REBEKAH_KEY_ALIAS || 'rebekah' }}
+          RBQ_STORE_FILE: ${{ runner.temp }}/rbq-release.jks
+          RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
+          RBQ_KEY_PASSWORD: ${{ secrets.RBQ_KEY_PASSWORD }}
+          RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
         run: |
           npm ci
           npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
@@ -85,18 +85,18 @@ jobs:
       - name: Remove temporary keystore
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/rebekah-release.jks"
+          rm -f "$RUNNER_TEMP/rbq-release.jks"
       - uses: sigstore/cosign-installer@v3
       - name: Sign exact candidate inventory using tag-bound CI identity
         run: cosign sign-blob --yes --bundle dist/release.sigstore.json dist/release.json
       - uses: actions/upload-artifact@v4
         with:
-          name: rebekah-apk
+          name: rebeqah-apk
           path: dist/*
       - name: Publish candidate release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --prerelease \
-            --title "RAGBAZ Rebekah ${GITHUB_REF_NAME#v} (Android candidate)" \
+            --title "RAGBAZ Rebeqah ${GITHUB_REF_NAME#v} (Android candidate)" \
             --notes "Signed universal APK (arm64, armv7, x86_64; Android 7+). Candidate: installation on a physical device has not been verified. See android.json for the package/versionCode/signing identity and release.json plus release.sigstore.json for CI verification."

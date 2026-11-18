@@ -15,7 +15,7 @@
 //! presence implies its chunks were published. Nothing is overwritten or
 //! deleted. Verification and restore reassemble the file, check every chunk and
 //! the whole-file digest, and then hand the result back to Mneme's own
-//! validator; Rebsync never claims a snapshot is sound on its own authority.
+//! validator; Rebeqah never claims a snapshot is sound on its own authority.
 //!
 //! The object store is local and plaintext (owner-only). Off-machine,
 //! encrypted coverage comes from the optional restic step.
@@ -39,7 +39,7 @@ use std::{
     process::Command,
 };
 
-pub const LAYER_SCHEMA: &str = "rebsync.mneme.snapshot.v1";
+pub const LAYER_SCHEMA: &str = "rbq.mneme.snapshot.v1";
 pub const OWNER_SCHEMA: &str = "mneme.snapshot.v1";
 const PREFIX: &str = "mneme/v1";
 const SNAPSHOT_FILE: &str = "mneme-index.sqlite";
@@ -337,14 +337,14 @@ pub fn publish(
     if config.mneme.restic {
         // The staged directory holds only the verified export plus its manifest.
         let manifest = storage.get(&manifest_key(&outcome.id)?)?;
-        process::write_private(&stage.path().join("rebsync-mneme-manifest.json"), &manifest)?;
-        let tag = format!("rebsync-mneme:{}:{}", journal.run_id, config.mneme.label);
+        process::write_private(&stage.path().join("rbq-mneme-manifest.json"), &manifest)?;
+        let tag = format!("rbq-mneme:{}:{}", journal.run_id, config.mneme.label);
         outcome.restic_snapshot = Some(sync::restic_backup(config, stage.path(), &tag, journal)?);
     }
     Ok(outcome)
 }
 
-/// Entry point for `rebsync --apply`: never fails the run, reports status.
+/// Entry point for `rbq --apply`: never fails the run, reports status.
 pub fn run_layer(config: &Config, journal: &mut Journal) -> Value {
     #[cfg(feature = "storage-object-store")]
     {
@@ -463,14 +463,29 @@ pub fn load(storage: &dyn ObjectStorage, id: &str) -> Result<LayerManifest> {
     let key = manifest_key(id)?;
     let manifest: LayerManifest = serde_json::from_slice(&storage.get(&key)?)
         .with_context(|| format!("unreadable layer manifest {key}"))?;
+    check_manifest(&manifest, id)?;
+    Ok(manifest)
+}
+
+pub fn check_manifest(manifest: &LayerManifest, id: &str) -> Result<()> {
     ensure!(manifest.schema == LAYER_SCHEMA, "unsupported layer schema");
     ensure!(manifest.id == id, "manifest id does not match its key");
     ensure!(valid_sha256(&manifest.sha256), "invalid manifest digest");
     ensure!(
-        manifest.chunks.iter().map(|c| c.size).sum::<u64>() == manifest.bytes,
+        manifest
+            .chunks
+            .iter()
+            .try_fold(0_u64, |sum, c| sum.checked_add(c.size))
+            == Some(manifest.bytes),
         "chunk sizes do not add up to the snapshot size"
     );
-    Ok(manifest)
+    for chunk in &manifest.chunks {
+        ensure!(
+            valid_sha256(&chunk.sha256) && chunk.size > 0 && chunk.size <= 64 * 1024 * 1024,
+            "invalid chunk address or size"
+        );
+    }
+    Ok(())
 }
 
 /// Reassemble a snapshot into a new owner-only file, checking every chunk and

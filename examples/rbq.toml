@@ -1,4 +1,4 @@
-# All paths below are relative to rebekah_home unless absolute.
+# All paths below are relative to rbq_home unless absolute.
 version = 1
 command_timeout_seconds = 120
 
@@ -14,9 +14,9 @@ fast_forward = true
 backup_required = true
 
 [backup]
-# Initialize explicitly with: rebsync backup-init --confirm --config PATH
-# repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rebsync"
-# password_file = "/path/outside/repositories/rebsync-restic-password"
+# Initialize explicitly with: rbq backup-init --confirm --config PATH
+# repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rbq"
+# password_file = "/path/outside/repositories/rbq-restic-password"
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY come from the environment.
 # Never place credentials or the restic password in this file.
 
@@ -27,9 +27,9 @@ backup_required = true
 # kind = "directory"
 
 [storage]
-# Rebsync-managed objects, not a source checkout or the restic repository.
-# Relative paths resolve against rebekah_home. Override with --storage-root.
-root = ".rebsync/objects"
+# Rebeqah-managed objects, not a source checkout or the restic repository.
+# Relative paths resolve against rbq_home. Override with --storage-root.
+root = ".rbq/objects"
 
 [mneme]
 # Owner-exported Mneme index snapshots, published as content-addressed chunks.

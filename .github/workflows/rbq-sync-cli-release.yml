@@ -1,5 +1,6 @@
 name: rbq-sync CLI release
-# Tag rbq-sync-vX.Y.Z to attach static Linux x86_64/aarch64 tarballs to a
+# Tag rbq-sync-vX.Y.Z to attach static Linux x86_64/aarch64 tarballs of the rbq
+# command to a
 # candidate release. The same script runs locally when CI is unavailable:
 #   scripts/build-cli-release.sh dist/cli
 on:

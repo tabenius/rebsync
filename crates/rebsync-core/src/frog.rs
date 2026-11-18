@@ -3,10 +3,10 @@
 //! Frog owns the export: `frog snapshot` copies the live database with
 //! SQLite's online backup API, which is consistent under concurrent writers.
 //! (It also records a `workspace.snapshot` event in AGENTS.db and keeps its
-//! own `.last`/`.prev` rotation inside the destination, which Rebsync points
+//! own `.last`/`.prev` rotation inside the destination, which Rebeqah points
 //! at a private staging directory.)
 //!
-//! Frog has no snapshot validator, so Rebsync checks the export itself before
+//! Frog has no snapshot validator, so Rebeqah checks the export itself before
 //! publishing it, through Python's standard `sqlite3` module (present wherever
 //! Frog runs): `PRAGMA integrity_check`, the core tables, applied migrations
 //! and row counts. Restore writes a *new* file and never touches a live
@@ -65,7 +65,7 @@ problems = [r[0] for r in c.execute("PRAGMA integrity_check(20)") if r[0] != "ok
 tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 required = ["schema_migrations", "repos", "agents", "locks", "tasks", "event_log"]
 missing = [t for t in required if t not in tables]
-result = {"schema": "rebsync.frog.validation.v1", "ok": not problems and not missing,
+result = {"schema": "rbq.frog.validation.v1", "ok": not problems and not missing,
           "integrity": "ok" if not problems else problems, "missing_tables": missing}
 if not missing:
     result["migrations"] = sorted(r[0] for r in c.execute("SELECT name FROM schema_migrations"))
@@ -184,8 +184,8 @@ pub fn publish(
     if config.frog.restic {
         std::fs::remove_dir_all(stage.path().join("frog-snapshot")).ok();
         let manifest = storage.get(&layer::manifest_key(LAYER, &outcome.id)?)?;
-        process::write_private(&stage.path().join("rebsync-frog-manifest.json"), &manifest)?;
-        let tag = format!("rebsync-frog:{}:{}", journal.run_id, config.frog.label);
+        process::write_private(&stage.path().join("rbq-frog-manifest.json"), &manifest)?;
+        let tag = format!("rbq-frog:{}:{}", journal.run_id, config.frog.label);
         outcome.restic_snapshot = Some(sync::restic_backup(config, stage.path(), &tag, journal)?);
     }
     Ok(outcome)
@@ -252,7 +252,7 @@ pub fn restore(
     journal.event("frog-restored", into, json!({"id": manifest.id}))?;
     Ok(
         json!({"id": manifest.id, "restored_to": into, "validation": report,
-        "next": "Stop Frog agents and swap the file in deliberately; rebsync never replaces a live AGENTS.db."}),
+        "next": "Stop Frog agents and swap the file in deliberately; rbq never replaces a live AGENTS.db."}),
     )
 }
 

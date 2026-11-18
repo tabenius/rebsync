@@ -1,7 +1,7 @@
 # Isolated storage evaluation
 
 This is an unpublished experiment, not a third production crate and not part of
-the root workspace. It does not change the installed `rebsync` command.
+the root workspace. It does not change the installed `rbq` command.
 
 See [`docs/STORAGE-EVALUATION.md`](../../docs/STORAGE-EVALUATION.md) for the
 comparison, semantics and decision gates.
@@ -56,4 +56,4 @@ prove atomic exclusion, and client construction does not prove cloud compatibili
 
 To let a long build survive OpenCode restarts, the same runner may be launched as
 a user systemd service. This is an execution convenience, not a runtime dependency
-of rebsync.
+of rbq.

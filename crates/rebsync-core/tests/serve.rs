@@ -1,4 +1,4 @@
-//! `rebsync serve`: HTTPS status page and zeroconf announcement.
+//! `rbq serve`: HTTPS status page and zeroconf announcement.
 #![cfg(all(unix, feature = "serve", feature = "storage-object-store"))]
 
 use rebsync_core::{Config, FsObjectStorage, serve};
@@ -26,9 +26,9 @@ fn announces_on_the_network_and_is_discoverable_by_mdns() {
         );
         return;
     };
-    assert!(mdns.detail.contains("_rebsync._tcp"));
+    assert!(mdns.detail.contains("_rbq._tcp"));
     let browser = mdns_sd::ServiceDaemon::new().unwrap();
-    let events = browser.browse("_rebsync._tcp.local.").unwrap();
+    let events = browser.browse("_rbq._tcp.local.").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut found = None;
     while Instant::now() < deadline {
@@ -40,7 +40,7 @@ fn announces_on_the_network_and_is_discoverable_by_mdns() {
             break;
         }
     }
-    let info = found.expect("rebsync service not discovered via mDNS");
+    let info = found.expect("rbq service not discovered via mDNS");
     assert_eq!(info.get_property_val_str("path"), Some("/"));
     assert_eq!(info.get_property_val_str("scheme"), Some("http"));
     let _ = browser.shutdown();
@@ -60,7 +60,7 @@ fn serves_page_and_status_without_secrets() {
         rebsync_core::layer::LAYERS.len()
     );
     let html = serve::page(&status);
-    assert!(!html.contains("TOPSECRET") && html.contains("rebsync peer push"));
+    assert!(!html.contains("TOPSECRET") && html.contains("rbq peer push"));
     // The certificate is reused, owner-only, and its fingerprint is stable.
     let dir = t.path().join("tls");
     let (_, _, first) = serve::certificate(&dir, vec!["localhost".into()]).unwrap();

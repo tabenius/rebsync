@@ -175,11 +175,8 @@ pub fn publish(
     )?;
     if config.agenda.restic {
         let manifest = storage.get(&layer::manifest_key(LAYER, &outcome.id)?)?;
-        process::write_private(
-            &stage.path().join("rebsync-agenda-manifest.json"),
-            &manifest,
-        )?;
-        let tag = format!("rebsync-agenda:{}:{}", journal.run_id, config.agenda.label);
+        process::write_private(&stage.path().join("rbq-agenda-manifest.json"), &manifest)?;
+        let tag = format!("rbq-agenda:{}:{}", journal.run_id, config.agenda.label);
         outcome.restic_snapshot = Some(sync::restic_backup(config, stage.path(), &tag, journal)?);
     }
     Ok(outcome)

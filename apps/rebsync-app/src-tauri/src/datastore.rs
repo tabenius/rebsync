@@ -15,11 +15,11 @@ use std::{
     sync::Mutex,
 };
 
-pub const DATA_DIR: &str = "rebekah";
+pub const DATA_DIR: &str = "rebeqah";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
-    /// Volume directory holding `rebekah/objects`.
+    /// Volume directory holding `rbq/objects`.
     pub volume: PathBuf,
     pub token: String,
     pub port: u16,
@@ -103,7 +103,7 @@ pub fn inventory(root: &Path) -> std::io::Result<Vec<(PathBuf, u64)>> {
             continue;
         }
         let name = entry.file_name().to_string_lossy();
-        if name.starts_with(".rebsync-link-probe") || name.starts_with(".rebekah-") {
+        if name.starts_with(".rbq-link-probe") || name.starts_with(".rebeqah-") {
             continue;
         }
         let relative = entry
@@ -159,7 +159,7 @@ pub fn copy_verified(
                 fs::create_dir_all(parent).map_err(|e| format!("create directory: {e}"))?;
             }
             let temp = target.with_file_name(format!(
-                ".rebekah-move-{}",
+                ".rbq-move-{}",
                 target.file_name().unwrap_or_default().to_string_lossy()
             ));
             {
@@ -227,12 +227,12 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, body).unwrap();
         }
-        fs::write(from.join(".rebsync-link-probe-1"), "probe").unwrap();
+        fs::write(from.join(".rbq-link-probe-1"), "probe").unwrap();
         let status = Mutex::new(MoveStatus::default());
         let copied = copy_verified(&from, &to, &status).unwrap();
         assert_eq!(copied.len(), 3);
         assert_eq!(fs::read_to_string(to.join("mneme/v1/x")).unwrap(), "one");
-        assert!(!to.join(".rebsync-link-probe-1").exists());
+        assert!(!to.join(".rbq-link-probe-1").exists());
         let s = status.lock().unwrap().clone();
         assert_eq!((s.files_done, s.bytes_done), (3, 11));
         // Resuming over identical content is fine.
@@ -246,7 +246,7 @@ mod tests {
             inventory(&from)
                 .unwrap()
                 .iter()
-                .all(|(p, _)| p.starts_with(".rebsync"))
+                .all(|(p, _)| p.starts_with(".rbq"))
         );
     }
 

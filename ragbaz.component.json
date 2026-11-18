@@ -2,8 +2,8 @@
   "$schema": "https://ragbaz.cc/schemas/ragbaz.component.schema.json",
   "schemaVersion": "0.2.0",
   "identity": {
-    "id": "ragbaz.rebsync",
-    "name": "Rebsync",
+    "id": "ragbaz.rebeqah",
+    "name": "Rebeqah",
     "version": "0.1.0",
     "repoPath": "rebsync",
     "repository": "tabenius/rebsync",
@@ -26,7 +26,7 @@
       "componentId": "ragbaz.frog",
       "kind": "runtime",
       "optional": true,
-      "reason": "The opt-in Frog layer invokes the external frog snapshot CLI to export AGENTS.db. Frog owns the live database; Rebsync validates and stores the exported snapshot."
+      "reason": "The opt-in Frog layer invokes the external frog snapshot CLI to export AGENTS.db. Frog owns the live database; Rebeqah validates and stores the exported snapshot."
     },
     {
       "componentId": "ragbaz.mneme",
@@ -38,8 +38,8 @@
   "provides": {
     "cli": [
       {
-        "name": "rebsync",
-        "command": "rebsync",
+        "name": "rbq",
+        "command": "rbq",
         "capabilities": ["ops.preservation"]
       }
     ]

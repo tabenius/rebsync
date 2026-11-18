@@ -1,8 +1,8 @@
-//! Local transports for `rebsync-peer/1`.
+//! Local transports for `rbq-peer/1`.
 //!
 //! The layer sync logic in [`crate::peer`] only needs a handful of operations:
-//! status, list, get and create-if-absent put. `rebsync-peer/0` carries those
-//! over plain HTTP for the Rebekah app. This module carries the same operations
+//! status, list, get and create-if-absent put. `rbq-peer/0` carries those
+//! over plain HTTP for the Rebeqah app. This module carries the same operations
 //! over raw, length-prefixed frames and adds three local transports:
 //!
 //! * TCP (`tcp://HOST:PORT`), still token-protected but unencrypted;
@@ -16,8 +16,8 @@
 //! or hostile peer can waste bounded work but cannot write arbitrary objects.
 //!
 //! This is a transport contract, not an OSHI mesh integration. A bridge that
-//! wants to carry rebsync traffic must expose a Unix stream or datagram socket
-//! speaking `rebsync-peer/1`; rebsync itself never talks to OSHI relays.
+//! wants to carry rbq traffic must expose a Unix stream or datagram socket
+//! speaking `rbq-peer/1`; rbq itself never talks to OSHI relays.
 
 use crate::{
     journal::Journal,
@@ -45,11 +45,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const PROTOCOL: &str = "rebsync-peer/1";
+pub const PROTOCOL: &str = "rbq-peer/1";
 /// Metadata frames (a request/response envelope) are bounded independently
 /// from object bodies. A 10 000-key listing with long keys needs a few MiB.
 const MAX_CONTROL: usize = 8 * 1024 * 1024;
-/// Largest object body, matching `rebsync-peer/0` and Mneme chunks.
+/// Largest object body, matching `rbq-peer/0` and Mneme chunks.
 pub const MAX_OBJECT: u64 = 64 * 1024 * 1024;
 const MAX_LIST: usize = 10_000;
 const PAGE: usize = 5000;
@@ -57,8 +57,8 @@ const MAX_CONNECTIONS: usize = 8;
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
-// Datagram wire format: "RSD1" | kind:u8 | id:u32 | seq:u32 | total:u32 | payload
-const DATAGRAM_MAGIC: &[u8; 4] = b"RSD1";
+// Datagram wire format: "RBQ1" | kind:u8 | id:u32 | seq:u32 | total:u32 | payload
+const DATAGRAM_MAGIC: &[u8; 4] = b"RBQ1";
 const DATAGRAM_HEADER: usize = 17;
 const KIND_CONTROL: u8 = 0;
 const KIND_CHUNK: u8 = 1;
@@ -120,9 +120,9 @@ impl Target {
             }
             "unix" => unix_path(rest, false),
             "unix-dgram" | "unix+datagram" => unix_path(rest, true),
-            "http" | "https" => bail!(
-                "{scheme} targets use rebsync-peer/0; keep using them with the HTTP peer client"
-            ),
+            "http" | "https" => {
+                bail!("{scheme} targets use rbq-peer/0; keep using them with the HTTP peer client")
+            }
             other => bail!("unsupported transport {other:?}; use tcp, unix or unix-dgram"),
         }
     }
@@ -176,11 +176,11 @@ fn unix_path(rest: &str, datagram: bool) -> Result<Target> {
     })
 }
 
-/// Parse `rebsync+tcp://HOST:PORT?token=T`, `unix:///path?token=T` or
+/// Parse `rbq+tcp://HOST:PORT?token=T`, `unix:///path?token=T` or
 /// `unix-dgram:///path?token=T`, with the token optionally supplied separately.
 pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<(Target, String)> {
     let raw = connection.trim();
-    let raw = raw.strip_prefix("rebsync+").unwrap_or(raw);
+    let raw = raw.strip_prefix("rbq+").unwrap_or(raw);
     let (location, query) = raw.split_once('?').unwrap_or((raw, ""));
     let from_query = query
         .split('&')
@@ -780,7 +780,7 @@ fn datagram(kind: u8, id: u32, seq: u32, total: u32, payload: &[u8]) -> Vec<u8> 
 #[cfg(unix)]
 fn parse_datagram(bytes: &[u8]) -> Result<(u8, u32, u32, u32, &[u8])> {
     ensure!(bytes.len() >= DATAGRAM_HEADER, "short datagram");
-    ensure!(&bytes[..4] == DATAGRAM_MAGIC, "not a rebsync datagram");
+    ensure!(&bytes[..4] == DATAGRAM_MAGIC, "not a rbq datagram");
     let kind = bytes[4];
     ensure!(
         kind == KIND_CONTROL || kind == KIND_CHUNK,
@@ -1746,7 +1746,7 @@ mod tests {
     #[test]
     fn parses_local_targets_and_keeps_tokens_separate() {
         let (target, token) =
-            parse_connection("rebsync+tcp://127.0.0.1:8787?token=abc123", None).unwrap();
+            parse_connection("rbq+tcp://127.0.0.1:8787?token=abc123", None).unwrap();
         assert_eq!(
             target,
             Target::Tcp {
@@ -1755,10 +1755,10 @@ mod tests {
             }
         );
         assert_eq!(token, "abc123");
-        let (target, _) = parse_connection("unix:///run/rebsync.sock", Some("x9")).unwrap();
-        assert_eq!(target.describe(), "unix:///run/rebsync.sock");
-        let (target, _) = parse_connection("unix-dgram:///run/rebsync.dgram", Some("x9")).unwrap();
-        assert_eq!(target.describe(), "unix-dgram:///run/rebsync.dgram");
+        let (target, _) = parse_connection("unix:///run/rbq.sock", Some("x9")).unwrap();
+        assert_eq!(target.describe(), "unix:///run/rbq.sock");
+        let (target, _) = parse_connection("unix-dgram:///run/rbq.dgram", Some("x9")).unwrap();
+        assert_eq!(target.describe(), "unix-dgram:///run/rbq.dgram");
         assert!(parse_connection("http://h:1", Some("x9")).is_err());
         assert!(parse_connection("unix://relative.sock", Some("x9")).is_err());
         assert!(parse_connection("unix:///run/x", None).is_err());
@@ -1788,7 +1788,7 @@ mod tests {
             (kind, id, seq, total, payload),
             (KIND_CHUNK, 7, 2, 3, b"payload".as_slice())
         );
-        assert!(parse_datagram(b"RSD1").is_err());
+        assert!(parse_datagram(b"RBQ1").is_err());
         let mut foreign = packet.clone();
         foreign[0] = b'X';
         assert!(parse_datagram(&foreign).is_err());

@@ -1,5 +1,6 @@
-use rebekah_logic_tests::peer::{Clients, Peer, SharedStorage};
+use rebeqah_logic_tests::peer::{Clients, Peer, SharedStorage};
 use rebsync_core::{FsObjectStorage, ObjectStorage};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -62,33 +63,39 @@ fn peer_api_auth_create_if_absent_and_client_tracking() {
     assert_eq!(get(port, "/v1/status", Some("wrong")).0, 401);
     let (code, body) = get(port, "/v1/status", Some(&token));
     assert_eq!(code, 200, "{}", String::from_utf8_lossy(&body));
-    assert!(String::from_utf8_lossy(&body).contains("rebsync-peer/0"));
+    assert!(String::from_utf8_lossy(&body).contains("rbq-peer/0"));
     assert_eq!(get(port, &format!("/v1/status?token={token}"), None).0, 200);
 
-    assert_eq!(put(port, "/v1/objects/mneme/v1/a", &token, b"hello").0, 201);
-    let (code, body) = put(port, "/v1/objects/mneme/v1/a", &token, b"other");
+    let digest = format!("{:x}", Sha256::digest(b"hello"));
+    let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+    let path = format!("/v1/objects/{key}");
+    assert_eq!(put(port, &path, &token, b"hello").0, 201);
+    // A lost reply can be retried safely with identical bytes.
+    let (code, body) = put(port, &path, &token, b"hello");
     assert_eq!(code, 200);
     assert!(String::from_utf8_lossy(&body).contains("exists"));
     assert_eq!(
-        get(port, "/v1/objects/mneme/v1/a", Some(&token)),
+        get(port, &path, Some(&token)),
         (200, b"hello".to_vec())
     );
-    assert_eq!(get(port, "/v1/objects/missing", Some(&token)).0, 404);
+    assert_eq!(put(port, &path, &token, b"other").0, 400);
+    assert_eq!(put(port, "/v1/objects/_probes/x", &token, b"x").0, 400);
+    assert_eq!(get(port, &format!("/v1/objects/mneme/v1/chunks/sha256/00/{}", "0".repeat(64)), Some(&token)).0, 404);
     assert_eq!(get(port, "/v1/objects/..%2Fescape", Some(&token)).0, 400);
     let (code, body) = get(port, "/v1/objects?prefix=mneme%2F", Some(&token));
     assert_eq!(code, 200);
-    assert!(String::from_utf8_lossy(&body).contains("mneme/v1/a"));
+    assert!(String::from_utf8_lossy(&body).contains(&key));
     let (code, _) = request(
         port,
         &format!(
-            "DELETE /v1/objects/mneme/v1/a HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+            "DELETE {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
         ),
         b"",
     );
     assert_eq!(code, 405);
 
     paused.store(true, Ordering::SeqCst);
-    assert_eq!(put(port, "/v1/objects/b", &token, b"x").0, 503);
+    assert_eq!(put(port, &path, &token, b"hello").0, 503);
     paused.store(false, Ordering::SeqCst);
 
     // Brute force is throttled per address after ten failures in a minute.

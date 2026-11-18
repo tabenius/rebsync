@@ -28,8 +28,8 @@ use std::{
     path::{Component, Path},
 };
 
-pub const SNAPSHOT_SCHEMA: &str = "rebsync.layer.snapshot.v1";
-/// Layers whose objects Rebsync publishes and exchanges with peers.
+pub const SNAPSHOT_SCHEMA: &str = "rbq.layer.snapshot.v1";
+/// Layers whose objects Rebeqah publishes and exchanges with peers.
 pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub struct SnapshotManifest {
     /// SHA-256 over the sorted `path\0sha256\n` lines: identifies the content.
     pub digest: String,
     pub files: Vec<LayerFile>,
-    /// What the owner (or Rebsync's validator) reported about the export.
+    /// What the owner (or Rebeqah's validator) reported about the export.
     pub owner: Value,
 }
 
@@ -139,7 +139,7 @@ pub fn validate_relative_path(path: &str) -> Result<()> {
             Component::Normal(segment) => {
                 let segment = segment.to_str().context("non-UTF-8 path")?;
                 ensure!(
-                    !segment.starts_with('.') || segment == ".rebsync-keep",
+                    !segment.starts_with('.') || segment == ".rbq-keep",
                     "hidden path segment {segment:?}"
                 );
                 ensure!(
@@ -379,18 +379,30 @@ pub fn check_manifest(manifest: &SnapshotManifest, layer: &str, id: &str) -> Res
     ensure!(manifest.id == id, "manifest id does not match its key");
     ensure!(valid_sha256(&manifest.digest), "invalid manifest digest");
     ensure!(!manifest.files.is_empty(), "manifest lists no files");
+    manifest
+        .files
+        .iter()
+        .try_fold(0_u64, |sum, file| sum.checked_add(file.bytes))
+        .context("manifest byte count overflows u64")?;
     let mut seen = std::collections::BTreeSet::new();
     for file in &manifest.files {
         validate_relative_path(&file.path)?;
         ensure!(seen.insert(&file.path), "duplicate path {}", file.path);
         ensure!(valid_sha256(&file.sha256), "invalid file digest");
         ensure!(
-            file.chunks.iter().map(|c| c.size).sum::<u64>() == file.bytes,
+            file.chunks
+                .iter()
+                .try_fold(0_u64, |sum, c| sum.checked_add(c.size))
+                == Some(file.bytes),
             "chunk sizes of {} do not add up",
             file.path
         );
         for chunk in &file.chunks {
             ensure!(valid_sha256(&chunk.sha256), "invalid chunk digest");
+            ensure!(
+                chunk.size > 0 && chunk.size <= 64 * 1024 * 1024,
+                "invalid chunk size"
+            );
         }
     }
     ensure!(
@@ -588,7 +600,7 @@ pub fn lock(config: &Config, layer: &str) -> Result<File> {
     while file.try_lock_exclusive().is_err() {
         ensure!(
             std::time::Instant::now() < deadline,
-            "another rebsync is publishing or pruning the {layer} layer"
+            "another rbq is publishing or pruning the {layer} layer"
         );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -695,7 +707,7 @@ pub fn prune(
     let mut report = PruneReport {
         layer: layer.into(),
         dry_run: !apply,
-        note: "Local only: peers keep their copies, and `rebsync peer pull` would bring pruned snapshots back.",
+        note: "Local only: peers keep their copies, and `rbq peer pull` would bring pruned snapshots back.",
         ..Default::default()
     };
     let mut remaining = Vec::new();
@@ -799,7 +811,7 @@ fn manifest_files(layer: &str, key: &str, value: &Value) -> Result<Vec<LayerFile
             check_manifest(&manifest, layer, id)?;
             Ok(manifest.files)
         }
-        Some("rebsync.mneme.snapshot.v1") if layer == "mneme" => {
+        Some("rbq.mneme.snapshot.v1") if layer == "mneme" => {
             let chunks: Vec<Chunk> = serde_json::from_value(
                 value
                     .get("chunks")
@@ -882,10 +894,10 @@ pub fn check_snapshot(storage: &dyn ObjectStorage, layer: &str, key: &str) -> Sn
 }
 
 /// Check every snapshot of the given layers. Owner validation (SQLite
-/// integrity, edition manifests) remains `rebsync <layer> verify`.
+/// integrity, edition manifests) remains `rbq <layer> verify`.
 pub fn fsck(storage: &dyn ObjectStorage, layers: &[&str]) -> Result<FsckReport> {
     let mut report = FsckReport {
-        note: "Structural check: every chunk and file digest. Owner validation is `rebsync <layer> verify ID`.",
+        note: "Structural check: every chunk and file digest. Owner validation is `rbq <layer> verify ID`.",
         ..Default::default()
     };
     for layer in layers {

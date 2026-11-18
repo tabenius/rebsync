@@ -75,7 +75,7 @@ fn offline_exchange_publish_carry_fetch_without_touching_local_work() -> Result<
     let id = second[0].snapshot.as_ref().unwrap().id.clone();
     gitlayer::verify(&a_cfg, &a_store, &id)?;
 
-    // Carry the store (in real life: rebsync peer push / pull via the phone).
+    // Carry the store (in real life: rbq peer push / pull via the phone).
     let b_home = t.path().join("b");
     let b_cfg = config(&b_home);
     fs::create_dir_all(&b_home)?;
@@ -115,17 +115,14 @@ fn offline_exchange_publish_carry_fetch_without_touching_local_work() -> Result<
         Some("laptop-a"),
         &mut b_journal,
     )?;
-    assert_eq!(fetched["branches"], "refs/remotes/rebsync-laptop-a/*");
-    // A's work arrives in the rebsync namespace...
+    assert_eq!(fetched["branches"], "refs/remotes/rbq-laptop-a/*");
+    // A's work arrives in the rbq namespace...
     assert_eq!(
-        git(
-            &b_repo,
-            &["rev-parse", "refs/remotes/rebsync-laptop-a/feature"]
-        ),
+        git(&b_repo, &["rev-parse", "refs/remotes/rbq-laptop-a/feature"]),
         feature
     );
     assert_eq!(
-        git(&b_repo, &["rev-parse", "refs/rebsync/laptop-a/tags/v1"]),
+        git(&b_repo, &["rev-parse", "refs/rbq/laptop-a/tags/v1"]),
         base
     );
     // ...and nothing of B's own changed.

@@ -1,8 +1,8 @@
 //! The git layer: committed history as verified bundles, for offline exchange.
 //!
 //! Built for long stretches without GitHub (outage, blocking, months offline):
-//! a machine publishes bundles into the object store, `rebsync peer push`
-//! carries them to the Rebekah phone, another machine pulls and fetches them.
+//! a machine publishes bundles into the object store, `rbq peer push`
+//! carries them to the Rebeqah phone, another machine pulls and fetches them.
 //!
 //! Each discovered repository has one label (`<name>-<identity hash>`) and a
 //! chain of snapshots. The first is a full bundle
@@ -18,10 +18,10 @@
 //! Reading a snapshot reassembles its chain base-first into a throwaway bare
 //! repository, running `git bundle verify` on every link before fetching it,
 //! so prerequisites are proven, not assumed. `restore` clones that result into
-//! a new directory; `fetch` brings branches into `refs/remotes/rebsync-<name>/`
-//! and tags into `refs/rebsync/<name>/tags/` of an existing repository and
+//! a new directory; `fetch` brings branches into `refs/remotes/rbq-<name>/`
+//! and tags into `refs/rbq/<name>/tags/` of an existing repository and
 //! never touches its branches, tags or worktree. Git hooks are disabled for
-//! every Git command Rebsync runs. Committed history only: uncommitted work and
+//! every Git command Rebeqah runs. Committed history only: uncommitted work and
 //! stashes stay with the encrypted repository snapshots.
 
 use crate::{
@@ -39,7 +39,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub const LAYER: &str = "git";
-pub const OWNER_SCHEMA: &str = "rebsync.git.bundle.v1";
+pub const OWNER_SCHEMA: &str = "rbq.git.bundle.v1";
 const BUNDLE: &str = "repository.bundle";
 /// A link that only moves refs (tags, deleted branches): no new objects.
 const REFS_ONLY: &str = "refs.json";
@@ -616,11 +616,11 @@ pub fn restore(
     Ok(
         json!({"id": last.id, "restored_to": into, "chain_length": links.len(),
         "heads": last.owner.get("heads"),
-        "next": "Add the real remote yourself; rebsync does not guess it."}),
+        "next": "Add the real remote yourself; rbq does not guess it."}),
     )
 }
 
-/// Fetch a snapshot's branches and tags into a rebsync-only namespace of an
+/// Fetch a snapshot's branches and tags into a rbq-only namespace of an
 /// existing repository. Never touches local branches, tags or the worktree.
 pub fn fetch(
     config: &Config,
@@ -637,8 +637,8 @@ pub fn fetch(
     let last = links.last().expect("non-empty chain");
     let name = name.unwrap_or(&last.label).to_owned();
     layer::validate_label(&name)?;
-    let heads_spec = format!("+refs/heads/*:refs/remotes/rebsync-{name}/*");
-    let tags_spec = format!("+refs/tags/*:refs/rebsync/{name}/tags/*");
+    let heads_spec = format!("+refs/heads/*:refs/remotes/rbq-{name}/*");
+    let tags_spec = format!("+refs/tags/*:refs/rbq/{name}/tags/*");
     sync::checked(
         journal,
         repo,
@@ -659,8 +659,8 @@ pub fn fetch(
     )?;
     Ok(
         json!({"id": last.id, "repository": repo, "chain_length": links.len(),
-        "branches": format!("refs/remotes/rebsync-{name}/*"),
-        "tags": format!("refs/rebsync/{name}/tags/*"),
+        "branches": format!("refs/remotes/rbq-{name}/*"),
+        "tags": format!("refs/rbq/{name}/tags/*"),
         "note": "Local branches, tags and the worktree were not changed. Merge or check out deliberately."}),
     )
 }

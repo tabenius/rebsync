@@ -1,6 +1,6 @@
-//! RAGBAZ Rebekah: the rebsync companion for Android.
+//! RAGBAZ Rebeqah: the rbq companion for Android.
 //!
-//! Holds a rebsync object store on the phone (internal storage, SD card or USB
+//! Holds a rbq object store on the phone (internal storage, SD card or USB
 //! drive), shares it with peers on trusted local networks, and shows what is
 //! connected and how much space remains.
 
@@ -98,7 +98,7 @@ fn connections(port: u16, token: &str) -> Vec<Connection> {
                 _ => return None,
             };
             let url = format!("http://{host}:{port}");
-            let pairing = format!("rebsync+{url}/v1?token={token}");
+            let pairing = format!("rbq+{url}/v1?token={token}");
             Some(Connection {
                 kind: interface_kind(&i.name).into(),
                 interface: i.name.clone(),
@@ -159,7 +159,7 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         .and_then(|p| p.as_ref().map(|p| p.port));
     let mut warnings = Vec::new();
     if !caps.atomic_create_if_absent {
-        warnings.push("This volume has no hard links (typical for SD cards and USB drives): writes are safe with one writer at a time, which Rebekah ensures.".into());
+        warnings.push("This volume has no hard links (typical for SD cards and USB drives): writes are safe with one writer at a time, which Rebeqah ensures.".into());
     }
     if !caps.owner_only_permissions {
         warnings.push("This volume does not enforce file permissions. Anyone with physical access to the card or stick can read the data; Mneme snapshots contain private transcripts.".into());
@@ -276,7 +276,7 @@ fn move_data(app: State<'_, App>, volume: PathBuf, remove_source: bool) -> Resul
         .find(|v| v.path == volume)
         .ok_or("unknown volume")?;
     if !target.writable {
-        return Err("Rebekah cannot write to that volume".into());
+        return Err("Rebeqah cannot write to that volume".into());
     }
     if target.current {
         return Err("data already lives on that volume".into());
@@ -324,13 +324,16 @@ fn move_data(app: State<'_, App>, volume: PathBuf, remove_source: bool) -> Resul
     paused.store(true, Ordering::SeqCst);
     std::thread::spawn(move || {
         let result = (|| -> Result<bool, String> {
+            // Drain already-started peer writes before copying; hold through
+            // the root switch so no acknowledged object is stranded behind.
+            let mut active_storage = storage.write().map_err(|_| "storage lock")?;
             let copied = datastore::copy_verified(&from, &to, &moving)?;
             if let Ok(mut s) = moving.lock() {
                 s.phase = "switching".into();
             }
             let reopened = open_storage(&next)?;
             datastore::save(&settings_path, &next)?;
-            *storage.write().map_err(|_| "storage lock")? = reopened;
+            *active_storage = reopened;
             if let Ok(mut s) = shared_settings.lock() {
                 *s = next.clone();
             }
@@ -360,7 +363,7 @@ fn move_data(app: State<'_, App>, volume: PathBuf, remove_source: bool) -> Resul
 }
 
 fn internal_dir(app: &tauri::AppHandle) -> PathBuf {
-    std::env::var_os("REBSYNC_FILES_DIR")
+    std::env::var_os("RBQ_FILES_DIR")
         .map(PathBuf::from)
         .or_else(|| app.path().app_data_dir().ok())
         .unwrap_or_else(|| Path::new(".").to_path_buf())
@@ -379,7 +382,7 @@ pub fn run() {
             }
             let internal = internal_dir(app.handle());
             std::fs::create_dir_all(&internal)?;
-            let settings_path = internal.join("rebekah-settings.json");
+            let settings_path = internal.join("rbq-settings.json");
             let mut settings = datastore::load(&settings_path, &internal);
             // If the chosen volume vanished (card removed), fall back to internal
             // without forgetting the choice on disk.
