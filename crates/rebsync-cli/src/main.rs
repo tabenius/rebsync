@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "rebsync",
+    name = "rbq-sync",
     version,
     about = "Preserve work, safely exchange Git branches, report unresolved risks"
 )]
@@ -812,7 +812,7 @@ fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptio
     use rebsync_core::FsObjectStorage;
     let storage = FsObjectStorage::open(&config.storage.root)?;
     let running = rebsync_core::serve::start(config, &options)?;
-    eprintln!("rebsync serving {}", running.url);
+    eprintln!("rbq-sync serving {}", running.url);
     if let Some(fingerprint) = &running.fingerprint {
         eprintln!("self-signed certificate SHA-256 {fingerprint}");
     }
@@ -919,7 +919,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 let target = transport::Target::parse(listen)?;
                 if target.is_public() {
                     eprintln!(
-                        "rebsync: warning: {} is reachable beyond this host and is not encrypted",
+                        "rbq-sync: warning: {} is reachable beyond this host and is not encrypted",
                         target.describe()
                     );
                 }
@@ -1003,11 +1003,11 @@ fn main() {
                         serde_json::json!({"status": "blocked", "migration": migration})
                     );
                 } else {
-                    eprintln!("rebsync: {error:#}");
+                    eprintln!("rbq-sync: {error:#}");
                 }
                 std::process::exit(2);
             }
-            eprintln!("rebsync: {error:#}");
+            eprintln!("rbq-sync: {error:#}");
             std::process::exit(1);
         }
     }

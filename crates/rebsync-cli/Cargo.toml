@@ -12,8 +12,13 @@ peer = ["storage", "rebsync-core/peer-http", "rebsync-core/peer-transport"]
 serve = ["storage", "rebsync-core/serve"]
 
 [[bin]]
-name = "rebsync"
+name = "rbq-sync"
 path = "src/main.rs"
+
+# The olden name, kept so existing scripts, timers and muscle memory work.
+[[bin]]
+name = "rebsync"
+path = "src/rebsync.rs"
 
 [dependencies]
 rebsync-core = { path = "../rebsync-core", default-features = false }
