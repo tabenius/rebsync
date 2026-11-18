@@ -67,12 +67,15 @@ jobs:
       - name: Build release APK
         working-directory: apps/rebsync-app
         env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           RBQ_STORE_FILE: ${{ runner.temp }}/rbq-release.jks
           RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
           RBQ_KEY_PASSWORD: ${{ secrets.RBQ_KEY_PASSWORD }}
           RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
         run: |
+          # ANDROID_HOME comes from the runner's OS environment, which the
+          # ${{ env.* }} expression context cannot see; derive NDK_HOME here.
+          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          test -f "$NDK_HOME/source.properties" || { echo "::error::NDK missing at $NDK_HOME"; exit 1; }
           npm ci
           npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
       - name: Verify signature and collect
