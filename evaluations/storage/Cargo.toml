@@ -6,7 +6,7 @@ name = "rebsync-storage-evaluation"
 version = "0.0.0"
 edition = "2024"
 publish = false
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 # Keep the experiment economical on small laptops; no production profile change.
 [profile.dev]
