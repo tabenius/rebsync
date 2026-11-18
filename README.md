@@ -557,7 +557,7 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   (SQLite integrity, edition manifests) is still `rbq <layer> verify ID`.
 - **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
   hotspot or USB tethering. Listings page with `after=`, which needs Rebeqah
-  0.2.3 or later; Rebekah installs use an incompatible protocol and are refused.
+  0.2.4 or later; Rebekah installs use an incompatible protocol and are refused.
 
 ### Local transports (`rbq-peer/1`)
 
