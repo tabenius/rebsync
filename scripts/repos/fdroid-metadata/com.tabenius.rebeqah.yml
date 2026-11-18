@@ -1,0 +1,16 @@
+Categories:
+  - System
+  - Connectivity
+License: GPL-3.0-or-later
+AuthorName: RAGBAZ
+WebSite: https://ragbaz.cc/
+SourceCode: https://github.com/tabenius/rebsync
+IssueTracker: https://github.com/tabenius/rebsync/issues
+Name: Rebeqah
+Summary: Keep your work safe and move it between devices without the internet
+Description: |-
+  Rebeqah (rbq) preserves work and exchanges Git repositories between
+  machines over USB, SD cards, a local network or this phone, and reports
+  what would be lost if a device failed. It shows connection strings,
+  connected clients and free space, and can move data to an SD card or USB
+  stick.
