@@ -100,6 +100,11 @@ enum Action {
         #[command(subcommand)]
         command: MnemeAction,
     },
+    /// Explicit reviewed Hypomnema gzip exchange, separate from Mneme SQLite snapshots.
+    Hypomnema {
+        #[command(subcommand)]
+        command: HypomnemaAction,
+    },
     /// Frog coordination database (AGENTS.db) layer.
     Frog {
         #[command(subcommand)]
@@ -378,6 +383,21 @@ struct PruneArgs {
     #[arg(long)]
     apply: bool,
 }
+#[derive(Subcommand)]
+enum HypomnemaAction {
+    /// Verify and publish an explicitly selected local gzip. No ambient scans or uploads.
+    Publish {
+        #[arg(long)] bundle: PathBuf,
+        #[arg(long, default_value = "local")] label: String,
+    },
+    /// List immutable reviewed bundle snapshots.
+    List,
+    /// Reassemble and validate all bytes with the Mneme owner CLI.
+    Verify { id: String },
+    /// Recover into a new file; no overwrite, no execution of handoff instructions.
+    Restore { id: String, #[arg(long)] into: PathBuf },
+}
+
 #[derive(Subcommand)]
 enum LayerAction {
     /// Export through the owner, validate, and publish now.
@@ -736,6 +756,91 @@ fn mneme_action(config: &rebsync_core::Config, action: MnemeAction, json: bool) 
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(0)
+}
+
+#[cfg(feature = "storage")]
+fn hypomnema_action(config: &rebsync_core::Config, action: HypomnemaAction) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, layer};
+    use std::{fs, process::Command};
+    const NAME: &str = "evac.bundle.json.gz";
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let owner_verify = |path: &std::path::Path| -> Result<serde_json::Value> {
+        let output = Command::new("mneme").args(["evac", "verify", "--bundle"]).arg(path).output()?;
+        if !output.status.success() {
+            bail!("Mneme rejected evacuation bundle (exit {:?}); contents not published", output.status.code());
+        }
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        if report["schema"] != "hypomnema.bundle.v1" || !report["sha256"].is_string() {
+            bail!("invalid owner verification report");
+        }
+        Ok(report)
+    };
+    let verify_snapshot = |id: &str| -> Result<(tempfile::TempDir, serde_json::Value)> {
+        let manifest = layer::load(&storage, "hypomnema", id)?;
+        if manifest.files.len() != 1 || manifest.files[0].path != NAME {
+            bail!("Hypomnema snapshot must contain exactly the named evacuation bundle");
+        }
+        let staging = layer::staging(config, "hypomnema")?;
+        let output_dir = staging.path().join("recovered");
+        layer::assemble(&storage, &manifest, &output_dir)?;
+        let report = owner_verify(&output_dir.join(NAME))?;
+        if report["sha256"].as_str() != Some(manifest.files[0].sha256.as_str()) {
+            bail!("Mneme report differs from rbq manifest digest");
+        }
+        Ok((staging, report))
+    };
+    match action {
+        HypomnemaAction::Publish { bundle, label } => {
+            layer::validate_label(&label)?;
+            let meta = fs::symlink_metadata(&bundle)?;
+            if !meta.file_type().is_file() || meta.len() > 256 * 1024 {
+                bail!("expected a regular, non-symlink reviewed gzip of at most 256 KiB");
+            }
+            let owner = owner_verify(&bundle)?;
+            let _lock = layer::lock(config, "hypomnema")?;
+            let staging = layer::staging(config, "hypomnema")?;
+            fs::copy(&bundle, staging.path().join(NAME))?;
+            let report = owner_verify(&staging.path().join(NAME))?;
+            if owner["sha256"] != report["sha256"] {
+                bail!("source bundle changed during staging");
+            }
+            let result = layer::publish_files(&storage, "hypomnema", &label, 65536,
+                staging.path(), &[NAME.to_owned()], report, None)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        HypomnemaAction::List => {
+            let manifests = layer::list(&storage, "hypomnema", None)?;
+            for m in manifests {
+                println!("{}  {} bytes  {}", m.id, m.bytes(), m.owner["bundle_id"]);
+            }
+        }
+        HypomnemaAction::Verify { id } => {
+            let (_, report) = verify_snapshot(&id)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        HypomnemaAction::Restore { id, into } => {
+            let (staging, report) = verify_snapshot(&id)?;
+            let source = staging.path().join("recovered").join(NAME);
+            let mut dst = fs::OpenOptions::new();
+            dst.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                dst.mode(0o600);
+            }
+            use std::io::Write;
+            let mut output = dst.open(&into)?;
+            output.write_all(&fs::read(source)?)?;
+            output.sync_all()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(not(feature = "storage"))]
+fn hypomnema_action(_: &rebsync_core::Config, _: HypomnemaAction) -> Result<i32> {
+    bail!("rbq was built without the storage feature")
 }
 
 #[cfg(feature = "storage")]
@@ -1381,6 +1486,7 @@ fn entry() -> Result<i32> {
             StorageAction::Fsck { layers } => return storage_fsck(&config.config, layers),
         },
         Some(Action::Mneme { command }) => return mneme_action(&config.config, command, cli.json),
+        Some(Action::Hypomnema { command }) => return hypomnema_action(&config.config, command),
         Some(Action::Frog { command }) => {
             return layer_action(&config.config, "frog", command, cli.json);
         }
