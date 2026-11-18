@@ -1,7 +1,46 @@
 # Rebeqah Android release handoff — 2026-11-18
 
 For local agents releasing the Rebeqah APK. Read this before running a
-release; it covers what has already been worked out.
+release; it covers what has already been worked out. Format: the RAGBAZ fleet
+handoff standard (tabenius/ragbaz-common#19). The machine-readable minimum is in
+`.handoff/android-release.mvh.json`. Written by claude (Claude Code cloud
+session).
+
+## Resume target
+
+- Repository `tabenius/rebsync`, branch `fix-ndk-home`, tabenius/rebsync#8
+  (draft). The CLI release is on `rbq-sync-cli`, tabenius/rebsync#7.
+- Release tag `v0.2.3` at `2061e4e`. It was never published.
+
+## Next action
+
+Find the keystore that holds the pinned Rebeqah certificate b093a277 (see "The local keystore"), then merge #8 and release the next version from main.
+
+Queue:
+1. Locate the b093a277 keystore on the host where `2061e4e` was made, or the
+   repo secret `RBQ_KEYSTORE_B64`. If it is lost, the owner decides on a re-pin.
+2. Merge tabenius/rebsync#8. Bump `version` in `tauri.conf.json` (0.2.4) and
+   tag it from main.
+3. `scripts/release-android.sh doctor`, then `all`, then `publish`; or let CI
+   run on the tag.
+4. Merge www.ragbaz `feat/rebeqah-release-signing` before promoting to R2.
+
+## Decisions
+
+- v0.2.3 is not released from its tag: its verifier cannot read apksigner 37
+  output. The recommendation is the next version (owner to confirm).
+- The release logic lives in `scripts/release-android.sh`; CI is a thin
+  wrapper. Decided in #8 so local, GitHub and future Cloudflare runners
+  behave the same.
+- The pin in `release/android-signing.json` is only changed by a reviewed,
+  owner-approved commit, never to get past an error.
+
+## Blockers
+
+- Which keystore holds b093a277 is unknown. The local `rebekah-release.jks`
+  is the old key, 3a111387 (confirmed by the owner 2026-11-18).
+- GitHub Actions minutes and artifact storage are exhausted. CI runs may fail
+  for reasons that are not the code.
 
 ## Where things stand
 
@@ -131,9 +170,10 @@ checkout or run it from a #8 checkout with the tag checked out.
 
 ## Known gaps
 
-- The www.ragbaz `publish-signed-release.yml` allowlist names
-  `tabenius/rebekah`, not `tabenius/rebsync`. Add it before promoting any
-  Rebeqah release to R2.
+- The www.ragbaz `publish-signed-release.yml` allowlist on `master` names
+  `tabenius/rebekah`, not `tabenius/rebsync`. The fix is commit `f7801a5` on
+  branch `feat/rebeqah-release-signing`, not yet merged (checked 2026-11-18).
+  Merge it before promoting any Rebeqah release to R2.
 - The Gradle daemon can keep a stale lock after a build is interrupted, for
   example by a full disk. Run `./gradlew --stop` in
   `apps/rebsync-app/src-tauri/gen/android` and retry.
@@ -146,3 +186,26 @@ checkout or run it from a #8 checkout with the tag checked out.
   `scripts/build-cli-release.sh` with no CI (tabenius/rebsync#7). `install.sh`
   installs `rbq`, links the olden name `rebsync`, and refuses a tarball built
   for the wrong CPU.
+
+## Verify
+
+    git fetch origin && git checkout fix-ndk-home
+    python3 -m unittest discover -s scripts -p 'test_android_release.py'
+    scripts/release-android.sh doctor     # lists every missing tool or key, with fixes
+
+## Do not
+
+- Edit `release/android-signing.json` to match whatever key is at hand.
+- Put keystore or key passwords in files, commits, chats or command lines.
+  Use `read -rs`. If one was exposed, treat that keystore as compromised for
+  any future use.
+- Re-sign an APK with v1 enabled to satisfy the old verifier. apksigner 37
+  drops v1 for minSdk 24 anyway.
+
+## Refs
+
+- tabenius/rebsync#8 (`5383dbe` NDK_HOME, `4bf1263` release script,
+  `1635f54` verifier fix, `c50fc15` keystore finding)
+- tabenius/rebsync#7 (rbq CLI tarballs)
+- `2061e4e` (rename and new pin), `8b342f5` (old pin 3a111387)
+- www.ragbaz `f7801a5` on `feat/rebeqah-release-signing`
