@@ -30,7 +30,7 @@ use std::{
 
 pub const SNAPSHOT_SCHEMA: &str = "rbq.layer.snapshot.v1";
 /// Layers whose objects Rebeqah publishes and exchanges with peers.
-pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git"];
+pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git", "binaries"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +100,9 @@ pub struct LayerStats {
     pub orphan_chunks: usize,
     pub orphan_bytes: u64,
     pub missing_chunks: usize,
+    /// Referenced bytes whose chunks are absent; the transfer still required
+    /// for this layer to be complete.
+    pub missing_bytes: u64,
 }
 
 pub fn validate_label(label: &str) -> Result<()> {
@@ -526,6 +529,11 @@ pub fn stats(storage: &dyn ObjectStorage, layer: &str) -> Result<LayerStats> {
         .filter(|(d, _)| !referenced.contains_key(*d))
         .map(|(_, s)| *s)
         .collect();
+    let missing_bytes = referenced
+        .iter()
+        .filter(|(digest, _)| !stored.contains_key(*digest))
+        .map(|(_, size)| *size)
+        .sum();
     let latest = manifests.last();
     Ok(LayerStats {
         layer: layer.into(),
@@ -541,6 +549,7 @@ pub fn stats(storage: &dyn ObjectStorage, layer: &str) -> Result<LayerStats> {
             .keys()
             .filter(|d| !stored.contains_key(*d))
             .count(),
+        missing_bytes,
     })
 }
 
@@ -607,6 +616,37 @@ pub fn lock(config: &Config, layer: &str) -> Result<File> {
     Ok(file)
 }
 
+/// Shared per-layer lock for read-only observers such as `rbq status`.
+///
+/// Writers use `lock()` (exclusive), so a status snapshot cannot observe a
+/// publish or prune halfway through. A missing state directory or lock file
+/// means no writer has ever used this layer here; return `None` rather than
+/// creating state from a read-only command.
+pub fn read_lock(config: &Config, layer: &str) -> Result<Option<File>> {
+    let state = config.rbq_home.join(".rebeqah/rbq");
+    let path = match state.metadata() {
+        Ok(metadata) if metadata.is_dir() => state.join(format!("{layer}.lock")),
+        _ => return Ok(None),
+    };
+    if path.is_symlink() {
+        bail!("refusing symlink lock file");
+    }
+    let file = match std::fs::OpenOptions::new().read(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while file.try_lock_shared().is_err() {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "another rbq is publishing or pruning the {layer} layer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(Some(file))
+}
+
 #[derive(Clone, Debug)]
 pub struct Retention {
     /// Newest snapshots kept per label; at least 1.
@@ -653,6 +693,14 @@ fn referenced_chunks(manifest: &Value) -> Result<Vec<String>> {
         for file in files {
             take(file.get("chunks").context("file without chunks")?)?;
         }
+    }
+    // Mneme's optional sidecar chunks live in the same content-addressed
+    // namespace but only in opaque owner JSON. Keep the strict record check
+    // scoped to the mneme manifest schema; other layer schemas are untouched.
+    if manifest.get("schema").and_then(Value::as_str) == Some(crate::mneme::LAYER_SCHEMA)
+        && let Some(record) = crate::mneme::sidecar_owner_record(manifest.get("owner"))?
+    {
+        found.extend(record.chunks.into_iter().map(|chunk| chunk.sha256));
     }
     Ok(found)
 }
@@ -836,7 +884,23 @@ fn manifest_files(layer: &str, key: &str, value: &Value) -> Result<Vec<LayerFile
                 file.chunks.iter().map(|c| c.size).sum::<u64>() == file.bytes,
                 "chunk sizes do not add up"
             );
-            Ok(vec![file])
+            let mut files = vec![file];
+            if let Some(record) = crate::mneme::sidecar_owner_record(value.get("owner"))? {
+                files.push(LayerFile {
+                    path: record.path,
+                    sha256: record.sha256,
+                    bytes: record.bytes,
+                    chunks: record
+                        .chunks
+                        .into_iter()
+                        .map(|chunk| Chunk {
+                            sha256: chunk.sha256,
+                            size: chunk.bytes,
+                        })
+                        .collect(),
+                });
+            }
+            Ok(files)
         }
         other => bail!("unsupported manifest schema {other:?}"),
     }

@@ -16,6 +16,7 @@ pub struct Config {
     pub git: Git,
     pub backup: Backup,
     pub storage: StorageConfig,
+    pub binaries: crate::binaries::BinariesConfig,
     pub mneme: MnemeConfig,
     pub frog: crate::frog::FrogConfig,
     pub agenda: crate::agenda::AgendaConfig,
@@ -163,6 +164,7 @@ impl Config {
                 datasets: vec![],
             },
             storage: StorageConfig::default(),
+            binaries: crate::binaries::BinariesConfig::default(),
             mneme: MnemeConfig::default(),
             frog: Default::default(),
             agenda: Default::default(),
@@ -207,6 +209,7 @@ impl Config {
         }
         crate::mneme::validate_label(&self.mneme.label)?;
         for (name, label, chunk) in [
+            ("binaries", &self.binaries.label, self.binaries.chunk_bytes),
             ("frog", &self.frog.label, self.frog.chunk_bytes),
             ("agenda", &self.agenda.label, self.agenda.chunk_bytes),
             ("git_layer", &"repo".to_string(), self.git_layer.chunk_bytes),
@@ -215,6 +218,17 @@ impl Config {
             if !(4096..=64 * 1024 * 1024).contains(&chunk) || !chunk.is_multiple_of(4096) {
                 bail!("{name}.chunk_bytes must be a multiple of 4096 between 4 KiB and 64 MiB");
             }
+        }
+        if self.binaries.timeout_seconds == 0 {
+            bail!("binaries.timeout_seconds must be positive");
+        }
+        for spec in &self.binaries.specs {
+            crate::binaries::validate_name(&spec.tool)
+                .map_err(|e| anyhow::anyhow!("binaries.specs.tool {e}"))?;
+            crate::binaries::validate_name(&spec.version)
+                .map_err(|e| anyhow::anyhow!("binaries.specs.version {e}"))?;
+            spec.artifact_name()
+                .map_err(|e| anyhow::anyhow!("binaries.specs: {e}"))?;
         }
         if self.frog.timeout_seconds == 0 {
             bail!("frog.timeout_seconds must be positive");
@@ -462,6 +476,15 @@ pub fn load_config_at(
     }
     if let Some(path) = config.mneme.db.take() {
         config.mneme.db = Some(absolute(path, &config.rbq_home));
+    }
+    if let Some(path) = config.binaries.password_file.take() {
+        config.binaries.password_file = Some(absolute(path, &config.rbq_home));
+    }
+    for spec in &mut config.binaries.specs {
+        spec.path = absolute(spec.path.clone(), &config.rbq_home);
+        if let Some(path) = spec.install_path.take() {
+            spec.install_path = Some(absolute(path, &config.rbq_home));
+        }
     }
     // A bare program name stays a PATH lookup; anything with a separator is a path.
     if config.mneme.binary.components().count() > 1 {

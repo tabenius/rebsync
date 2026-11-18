@@ -18,7 +18,7 @@
 //! notification over the D-Bus session bus when one exists. Each mechanism
 //! reports whether it worked; none is required.
 
-use crate::{config::Config, layer, storage::ObjectStorage};
+use crate::{config::Config, storage::ObjectStorage};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -374,38 +374,58 @@ pub fn start(config: &Config, options: &ServeOptions) -> Result<Running> {
 }
 
 /// Machine-readable status; also the source of the HTML page.
+///
+/// This uses the same read-only collector as `rbq status`, including shared
+/// layer locks, so a web request cannot observe a half-written snapshot. The
+/// extra service fields are added here because they are specific to `rbq serve`.
 pub fn status(config: &Config, storage: &dyn ObjectStorage) -> Value {
-    let enabled = |name: &str| match name {
-        "mneme" => config.mneme.enabled,
-        "frog" => config.frog.enabled,
-        "agenda" => config.agenda.enabled,
-        "git" => config.git_layer.enabled,
-        _ => false,
-    };
-    let layers: Vec<Value> = layer::LAYERS
-        .iter()
-        .map(|name| {
-            let stats = layer::stats(storage, name).ok();
-            json!({
-                "layer": name,
-                "enabled": enabled(name),
-                "snapshots": stats.as_ref().map(|s| s.snapshots),
-                "latest": stats.as_ref().and_then(|s| s.latest_created_at),
-                "stored_bytes": stats.as_ref().map(|s| s.stored_bytes),
-                "missing_chunks": stats.as_ref().map(|s| s.missing_chunks),
-            })
+    let mut value = crate::status::collect(config, storage, 0).unwrap_or_else(|error| {
+        json!({
+            "schema": "rbq.status.v1",
+            "generated_at": crate::chrono::Utc::now().to_rfc3339(),
+            "rbq_home": config.rbq_home,
+            "storage_root": config.storage.root,
+            "backup": if config.backup.repository.is_some() || config.binaries.repository.is_some() {
+                "configured (redacted)"
+            } else {
+                "not configured"
+            },
+            "overall": {
+                "state": "unavailable",
+                "synced": 0,
+                "attention": 1,
+                "local_only": 0,
+                "disabled": 0,
+                "occupied_bytes": 0,
+                "pending_bytes": 0,
+                "logical_bytes": 0,
+                "progress": 0.0,
+            },
+            "layers": [],
+            "repositories": [],
+            "issues": [error.to_string()],
+            "note": "Read-only. Secrets are never shown; repository URLs are redacted.",
+        })
+    });
+    // Keep the older, flattened layer fields for the HTML table and peer tools.
+    let layers: Vec<Value> = value["layers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut layer| {
+            layer["snapshots"] = layer["stats"]["snapshots"].clone();
+            layer["latest"] = layer["stats"]["latest"].clone();
+            layer["stored_bytes"] = layer["stats"]["stored_bytes"].clone();
+            layer["missing_chunks"] = layer["stats"]["missing_chunks"].clone();
+            layer
         })
         .collect();
-    json!({
-        "service": "rbq",
-        "version": env!("CARGO_PKG_VERSION"),
-        "rbq_home": config.rbq_home,
-        "storage_root": config.storage.root,
-        "backup": if config.backup.repository.is_some() { "configured (redacted)" } else { "not configured" },
-        "fleet_authority": config.fleet.host,
-        "layers": layers,
-        "note": "Read-only. Secrets are never shown; the backup repository URL is redacted.",
-    })
+    value["layers"] = json!(layers);
+    value["service"] = json!("rbq");
+    value["version"] = json!(env!("CARGO_PKG_VERSION"));
+    value["fleet_authority"] = json!(config.fleet.host);
+    value
 }
 
 fn escape(text: &str) -> String {
@@ -483,6 +503,9 @@ rbq storage fsck         # check every stored snapshot, chunk by chunk</pre>
 <h2>Layers by hand</h2>
 <pre>rbq mneme publish | list | verify ID | restore ID --into PATH
 rbq frog publish  | agenda publish | git publish
+rbq binaries publish PATH --tool NAME --version VERSION
+rbq binaries list | verify ID | restore ID --tool NAME --into PATH
+rbq binaries fetch --tool NAME --into PATH   # re-fetch from private R2
 rbq &lt;layer&gt; prune --keep-last 7 [--apply]</pre>
 <h2>Phone (Rebeqah app)</h2>
 <pre>export RBQ_PEER='&lt;connection string from the app's Sharing card&gt;'

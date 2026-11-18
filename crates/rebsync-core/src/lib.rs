@@ -1,6 +1,7 @@
 //! Preservation-first orchestration. No terminal I/O belongs in this crate.
 pub use chrono;
 pub mod agenda;
+pub mod binaries;
 pub mod config;
 pub mod frog;
 pub mod gitlayer;
@@ -14,6 +15,7 @@ pub mod phone;
 pub mod process;
 #[cfg(feature = "serve")]
 pub mod serve;
+pub mod status;
 pub mod storage;
 pub mod sync;
 #[cfg(feature = "peer-transport")]

@@ -31,6 +31,25 @@ backup_required = true
 # Relative paths resolve against rbq_home. Override with --storage-root.
 root = ".rbq/objects"
 
+[binaries]
+# Self-built executables worth re-fetching instead of rebuilding.
+enabled = false
+label = "local"
+chunk_bytes = 1048576
+# repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rbq-binaries"
+# password_file = "/path/outside/repositories/rbq-binaries-password"
+restic = true             # mirror verified objects under the private rbq-binaries tag
+timeout_seconds = 900
+# [[binaries.specs]]
+# tool = "rbq"
+# version = "0.1.0"
+# path = "/home/xyzzy/.cargo/bin/rbq"
+# target = "x86_64-unknown-linux-gnu"
+# source = "src/ragbaz/rebsync"
+# build_command = "cargo build --release -p rebsync-cli --locked"
+# install_path = "/usr/local/bin/rbq"
+# note = "self-built; private artifact name is never published publicly"
+
 [mneme]
 # Owner-exported Mneme index snapshots, published as content-addressed chunks.
 enabled = false

@@ -17,7 +17,14 @@
         "label": "Preservation-first repository and dataset synchronization",
         "version": "0.1.0",
         "supportTier": "prototype",
-        "description": "Explicit encrypted backups, verified layer snapshots and additive peer exchange; not unattended fleet synchronization."
+        "description": "Explicit encrypted backups, verified layer snapshots, read-only status and additive peer exchange; not unattended fleet synchronization."
+      },
+      {
+        "id": "ops.artifact-recovery",
+        "label": "Private re-fetch of self-built binaries",
+        "version": "0.1.0",
+        "supportTier": "prototype",
+        "description": "Publish, verify and restore self-built executables with provenance; mirror them through a private encrypted repository so peers can re-fetch instead of rebuilding. Private artifact names and manifests are never published to public catalogs."
       }
     ]
   },
@@ -40,7 +47,7 @@
       {
         "name": "rbq",
         "command": "rbq",
-        "capabilities": ["ops.preservation"]
+        "capabilities": ["ops.preservation", "ops.artifact-recovery"]
       }
     ]
   },
