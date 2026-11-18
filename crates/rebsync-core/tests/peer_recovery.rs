@@ -140,3 +140,46 @@ fn incomplete_source_manifest_is_not_advertised_to_a_carrying_peer() -> Result<(
     assert!(carrier.list_prefix("agenda/v1/snapshots/", 0)?.is_empty());
     Ok(())
 }
+
+#[test]
+fn peer_exchange_detects_same_size_corrupt_replica_in_both_directions() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let home = t.path().join("a");
+    fs::create_dir_all(&home)?;
+    let cfg = config(&home);
+    let store = FsObjectStorage::open(&cfg.storage.root)?;
+    let carrier_root = t.path().join("phone");
+    let carrier = FsObjectStorage::open(&carrier_root)?;
+    let data = home.join("export");
+    fs::create_dir_all(&data)?;
+    fs::write(data.join("sample.txt"), b"immutable object bytes")?;
+    let published = layer::publish_files(
+        &store, "agenda", "synthetic", 4096, &data,
+        &["sample.txt".to_owned()], json!({"fixture": true}), None
+    )?;
+    let manifest = layer::load(&store, "agenda", &published.id)?;
+    let chunk_key = layer::chunk_key("agenda/v1", &manifest.files[0].chunks[0].sha256)?;
+    let phone = CarryingPeer { store: &carrier };
+    let mut journal = Journal::open(&home)?;
+    let first = peer::push(&store, &phone, &["agenda/".to_owned()], &mut journal)?;
+    assert!(first.clean(), "{first:?}");
+
+    let remote_path = carrier_root.join(chunk_key.to_string());
+    let mut corrupt = fs::read(&remote_path)?;
+    corrupt[0] ^= 0x01;
+    fs::write(&remote_path, &corrupt)?;
+    let repeated = peer::push(&store, &phone, &["agenda/".to_owned()], &mut journal)?;
+    assert!(!repeated.clean(), "{repeated:?}");
+    assert!(repeated.conflicts.iter().any(|m| m.contains("existing peer object differs")));
+
+    let b = t.path().join("b");
+    fs::create_dir_all(&b)?;
+    let b_store = FsObjectStorage::open(b.join("objects"))?;
+    let mut b_journal = Journal::open(&b)?;
+    let received = peer::pull(&b_store, &phone, &["agenda/".to_owned()], &mut b_journal)?;
+    assert!(!received.clean());
+    assert!(received.rejected.iter().any(|m| m.contains("chunk content does not match") || m.contains("existing object"))
+        || !received.verification_failed.is_empty());
+    assert!(carrier.get(&chunk_key)? != store.get(&chunk_key)?);
+    Ok(())
+}
