@@ -10,6 +10,7 @@
 # unless --upload is given.
 #
 #   scripts/publish-repos.sh init-fdroid-key        # once: create the repo key
+#   scripts/publish-repos.sh init-apt-key           # once: create an APT archive key
 #   scripts/publish-repos.sh build                   # collect, sign, verify -> dist/repos
 #   scripts/publish-repos.sh build --upload          # ... then upload to R2
 #
@@ -19,6 +20,8 @@
 #
 # Environment (defaults in brackets):
 #   APT_SIGNING_KEY      [aptOpenpgpFingerprint from release/android-signing.json]
+#   APT_KEY_UID          [RAGBAZ APT archive signing <ragbaz@proton.me>]  for init-apt-key
+#   APT_KEY_VOUCHED_BY   [unset]  fingerprint of a key that certifies the new APT key
 #   FDROID_KEYSTORE      [~/.config/rebeqah-signing/fdroid-repo.jks]
 #   FDROID_KEY_ALIAS     [ragbaz-fdroid]
 #   FDROID_KEYSTORE_PASS, FDROID_KEY_PASS   [prompted, not echoed]
@@ -58,6 +61,21 @@ init_fdroid_key() {
   chmod 600 "$FDROID_KEYSTORE"
   ok "created $FDROID_KEYSTORE (back it up offline; losing it forces every user to re-add the repo)"
   keytool -list -v -keystore "$FDROID_KEYSTORE" -alias "$FDROID_KEY_ALIAS" -storepass:env FDROID_KEYSTORE_PASS 2>/dev/null | sed -n 's/^\s*SHA256: /  fingerprint: /p'
+}
+
+init_apt_key() {
+  # ed25519, sign-only, 3-year expiry (extend with: gpg --quick-set-expire FPR 3y), passphrase via pinentry.
+  local uid=${APT_KEY_UID:-RAGBAZ APT archive signing <ragbaz@proton.me>} fpr
+  gpg --list-keys "=$uid" >/dev/null 2>&1 && die "a key for \"$uid\" already exists" "keep it: its fingerprint is what users pinned"
+  gpg --quick-gen-key "$uid" ed25519 sign 3y || die "gpg did not create the key"
+  fpr=$(gpg --with-colons --list-keys "=$uid" | awk -F: '/^fpr:/{print $10; exit}')
+  [ -n "$fpr" ] || die "cannot find the new key for \"$uid\""
+  ok "created APT archive key $fpr (back it up offline: gpg --export-secret-keys --armor $fpr)"
+  if [ -n "${APT_KEY_VOUCHED_BY:-}" ]; then
+    gpg --batch --yes --default-key "$APT_KEY_VOUCHED_BY" --quick-sign-key "$fpr" || die "certification by $APT_KEY_VOUCHED_BY failed"
+    ok "certified by $APT_KEY_VOUCHED_BY (exportable)"
+  fi
+  printf '\n  use it with: APT_SIGNING_KEY=%s scripts/publish-repos.sh build\n' "$fpr"
 }
 
 collect() { # collect DEST: download and verify release assets
@@ -138,8 +156,9 @@ build() {
 
 case "${1:-}" in
   init-fdroid-key) init_fdroid_key ;;
+  init-apt-key) init_apt_key ;;
   build) build "${2:-}" ;;
   verify) verify ;;
   upload) upload ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
