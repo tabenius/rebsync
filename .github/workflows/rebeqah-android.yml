@@ -1,8 +1,9 @@
 name: Rebeqah Android release
-# Builds the signed universal APK. Push a tag `vX.Y.Z` to publish a
-# GitHub candidate release. New releases use vX.Y.Z for registry compatibility.
+# Thin wrapper: every step is scripts/release-android.sh, which also runs on a
+# laptop, a self-hosted runner or another CI. Push a tag `vX.Y.Z` (matching the
+# app version) to publish a GitHub candidate release.
 #
-# Required repository secrets (never commit the keystore):
+# Required secrets (never commit the keystore):
 #   RBQ_KEYSTORE_B64   base64 of the .jks file
 #   RBQ_STORE_PASSWORD
 #   RBQ_KEY_PASSWORD
@@ -20,20 +21,18 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Require an immutable app release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Refuse an existing release early
         run: |
-          set -euo pipefail
-          version="$(jq -r .version apps/rebsync-app/src-tauri/tauri.conf.json)"
-          test "$GITHUB_REF" = "refs/tags/v$version" || { echo 'Dispatch on the app version tag, not a branch'; exit 1; }
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/v$version^{commit}")"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo 'Release already exists; refusing to replace it'; exit 1
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error title=release-android publish::release $RELEASE_TAG already exists — fix: releases are immutable; bump the version and tag a new one"
+            exit 1
           fi
       - uses: actions/setup-python@v5
         with:
@@ -49,57 +48,39 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - name: Android SDK packages
-        run: |
-          printf 'y\n%.0s' {1..100} | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.2.12479018" > /dev/null
-      - name: Test shared app logic and release metadata refusals
-        run: |
-          cargo test --manifest-path apps/rebsync-app/logic-tests/Cargo.toml
-          python3 scripts/test_android_release.py
+        run: scripts/release-android.sh install-sdk
       - name: Signing keystore from secrets
         env:
-          KEYSTORE_B64: ${{ secrets.RBQ_KEYSTORE_B64 }}
-        run: |
-          test -n "$KEYSTORE_B64" || { echo "::error::RBQ_KEYSTORE_B64 secret is not set"; exit 1; }
-          umask 077
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rbq-release.jks"
-      - name: Build release APK
-        working-directory: apps/rebsync-app
+          RBQ_KEYSTORE_B64: ${{ secrets.RBQ_KEYSTORE_B64 }}
+        run: echo "RBQ_STORE_FILE=$(scripts/release-android.sh keystore-from-env)" >> "$GITHUB_ENV"
+      - name: Preflight (lists every problem with its fix)
         env:
-          RBQ_STORE_FILE: ${{ runner.temp }}/rbq-release.jks
+          RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
+          RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
+        run: scripts/release-android.sh doctor
+      - name: Build release APK
+        env:
           RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
           RBQ_KEY_PASSWORD: ${{ secrets.RBQ_KEY_PASSWORD }}
           RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
-        run: |
-          # ANDROID_HOME comes from the runner's OS environment, which the
-          # ${{ env.* }} expression context cannot see; derive NDK_HOME here.
-          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
-          test -f "$NDK_HOME/source.properties" || { echo "::error::NDK missing at $NDK_HOME"; exit 1; }
-          npm ci
-          npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
-      - name: Verify signature and collect
-        run: |
-          set -euo pipefail
-          apk=apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
-          python3 scripts/prepare_android_release.py --apk "$apk" --dist dist \
-            --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
-            --aapt "$ANDROID_HOME/build-tools/37.0.0/aapt"
+        run: scripts/release-android.sh build
       - name: Remove temporary keystore
         if: always()
-        run: |
-          rm -f "$RUNNER_TEMP/rbq-release.jks"
+        run: rm -f "${RBQ_STORE_FILE:-/nonexistent}"
+      - name: Verify signature and collect
+        run: scripts/release-android.sh collect
       - uses: sigstore/cosign-installer@v3
       - name: Sign exact candidate inventory using tag-bound CI identity
-        run: cosign sign-blob --yes --bundle dist/release.sigstore.json dist/release.json
-      - uses: actions/upload-artifact@v4
+        env:
+          RBQ_REQUIRE_SIGSTORE: "1"
+        run: scripts/release-android.sh sign-inventory
+      - name: Keep a copy as a workflow artifact (best effort)
+        # Artifact storage quotas must not block a release: the GitHub release
+        # below carries the same files.
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: rebeqah-apk
           path: dist/*
       - name: Publish candidate release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --prerelease \
-            --title "RAGBAZ Rebeqah ${GITHUB_REF_NAME#v} (Android candidate)" \
-            --notes "Signed universal APK (arm64, armv7, x86_64; Android 7+). Candidate: installation on a physical device has not been verified. See android.json for the package/versionCode/signing identity and release.json plus release.sigstore.json for CI verification."
+        run: scripts/release-android.sh publish
