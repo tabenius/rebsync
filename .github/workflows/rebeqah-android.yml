@@ -67,12 +67,13 @@ jobs:
       - name: Build release APK
         working-directory: apps/rebsync-app
         env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           RBQ_STORE_FILE: ${{ runner.temp }}/rbq-release.jks
           RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
           RBQ_KEY_PASSWORD: ${{ secrets.RBQ_KEY_PASSWORD }}
           RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
         run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           npm ci
           npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
       - name: Verify signature and collect

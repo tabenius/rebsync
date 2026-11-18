@@ -1,9 +1,9 @@
 [package]
 name = "rebsync-app"
-version = "0.2.3"
+version = "0.2.4"
 description = "RAGBAZ Rebeqah: Android companion for the rbq preservation core"
 authors = ["rbq contributors"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/tabenius/rebsync"
 edition = "2024"
 rust-version = "1.90"

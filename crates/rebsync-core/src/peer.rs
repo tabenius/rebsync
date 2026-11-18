@@ -301,7 +301,7 @@ impl Peer {
                     .context("malformed listing")?;
                 ensure!(
                     key > last.as_deref().unwrap_or(after.as_str()),
-                    "peer ignored pagination; use Rebeqah 0.2.3 or later"
+                    "peer ignored pagination; use Rebeqah 0.2.4 or later"
                 );
                 admissible_key(key)?;
                 ensure!(
