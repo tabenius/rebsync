@@ -26,6 +26,8 @@ shopt -s nullglob; files=("$apks"/*.apk); [ ${#files[@]} -gt 0 ] || die "no APKs
 mkdir -p "$out/repo" "$out/metadata"
 cp "${files[@]}" "$out/repo/"
 cp "$here"/fdroid-metadata/*.yml "$out/metadata/"
+# Per-app graphics: fdroid-metadata/<appid>/<locale>/phoneScreenshots/*.png
+for d in "$here"/fdroid-metadata/*/; do cp -R "$d" "$out/metadata/"; done
 cat > "$out/config.yml" <<CONFIG
 repo_url: https://ragbaz.cc/fdroid/repo
 repo_name: RAGBAZ
