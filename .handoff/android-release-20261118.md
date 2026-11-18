@@ -53,8 +53,27 @@ choose:
 
 ## The local keystore
 
-- File: `~/.config/rebekah-signing/rebekah-release.jks`. The directory and
-  file keep the old *Rebekah* name.
+- **Confirmed by the owner 2026-11-18:** `~/.config/rebekah-signing/rebekah-release.jks`
+  holds one entry, alias `rebekah`, certificate `3A:11:13:87…:84:A6`. That is
+  the key pinned at `8b342f5` for the *old* package `com.tabenius.rebsync`.
+  **It is not the Rebeqah release key.** `2061e4e` ("create a new release
+  signing identity") pinned `b093a277…` for `com.tabenius.rebeqah`, so a newer
+  keystore was made at rename time, about 02:35 on Nov 18. Find it before
+  building. List candidates, then check each with `keytool -list -v`; it
+  prompts for the password, so do not pass one on the command line:
+
+      find ~ -xdev \( -name '*.jks' -o -name '*.p12' -o -name '*.keystore' \
+          -o -name 'keystore.properties' -o -name '*keystore*.txt' \) \
+          -newermt 2026-11-18 2>/dev/null
+      keytool -list -v -keystore FILE | grep -E 'Alias|SHA256:'
+
+  Also check whether the repo secret `RBQ_KEYSTORE_B64` holds `b093a277…`:
+  the next CI tag run prints it in `doctor`/`check-signer`. If the b093 key is
+  lost and nothing was ever published under `com.tabenius.rebeqah` (true as of
+  this date), the owner may re-pin a new key in a reviewed commit. That is a
+  decision for the owner, never a fix made to get past an error.
+- Old file name: `~/.config/rebekah-signing/rebekah-release.jks`. The directory
+  and file keep the old *Rebekah* name.
 - **Verify it is the Rebeqah key before building.** `doctor` compares the
   alias's certificate with the pinned one in seconds:
   - `b093a277…` (match): proceed.
@@ -64,7 +83,8 @@ choose:
 
   Do not "fix" a mismatch by editing `release/android-signing.json`. Find the
   right key or ask the owner.
-- Alias: Gradle and the script default to `rbq`. If the keystore uses another
+- Alias: Gradle and the script default to `rbq`, but the old keystore uses
+  `rebekah`. If the keystore uses another
   alias, list the aliases without printing secrets and set `RBQ_KEY_ALIAS`:
 
       keytool -list -keystore ~/.config/rebekah-signing/rebekah-release.jks
