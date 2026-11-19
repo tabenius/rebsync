@@ -33,6 +33,9 @@ pub struct RunSummary {
     pub dry_run: bool,
     pub repositories: Vec<RepoOutcome>,
     pub datasets: Vec<Value>,
+    /// Published layer objects and their copies on enrolled drives (null when
+    /// there are none, or rbq was built without object storage).
+    pub layer_copies: Value,
     pub issues: Vec<String>,
 }
 impl RunSummary {
@@ -853,12 +856,26 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
         journal.event("dataset-outcome", name, result.clone())?;
         datasets.push(result);
     }
+    #[cfg(feature = "storage-object-store")]
+    let layer_copies = match crate::drive::coverage(config, &crate::peer::default_prefixes()) {
+        Ok((value, mut found)) => {
+            issues.append(&mut found);
+            value
+        }
+        Err(error) => {
+            issues.push(format!("layer copies could not be checked: {error}"));
+            Value::Null
+        }
+    };
+    #[cfg(not(feature = "storage-object-store"))]
+    let layer_copies = Value::Null;
     let summary = RunSummary {
         run_id: journal.run_id.clone(),
         journal: journal.path.clone(),
         dry_run: !options.apply,
         repositories: outcomes,
         datasets,
+        layer_copies,
         issues,
     };
     journal.event("run-end", &config.rbq_home, json!({"repositories":summary.repositories.len(),"needs_attention":summary.needs_attention()}))?;

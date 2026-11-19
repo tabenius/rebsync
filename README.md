@@ -632,6 +632,12 @@ rbq drive pull stick                                # verifies received snapshot
 - **Another machine** adopts a marked drive with `--adopt` and keeps its
   identity. `rbq drive forget NAME` removes the enrollment but leaves the
   drive's marker and data alone.
+- **What is still unprotected.** Every `rbq` run (dry-run included) compares
+  published layer objects with each mounted, independent enrolled drive.
+  It reports how many objects are not yet copied, with the `rbq drive push NAME`
+  that fixes it, or that they exist only in the local store. This is read-only,
+  and the JSON summary carries it as `layer_copies`. Copies on peers are not
+  tracked.
 
 ## Phone sync (Rebeqah)
 

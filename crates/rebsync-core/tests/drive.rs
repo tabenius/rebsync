@@ -215,3 +215,58 @@ fn push_and_pull_reuse_the_peer_engine_and_never_overwrite() {
     );
     assert!(layer::check_snapshot(&local_b, "frog", &published.manifest_key).ok);
 }
+
+#[test]
+fn coverage_reports_what_is_not_yet_on_an_independent_drive() {
+    let Some(stick) = other_filesystem() else {
+        return eprintln!("skipped: no second filesystem");
+    };
+    let home = tempfile::tempdir().unwrap();
+    let config = config(home.path());
+    let prefixes = peer::default_prefixes();
+    // Nothing published: nothing to report.
+    assert_eq!(
+        drive::coverage(&config, &prefixes).unwrap(),
+        (serde_json::Value::Null, vec![])
+    );
+
+    publish(&config, b"first");
+    let (value, issues) = drive::coverage(&config, &prefixes).unwrap();
+    assert_eq!(value["covered_by_drive"], false);
+    assert!(
+        issues.iter().any(|i| i.contains("only in the local store")),
+        "{issues:?}"
+    );
+
+    drive::enroll(&config, stick.path(), "usb", false, false).unwrap();
+    let (value, issues) = drive::coverage(&config, &prefixes).unwrap();
+    assert!(
+        issues.iter().any(|i| i.contains("rbq drive push usb")),
+        "{issues:?}"
+    );
+    assert!(value["drives"][0]["missing"].as_u64().unwrap() >= 2);
+    assert!(
+        !stick.path().join(STORE_DIR).exists(),
+        "coverage must not create the drive store"
+    );
+
+    let target = drive::open(&config, "usb", &[]).unwrap();
+    let local = FsObjectStorage::open(&config.storage.root).unwrap();
+    peer::push(
+        &local,
+        &target,
+        &prefixes,
+        &mut Journal::open(&config.rbq_home).unwrap(),
+    )
+    .unwrap();
+    let (value, issues) = drive::coverage(&config, &prefixes).unwrap();
+    assert_eq!(value["covered_by_drive"], true);
+    assert!(issues.is_empty(), "{issues:?}");
+
+    publish(&config, b"second");
+    let (_, issues) = drive::coverage(&config, &prefixes).unwrap();
+    assert!(
+        issues.iter().any(|i| i.contains("not yet copied")),
+        "{issues:?}"
+    );
+}
