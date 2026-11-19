@@ -17,6 +17,9 @@
 //! - Failed logins are throttled per client address: after
 //!   [`LOGIN_FAILURES`] failures within [`LOGIN_WINDOW`], that client gets 429
 //!   without its password being checked until the window passes.
+//! - Request bodies are read only after authentication, and only within a
+//!   server-wide in-flight upload budget ([`UPLOAD_BUDGET_BYTES`] by default),
+//!   so memory stays bounded however many clients upload at once.
 //! - Error responses never echo request data; logs are the caller's choice.
 use crate::storage::{ObjectKey, ObjectStorage, PutOutcome, StorageError};
 use crate::wire;
@@ -33,6 +36,10 @@ const V1: &str = "application/vnd.x.restic.rest.v1";
 /// Failed logins allowed per client address within [`LOGIN_WINDOW`].
 pub const LOGIN_FAILURES: u32 = 10;
 pub const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// Upload bytes buffered at once across all requests (default).
+pub const UPLOAD_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+/// How long an upload waits for budget before 503.
+const UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Addresses tracked at most; the oldest windows are dropped beyond this.
 const TRACKED_CLIENTS: usize = 4096;
 
@@ -99,6 +106,22 @@ pub struct Repository {
     used: Mutex<u64>,
     login_limit: (u32, std::time::Duration),
     failures: Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+    upload_budget: u64,
+    in_flight: Mutex<u64>,
+    released: std::sync::Condvar,
+}
+
+/// Upload memory reserved from the server-wide budget; released on drop.
+pub struct UploadReservation<'a> {
+    repository: &'a Repository,
+    bytes: u64,
+}
+
+impl Drop for UploadReservation<'_> {
+    fn drop(&mut self) {
+        *self.repository.in_flight.lock().expect("budget lock") -= self.bytes;
+        self.repository.released.notify_all();
+    }
 }
 
 fn digest(text: &str) -> [u8; 32] {
@@ -183,7 +206,46 @@ impl Repository {
             used: Mutex::new(used),
             login_limit: (LOGIN_FAILURES, LOGIN_WINDOW),
             failures: Mutex::new(std::collections::HashMap::new()),
+            upload_budget: UPLOAD_BUDGET_BYTES,
+            in_flight: Mutex::new(0),
+            released: std::sync::Condvar::new(),
         })
+    }
+
+    /// Override the server-wide in-flight upload budget (at least one upload).
+    pub fn with_upload_budget(mut self, bytes: u64) -> Self {
+        self.upload_budget = bytes.max(MAX_UPLOAD_BYTES);
+        self
+    }
+
+    /// Reserve `bytes` of upload memory, waiting up to `wait` for other
+    /// uploads to finish. None: the budget stayed full (answer 503).
+    pub fn reserve_upload(
+        &self,
+        bytes: u64,
+        wait: std::time::Duration,
+    ) -> Option<UploadReservation<'_>> {
+        let bytes = bytes.min(self.upload_budget);
+        let deadline = std::time::Instant::now() + wait;
+        let mut in_flight = self.in_flight.lock().expect("budget lock");
+        while *in_flight + bytes > self.upload_budget {
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            in_flight = self
+                .released
+                .wait_timeout(in_flight, left)
+                .expect("budget lock")
+                .0;
+        }
+        *in_flight += bytes;
+        Some(UploadReservation {
+            repository: self,
+            bytes,
+        })
+    }
+
+    /// Bytes of upload memory currently reserved.
+    pub fn uploads_in_flight(&self) -> u64 {
+        *self.in_flight.lock().expect("budget lock")
     }
 
     /// Override the failed-login limit (tests, or stricter deployments).
@@ -259,7 +321,20 @@ impl Repository {
     }
 
     pub fn handle(&self, request: &Request) -> Reply {
-        if let Some(client) = request.client
+        match self.admit(request.client, request.authorization) {
+            Some(refusal) => refusal,
+            None => self.handle_authorized(request),
+        }
+    }
+
+    /// Throttling and authentication from headers alone, before any body is
+    /// read. `Some(reply)` refuses the request.
+    pub fn admit(
+        &self,
+        client: Option<std::net::IpAddr>,
+        authorization: Option<&str>,
+    ) -> Option<Reply> {
+        if let Some(client) = client
             && self.throttled(client)
         {
             let mut reply = Reply::empty(429);
@@ -267,19 +342,24 @@ impl Repository {
                 "Retry-After",
                 self.login_limit.1.as_secs().max(1).to_string(),
             ));
-            return reply;
+            return Some(reply);
         }
-        let authorized = self.authorized(request.authorization);
-        if let Some(client) = request.client {
+        let authorized = self.authorized(authorization);
+        if let Some(client) = client {
             self.record_login(client, authorized);
         }
-        if !authorized {
-            let mut reply = Reply::empty(401);
-            reply
-                .headers
-                .push(("WWW-Authenticate", "Basic realm=\"rbq restic\"".into()));
-            return reply;
+        if authorized {
+            return None;
         }
+        let mut reply = Reply::empty(401);
+        reply
+            .headers
+            .push(("WWW-Authenticate", "Basic realm=\"rbq restic\"".into()));
+        Some(reply)
+    }
+
+    /// Serve a request that [`Repository::admit`] already accepted.
+    pub fn handle_authorized(&self, request: &Request) -> Reply {
         let segments: Vec<&str> = request.path.trim_start_matches('/').split('/').collect();
         let head = request.method == "HEAD";
         match (request.method, segments.as_slice()) {
@@ -538,12 +618,29 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
     let url = request.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let declared = request.body_length().map(|n| n as u64);
+    let client = request.remote_addr().map(|address| address.ip());
+    // Authenticate from headers first: an unauthenticated body is never read.
+    if let Some(refusal) = repository.admit(client, header(&request, "Authorization")) {
+        send(request, refusal);
+        return;
+    }
     let mut body = Vec::new();
     if declared.is_some_and(|n| n > MAX_UPLOAD_BYTES) {
         let _ = request.respond(tiny_http::Response::empty(413));
         return;
     }
+    let mut _reservation = None;
     if method == "POST" {
+        // Reserve memory for the declared size (the maximum when unknown).
+        match repository.reserve_upload(declared.unwrap_or(MAX_UPLOAD_BYTES), UPLOAD_WAIT) {
+            Some(reservation) => _reservation = Some(reservation),
+            None => {
+                let mut busy = Reply::empty(503);
+                busy.headers.push(("Retry-After", "5".into()));
+                send(request, busy);
+                return;
+            }
+        }
         match wire::read_bounded(request.as_reader(), MAX_UPLOAD_BYTES) {
             Ok(Some(bytes)) => body = bytes,
             Ok(None) => {
@@ -556,8 +653,8 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
             }
         }
     }
-    let reply = repository.handle(&Request {
-        client: request.remote_addr().map(|address| address.ip()),
+    let reply = repository.handle_authorized(&Request {
+        client,
         method: &method,
         path,
         query,
@@ -566,6 +663,10 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
         range: header(&request, "Range"),
         body: &body,
     });
+    send(request, reply);
+}
+
+fn send(request: tiny_http::Request, reply: Reply) {
     let headers: Vec<tiny_http::Header> = reply
         .headers
         .iter()

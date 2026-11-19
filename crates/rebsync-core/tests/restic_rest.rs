@@ -833,3 +833,77 @@ fn failed_logins_are_throttled_per_client_without_checking_the_password() {
             .any(|(name, _)| *name == "Retry-After")
     );
 }
+
+#[test]
+fn upload_memory_is_reserved_from_a_server_wide_budget() {
+    let f = Fixture::new();
+    let max = restic_rest::MAX_UPLOAD_BYTES;
+    let repo = f.repository(true, None).with_upload_budget(2 * max);
+    let quick = std::time::Duration::from_millis(50);
+    let first = repo.reserve_upload(max, quick).expect("first fits");
+    let second = repo.reserve_upload(max, quick).expect("second fits");
+    assert_eq!(repo.uploads_in_flight(), 2 * max);
+    assert!(
+        repo.reserve_upload(1, quick).is_none(),
+        "budget full: refused after waiting"
+    );
+    drop(first);
+    let third = repo
+        .reserve_upload(max, quick)
+        .expect("released memory is reusable");
+    drop((second, third));
+    assert_eq!(repo.uploads_in_flight(), 0);
+    // A waiting upload proceeds as soon as another finishes.
+    let repo = Arc::new(f.repository(true, None).with_upload_budget(max));
+    let held = repo.reserve_upload(max, quick).unwrap();
+    let waiter = {
+        let repo = Arc::clone(&repo);
+        std::thread::spawn(move || {
+            repo.reserve_upload(max, std::time::Duration::from_secs(5))
+                .is_some()
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(held);
+    assert!(waiter.join().unwrap());
+}
+
+#[test]
+fn unauthenticated_uploads_are_refused_before_their_body_is_read() {
+    use std::io::{Read, Write};
+    let f = Fixture::new();
+    let options = ResticOptions {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+        append_only: true,
+        max_bytes: None,
+        tls: None,
+    };
+    let server = Arc::new(restic_rest::bind(&options).unwrap());
+    let repository = Arc::new(f.repository(true, None));
+    {
+        let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
+        std::thread::spawn(move || server.serve(repository, 1));
+    }
+    // Announce a 100 MB body and never send it: the server must answer 401
+    // from the headers alone instead of waiting to buffer the body.
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /data/{} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nContent-Length: 100000000\r\n\r\n",
+        "0".repeat(64),
+        basic(USER, "not-the-password-xxxxx")
+    )
+    .unwrap();
+    let mut first = [0u8; 12];
+    stream
+        .read_exact(&mut first)
+        .expect("answered without the body");
+    assert_eq!(&first, b"HTTP/1.1 401");
+    assert_eq!(repository.uploads_in_flight(), 0, "no memory was reserved");
+    server.unblock();
+}
