@@ -540,9 +540,12 @@ fn exercise_real_restic(tls: Option<(Vec<u8>, Vec<u8>)>, extra: Vec<String>, try
     // restic retries the refusal with backoff (about a minute), so only once.
     if try_forget {
         let forget = restic(&url, &extra, &["forget", &id], work.path());
+        // restic 0.16 exits non-zero; 0.18 reports "unable to remove" and exits 0.
+        // Either way the server refused, and the snapshot must survive (below).
+        let stderr = String::from_utf8_lossy(&forget.stderr);
         assert!(
-            !forget.status.success(),
-            "forget must fail on an append-only server"
+            !forget.status.success() || stderr.contains("unable to remove"),
+            "forget must be refused on an append-only server: {stderr}"
         );
         let after = restic(&url, &extra, &["snapshots", "--json"], work.path());
         ok(&after, "snapshots after refused forget");
