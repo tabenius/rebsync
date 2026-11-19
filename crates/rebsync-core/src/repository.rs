@@ -1,12 +1,13 @@
 //! Dash-hosted private repositories: HTTPS, no tokens in URLs, no redirects,
 //! bounded responses, hash-verified reads and immutable append. No terminal I/O.
-use crate::storage::{ObjectKey, validate_prefix};
+//!
+//! Constants and validators of the wire contract are in [`crate::rbq_contract`].
+use crate::wire::{self, http};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const MAX_OBJECT_BYTES: usize = 262144;
+pub use crate::rbq_contract::*;
 const MAX_JSON_BYTES: usize = 262144;
 
 pub struct Repository {
@@ -15,17 +16,9 @@ pub struct Repository {
     agent: ureq::Agent,
 }
 
-fn bounded(mut reader: impl Read, max: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader
-        .by_ref()
-        .take((max + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= max,
-        "repository response or input exceeds its size limit"
-    );
-    Ok(bytes)
+fn bounded(reader: impl Read, max: usize) -> Result<Vec<u8>> {
+    wire::read_bounded(reader, max as u64)?
+        .context("repository response or input exceeds its size limit")
 }
 
 impl Repository {
@@ -51,52 +44,36 @@ impl Repository {
             "repository URL must not contain credentials, query or fragment"
         );
         let path = base.path().trim_end_matches('/').to_owned();
-        let id = path.strip_prefix("/api/rbq/").unwrap_or("");
+        let id = path.strip_prefix(ENDPOINT_PATH_PREFIX).unwrap_or("");
         ensure!(
-            id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+            valid_endpoint_id(id),
             "use the /api/rbq/ID endpoint returned by rbq_get_repository"
         );
-        ensure!(
-            token.starts_with("rbm_")
-                && token.len() == 68
-                && token[4..].bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid Dash bearer token"
-        );
+        ensure!(valid_token(token), "invalid Dash bearer token");
         base.set_path(&path);
         Ok(Self {
             base,
             token: token.into(),
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .timeout_connect(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
-                .build(),
+            agent: http::agent(Duration::from_secs(10), Duration::from_secs(60)),
         })
     }
 
     pub fn from_token_file(endpoint: &str, path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path).context("open private repository token file")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            ensure!(
-                file.metadata()?.permissions().mode() & 0o077 == 0,
-                "token file must be owner-only (chmod 600)"
-            );
-        }
+        wire::ensure_private_file(path, &file.metadata()?)?;
         let token = bounded(file, 256)?;
         let token = std::str::from_utf8(&token).context("token file must be UTF-8")?;
         Self::connect(endpoint, token.trim())
     }
 
     fn request(&self, method: &str, suffix: &str) -> ureq::Request {
-        self.agent
-            .request(
+        http::authorize(
+            self.agent.request(
                 method,
                 &format!("{}{suffix}", self.base.as_str().trim_end_matches('/')),
-            )
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .set("User-Agent", concat!("rbq/", env!("CARGO_PKG_VERSION")))
+            ),
+            &self.token,
+        )
     }
 
     fn response(
@@ -126,7 +103,7 @@ impl Repository {
     pub fn describe(&self) -> Result<Value> {
         let value = Self::json(Self::response(self.request("GET", "").call())?)?;
         ensure!(
-            value["schema"] == "ragbaz.rbq-repository.v1" && value["private"] == true,
+            value["schema"] == SCHEMA && value["private"] == true,
             "unsupported private repository descriptor"
         );
         Ok(value)
@@ -137,7 +114,10 @@ impl Repository {
         if let Some(key) = after {
             ObjectKey::parse(key)?;
         }
-        ensure!((1..=100).contains(&limit), "list limit must be 1..100");
+        ensure!(
+            (1..=LIST_LIMIT_MAX).contains(&limit),
+            "list limit must be 1..{LIST_LIMIT_MAX}"
+        );
         let request = self
             .request("GET", "/objects")
             .query("prefix", prefix)
@@ -154,12 +134,12 @@ impl Repository {
         ObjectKey::parse(key)?;
         let response = Self::response(self.request("GET", &format!("/objects/{key}")).call())?;
         let expected = response
-            .header("x-content-sha256")
+            .header(CONTENT_SHA256_HEADER)
             .context("repository omitted content digest")?
             .to_owned();
         let bytes = bounded(response.into_reader(), MAX_OBJECT_BYTES)?;
         ensure!(
-            format!("{:x}", Sha256::digest(&bytes)) == expected,
+            wire::sha256_hex(&bytes) == expected,
             "repository content digest mismatch"
         );
         Ok(bytes)
@@ -179,7 +159,7 @@ impl Repository {
         let value = Self::json(response)?;
         ensure!(
             value["key"] == key
-                && value["sha256"] == format!("{:x}", Sha256::digest(bytes))
+                && value["sha256"] == wire::sha256_hex(bytes)
                 && value["size_bytes"].as_u64() == Some(bytes.len() as u64),
             "repository append acknowledgement mismatch"
         );

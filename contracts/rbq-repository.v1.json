@@ -1,0 +1,73 @@
+{
+  "contract": "ragbaz.rbq-repository.v1",
+  "owner": "tabenius/rebsync",
+  "description": "Wire contract between the rbq client (rebsync) and the Dash-hosted private RBQ repository (RAGBAZ/ragbaz-dash). rebsync owns this file; Dash vendors a pinned copy. Both sides test their constants and validators against it.",
+  "endpoint": {
+    "path_prefix": "/api/rbq/",
+    "id_pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    "schemes": ["https"],
+    "loopback_http": true,
+    "url_must_not_contain": ["userinfo", "query", "fragment"],
+    "redirects": "refused"
+  },
+  "authentication": {
+    "header": "Authorization",
+    "scheme": "Bearer",
+    "token_pattern": "^rbm_[0-9a-f]{64}$"
+  },
+  "routes": {
+    "describe": { "method": "GET", "path": "" },
+    "list": { "method": "GET", "path": "/objects", "query": ["prefix", "after", "limit"] },
+    "read": { "method": "GET", "path": "/objects/{key}" },
+    "append": { "method": "PUT", "path": "/objects/{key}", "content_type": "application/octet-stream" }
+  },
+  "headers": {
+    "content_sha256": "x-content-sha256"
+  },
+  "digest": "sha256-lowercase-hex",
+  "limits": {
+    "object_bytes": 262144,
+    "key_bytes": 1024,
+    "segment_bytes": 255,
+    "list_limit_min": 1,
+    "list_limit_max": 100,
+    "list_limit_default": 20
+  },
+  "key": {
+    "segment_pattern": "^[A-Za-z0-9._-]+$",
+    "forbidden_segments": [".", ".."],
+    "separator": "/",
+    "prefix": "A prefix is empty, or a key that may end mid-segment, optionally followed by exactly one '/'."
+  },
+  "responses": {
+    "describe": { "schema": "ragbaz.rbq-repository.v1", "private": true, "required": ["schema", "repository_id", "private", "endpoint", "capabilities", "limits"] },
+    "list": { "required": ["objects", "next_after"], "object_fields": ["key", "sha256", "size_bytes", "created_at"] },
+    "append": { "required": ["key", "sha256", "size_bytes", "created"], "statuses": { "created": 201, "identical_retry": 200 } }
+  },
+  "errors": {
+    "401": "credential expired or revoked",
+    "403": "storage not enabled for this credential, or bad origin",
+    "404": "object or route not found",
+    "409": "immutable key conflict or repository quota exceeded",
+    "413": "object exceeds the size limit",
+    "429": "rate limited"
+  },
+  "vectors": {
+    "keys": {
+      "valid": ["a", "notes/first.mdoc", "A-Z_0.9/x", "deep/a/b/c/d.e"],
+      "invalid": ["", "/a", "a/", "a//b", ".", "..", "a/./b", "a/../b", "a b", "a?b", "a#b", "a%2Fb", "ä", "a\\b"]
+    },
+    "prefixes": {
+      "valid": ["", "n", "notes", "notes/", "notes/fi", "a/b/"],
+      "invalid": ["/", "/a", "a//", "a//b", "../", "a/../", "a?", "a b"]
+    },
+    "tokens": {
+      "valid": ["rbm_0000000000000000000000000000000000000000000000000000000000000000", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+      "invalid": ["", "rbm_", "rbm_0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde", "rbk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+    },
+    "endpoint_ids": {
+      "valid": ["00000000-0000-0000-0000-000000000000", "0f8e6d4c-1234-4abc-9def-0123456789ab"],
+      "invalid": ["", "00000000000000000000000000000000000z", "0F8E6D4C-1234-4ABC-9DEF-0123456789AB", "------------------------------------", "0f8e6d4c-1234-4abc-9def-0123456789abc"]
+    }
+  }
+}

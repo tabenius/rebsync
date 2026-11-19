@@ -21,10 +21,9 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 #[cfg(feature = "peer-http")]
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
 pub const PROTOCOL: &str = "rbq-peer/0";
 #[cfg(feature = "peer-http")]
@@ -192,11 +191,7 @@ fn encode(value: &str) -> String {
 #[cfg(feature = "peer-http")]
 impl Peer {
     pub fn connect(target: Target) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .redirects(0)
-            .build();
+        let agent = crate::wire::http::agent(Duration::from_secs(10), Duration::from_secs(300));
         Self {
             agent,
             target,
@@ -219,11 +214,7 @@ impl Peer {
 
     /// Bound explicit diagnostic probes without reducing bulk-transfer timeouts.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.agent = ureq::AgentBuilder::new()
-            .timeout_connect(timeout)
-            .timeout(timeout)
-            .redirects(0)
-            .build();
+        self.agent = crate::wire::http::agent(timeout, timeout);
         self
     }
 
@@ -232,9 +223,7 @@ impl Peer {
     }
 
     fn auth(&self, request: ureq::Request) -> ureq::Request {
-        request
-            .set("Authorization", &format!("Bearer {}", self.target.token))
-            .set("User-Agent", concat!("rbq/", env!("CARGO_PKG_VERSION")))
+        crate::wire::http::authorize(request, &self.target.token)
     }
 
     fn json(&self, path: &str) -> Result<Value> {
@@ -245,15 +234,11 @@ impl Peer {
                     .auth(self.agent.get(&self.url(path)))
                     .call()
                     .map_err(AttemptError::from)?;
-                let mut bytes = Vec::new();
                 const MAX_JSON: u64 = 16 * 1024 * 1024;
-                response
-                    .into_reader()
-                    .take(MAX_JSON + 1)
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_JSON {
+                let Some(bytes) = crate::wire::read_bounded(response.into_reader(), MAX_JSON)?
+                else {
                     return Err(anyhow::anyhow!("peer JSON response exceeds 16 MiB").into());
-                }
+                };
                 serde_json::from_slice(&bytes)
                     .map_err(|e| AttemptError::from(anyhow::Error::from(e)))
             },
@@ -340,15 +325,8 @@ impl Peer {
                     )
                     .call()
                     .map_err(AttemptError::from)?;
-                let mut bytes = Vec::new();
-                response
-                    .into_reader()
-                    .take(MAX_OBJECT + 1)
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_OBJECT {
-                    return Err(anyhow::anyhow!("{key}: object exceeds 64 MiB").into());
-                }
-                Ok(bytes)
+                crate::wire::read_bounded(response.into_reader(), MAX_OBJECT)?
+                    .ok_or_else(|| anyhow::anyhow!("{key}: object exceeds 64 MiB").into())
             },
             std::thread::sleep,
         )
@@ -463,7 +441,7 @@ pub(crate) fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
     if let Some((_, digest)) = key.rsplit_once("/chunks/sha256/") {
         let digest = digest.rsplit('/').next().unwrap_or_default();
         ensure!(
-            layer::valid_sha256(digest) && format!("{:x}", Sha256::digest(bytes)) == digest,
+            layer::valid_sha256(digest) && crate::wire::sha256_hex(bytes) == digest,
             "chunk content does not match its address"
         );
     } else if key.contains("/snapshots/") {
@@ -791,7 +769,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = crate::FsObjectStorage::open(dir.path().join("objects")).unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
-        let digest = format!("{:x}", Sha256::digest(b"chunk"));
+        let digest = crate::wire::sha256_hex(b"chunk");
         let key = format!("frog/v1/chunks/sha256/{}/{digest}", &digest[..2]);
         let peer = ListedPeer {
             items: BTreeMap::from([
@@ -827,7 +805,7 @@ mod tests {
     #[test]
     fn admits_only_verifiable_layer_objects() {
         let data = b"chunk";
-        let digest = format!("{:x}", Sha256::digest(data));
+        let digest = crate::wire::sha256_hex(data);
         let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
         assert!(admissible(&key, data).is_ok());
         assert!(admissible(&key, b"tampered").is_err());
