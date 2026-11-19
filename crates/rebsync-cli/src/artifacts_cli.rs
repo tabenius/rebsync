@@ -146,12 +146,14 @@ fn watch(
 ) -> Result<i32> {
     use std::{io::Write, time::Duration};
     let mut fetched = 0;
+    let mut last_notified: Option<std::time::Instant> = None;
     loop {
         let mut value = client.arrivals(after, 50)?;
         after = value["next_after"]
             .as_u64()
             .expect("arrival cursor validated by core");
         if notify
+            && last_notified.is_none_or(|last| last.elapsed() >= Duration::from_secs(interval))
             && value["events"]
                 .as_array()
                 .is_some_and(|events| !events.is_empty())
@@ -174,6 +176,7 @@ fn watch(
                 "unavailable_use_inbox"
             }
             .into();
+            last_notified = Some(std::time::Instant::now());
         }
         println!("{}", serde_json::to_string(&value)?);
         std::io::stdout().flush()?;
