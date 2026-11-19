@@ -184,6 +184,53 @@ fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
+/// Spawning the publisher is not proof that Avahi accepted the service: the
+/// executable can exist even when its D-Bus daemon is stopped. Wait for Avahi's
+/// establishment message, with bounded startup time, before suppressing fallback.
+fn start_avahi(mut command: std::process::Command, timeout: std::time::Duration) -> Result<Child> {
+    use std::io::BufRead;
+    let mut child = command
+        .env("LC_ALL", "C")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("start avahi-publish-service")?;
+    let stderr = child.stderr.take().expect("piped publisher stderr");
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut established = false;
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if !established && line.starts_with("Established under name '") {
+                established = true;
+                let _ = sender.send(Ok(()));
+            } else if !established && line.starts_with("Failed") {
+                let _ = sender.send(Err(line));
+                return;
+            }
+            // Continue draining diagnostics for the lifetime of the child, so
+            // later collision messages cannot fill its pipe or cause SIGPIPE.
+        }
+        if !established {
+            let _ = sender.send(Err(
+                "publisher exited before establishing the service".into()
+            ));
+        }
+    });
+    let detail = match receiver.recv_timeout(timeout) {
+        Ok(Ok(())) => match child.try_wait() {
+            Ok(None) => return Ok(child),
+            Ok(Some(status)) => format!("publisher exited after establishment: {status}"),
+            Err(error) => format!("cannot check publisher status: {error}"),
+        },
+        Ok(Err(message)) => message,
+        Err(error) => format!("publisher did not confirm establishment: {error}"),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    anyhow::bail!("{detail}")
+}
+
 fn announce(
     options: &ServeOptions,
     port: u16,
@@ -207,18 +254,15 @@ fn announce(
         });
     } else if let Some(program) = which("avahi-publish-service") {
         // Avahi owns mDNS on most Linux desktops; publish through it (D-Bus).
-        match std::process::Command::new(program)
-            .args([
-                &instance,
-                SERVICE_TYPE,
-                &port.to_string(),
-                "path=/",
-                &format!("scheme={scheme}"),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        let mut command = std::process::Command::new(program);
+        command.args([
+            &instance,
+            SERVICE_TYPE,
+            &port.to_string(),
+            "path=/",
+            &format!("scheme={scheme}"),
+        ]);
+        match start_avahi(command, std::time::Duration::from_secs(3)) {
             Ok(child) => {
                 avahi = Some(child);
                 report.push(Announcement {
@@ -535,6 +579,61 @@ fn handle(request: tiny_http::Request, config: &Config, storage: &dyn ObjectStor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn publisher(script: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn avahi_missing_daemon_is_not_success() {
+        let result = start_avahi(
+            publisher("echo 'Failed to create client object: Daemon not running' >&2; exit 1"),
+            std::time::Duration::from_secs(2),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Daemon not running")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn avahi_silent_exit_is_not_success() {
+        assert!(start_avahi(publisher("exit 0"), std::time::Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn avahi_startup_timeout_is_bounded() {
+        let start = std::time::Instant::now();
+        assert!(
+            start_avahi(
+                publisher("exec sleep 30"),
+                std::time::Duration::from_millis(50)
+            )
+            .is_err()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn avahi_requires_established_service() {
+        let mut child = start_avahi(
+            publisher("echo \"Established under name 'rbq test'\" >&2; exec sleep 30"),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
 
     #[test]
     fn pem_decoding_matches_der_length() {

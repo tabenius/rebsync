@@ -352,7 +352,9 @@ rbq serve --plain-http --port 8080 --no-announce
 - **Announcement.** When bound beyond localhost, rbq advertises
   `_rbq._tcp` (TXT `path=/`, `scheme=https|http`). It tries the system
   Avahi daemon first (`avahi-publish-service`, which talks to Avahi over
-  D-Bus), then falls back to a built-in mDNS responder. It also posts a
+  D-Bus), waiting up to three seconds for service establishment. A missing
+  daemon, publisher exit or timeout falls back to a built-in mDNS responder;
+  merely starting the Avahi executable is not reported as success. It also posts a
   desktop notification over the D-Bus session bus when one exists. Each
   mechanism reports `✓` or why not; none is required. Bound to localhost,
   it deliberately does not advertise on the network.
