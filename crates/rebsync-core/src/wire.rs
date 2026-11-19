@@ -18,6 +18,39 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Standard base64 (RFC 4648, `+/`, optional `=` padding). ASCII whitespace
+/// is ignored; any other character makes the input invalid.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut buffer, mut bits, mut padding) = (0u32, 0u32, false);
+    for c in text.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                padding = true;
+                continue;
+            }
+            c if c.is_ascii_whitespace() => continue,
+            _ => return None,
+        } as u32;
+        if padding {
+            return None;
+        }
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// True when no group or other permission bits are set. Always false where
 /// POSIX permissions do not exist, so callers can decide how to degrade.
 pub fn is_owner_only(metadata: &std::fs::Metadata) -> bool {
@@ -33,7 +66,8 @@ pub fn is_owner_only(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
-/// Refuse a credential file that other local users could read (Unix only).
+/// Refuse a secret file (token or password) that other local users could read
+/// (Unix only).
 pub fn ensure_private_file(
     path: &std::path::Path,
     metadata: &std::fs::Metadata,
@@ -41,7 +75,7 @@ pub fn ensure_private_file(
     #[cfg(unix)]
     anyhow::ensure!(
         is_owner_only(metadata),
-        "token file {} must not be group- or world-readable (chmod 600)",
+        "{} must not be group- or world-readable (chmod 600)",
         path.display()
     );
     #[cfg(not(unix))]
@@ -83,6 +117,15 @@ mod tests {
         );
         assert_eq!(read_bounded(&b"abcde"[..], 4).unwrap(), None);
         assert_eq!(read_bounded(&b""[..], 0).unwrap(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn base64_round_trips_and_rejects_garbage() {
+        assert_eq!(base64_decode("dXNlcjpwYXNz").unwrap(), b"user:pass");
+        assert_eq!(base64_decode("YQ==").unwrap(), b"a");
+        assert_eq!(base64_decode("YW\nJj").unwrap(), b"abc");
+        assert!(base64_decode("YQ==YQ").is_none());
+        assert!(base64_decode("a*b").is_none());
     }
 
     #[test]

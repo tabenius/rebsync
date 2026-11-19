@@ -144,28 +144,7 @@ fn pem_body(pem: &[u8]) -> Option<Vec<u8>> {
         .skip(1)
         .take_while(|l| !l.starts_with("-----END"))
         .collect();
-    let mut out = Vec::new();
-    let mut buffer = 0u32;
-    let mut bits = 0;
-    for c in body.bytes() {
-        let value = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => continue,
-        } as u32;
-        buffer = (buffer << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    (!out.is_empty()).then_some(out)
+    crate::wire::base64_decode(&body).filter(|out| !out.is_empty())
 }
 
 fn hostname() -> String {

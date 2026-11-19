@@ -122,6 +122,42 @@ A filesystem restic repository may be useful for tests or an enrolled USB drive,
 but rbq does not assert that it is independent of this machine. It never
 prunes backups or propagates deletions.
 
+## Serving a restic repository (`rbq restic-serve`)
+
+`rbq restic-serve` exposes rbq's object store as a restic REST repository
+(protocol v1 and v2), so another machine can back up *to* this one with plain
+`restic`. It is storage milestone 1's restic REST interoperability, tested
+against real restic: `init`, `backup`, `snapshots`, `restore`, `check
+--read-data`, lock removal, and a refused `forget`.
+
+```bash
+umask 077; head -c 24 /dev/urandom | base64 > ~/.config/rbq/restic-http.pw
+rbq restic-serve --password-file ~/.config/rbq/restic-http.pw --tls-self-signed --listen 0.0.0.0:8000
+# prints the certificate path and the exact restic command, e.g.
+restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:PASSWORD@host:8000/ init
+```
+
+- **Authentication.** Every request needs HTTP Basic credentials. The password
+  comes from an owner-only file (at least 16 characters) and is compared in
+  constant time. It only guards the transport: restic still encrypts the data
+  with its own repository password, which the server never sees.
+- **Transport.** Plain HTTP is accepted only on loopback (for example behind
+  `ssh -L`). Any other listener needs TLS: `--tls-cert/--tls-key`, or
+  `--tls-self-signed` with the printed certificate pinned through `restic --cacert`.
+- **Append-only by default.** Only locks can be deleted, which a normal backup
+  needs. `forget`/`prune` are refused until the server is started with
+  `--allow-delete` (do that only for an administrative session).
+- **Verified, immutable uploads.** Every object except `config` must be named
+  by the SHA-256 of its bytes. Objects are created only if absent: an identical
+  retry succeeds and nothing is ever replaced.
+- **Namespace and quota.** One repository per server, stored under the
+  `restic/` namespace of the object store (`--storage DIR` picks a dedicated
+  root). `--max-bytes` refuses uploads beyond a quota (HTTP 507); usage is
+  recounted from storage at start.
+- **Limits.** Uploads are held in memory up to 129 MiB (restic packs default to
+  16 MiB). There is no rate limiting of failed logins yet. Repository *format*
+  compatibility is restic's: the server stores its objects opaquely.
+
 ## Local object storage
 
 For account-private Dash storage, source-preserving **push/pull**, and read-only
@@ -706,8 +742,9 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   early restic REST serving, resumable multipart and peer capability negotiation.
   The [Rust abstraction evaluation](docs/STORAGE-EVALUATION.md) compares pinned
   object_store/OpenDAL candidates in an isolated workspace. A feature-gated
-  `object_store` filesystem adapter now implements the production trait; S3/R2,
-  multipart and peer negotiation are not implemented yet.
+  `object_store` filesystem adapter now implements the production trait, and
+  `rbq restic-serve` serves it to restic over REST. S3/R2 adapters, resumable
+  multipart, streaming uploads and peer negotiation are not implemented yet.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
