@@ -1039,6 +1039,14 @@ fn uploads_must_declare_their_length() {
     stream.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 411");
     assert_eq!(repository.uploads_in_flight(), 0);
+    // No length and no Transfer-Encoding is an empty body (restic 0.18's create).
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(stream, "POST /?create=true HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nConnection: close\r\n\r\n", f.auth).unwrap();
+    stream.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"HTTP/1.1 200");
     server.unblock();
 }
 

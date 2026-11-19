@@ -647,11 +647,16 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
     }
     let mut _reservation = None;
     if method == "POST" {
-        // restic always declares Content-Length; refuse uploads without one
-        // so the buffer is sized once and never grows.
-        let Some(length) = declared else {
-            send(request, Reply::empty(411));
-            return;
+        // Without Content-Length or Transfer-Encoding the body is empty
+        // (HTTP/1.1; restic 0.18 sends `POST /?create=true` that way). A body
+        // of unknown length (chunked) is refused, so buffers are sized once.
+        let length = match declared {
+            Some(length) => length,
+            None if header(&request, "Transfer-Encoding").is_none() => 0,
+            None => {
+                send(request, Reply::empty(411));
+                return;
+            }
         };
         // Reserve peak memory: the request buffer plus the storage layer's
         // copy of it.

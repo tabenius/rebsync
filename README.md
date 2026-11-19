@@ -170,8 +170,8 @@ restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:
   root). `--max-bytes` refuses uploads beyond a quota (HTTP 507); usage is
   recounted from storage at start.
 - **Limits.** Each upload is held in memory, up to 129 MiB (restic packs
-  default to 16 MiB), and must declare its `Content-Length` (restic always
-  does; others get 411). Bodies are read only after authentication. Each
+  default to 16 MiB). A body of undeclared length (chunked) gets 411, so
+  every buffer is sized once. Bodies are read only after authentication. Each
   upload reserves twice its size, for the buffer plus the storage layer's
   copy, from a server-wide budget of two maximum uploads (about 258 MiB). An
   upload that can't get budget within 30 seconds gets 503 with `Retry-After`.
