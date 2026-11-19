@@ -1106,6 +1106,7 @@ dependencies = [
  "clap_complete",
  "rebsync-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

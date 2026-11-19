@@ -401,3 +401,28 @@ fn fsck_finds_damaged_missing_and_unreadable_snapshots() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn publishing_refuses_to_reuse_a_same_size_corrupt_chunk() -> Result<()> {
+    use rebsync_core::ObjectStorage;
+
+    let t = tempfile::tempdir()?;
+    let store = FsObjectStorage::open(t.path().join("objects"))?;
+    let original = b"good immutable bytes";
+    let (chunk, created) = layer::put_chunk(&store, "agenda/v1", original)?;
+    assert!(created);
+    let key = layer::chunk_key("agenda/v1", &chunk.sha256)?;
+    let path = t.path().join("objects").join(key.to_string());
+    let mut corrupt = original.to_vec();
+    corrupt[0] ^= 1;
+    fs::write(&path, &corrupt)?;
+    assert_eq!(corrupt.len(), original.len());
+
+    let error = layer::put_chunk(&store, "agenda/v1", original).unwrap_err();
+    assert!(
+        error.to_string().contains("digest or size mismatch"),
+        "{error:#}"
+    );
+    assert_eq!(store.get(&key)?, corrupt);
+    Ok(())
+}

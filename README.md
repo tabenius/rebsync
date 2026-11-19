@@ -165,6 +165,17 @@ only: no synchronization policy propagates repository deletions between peers.
 A manifest received from a peer is removed only when its own snapshot check
 fails, so damaged metadata is not advertised as restorable.
 
+When publishing, a reused content-addressed chunk is re-read and SHA-256-checked,
+not merely accepted because an existing object has the expected length. This
+adds I/O for incremental publication but fails closed if stored bytes have been
+corrupted. Peer pushes also refuse to advertise new snapshot manifests whose
+referenced objects fail structural verification; successful transfer is not a
+substitute for the native owner's recovery validator.
+
+Experimental Hypomnema bundles are excluded from default peer transfer. Use
+an explicit `--layer hypomnema` only after reviewing the target and contents;
+the Android app and owner-CLI interoperation still require independent tests.
+
 ## Owner schemas and migrations
 
 Frog, Mneme and Daily Agenda own their data formats and migration logic.
