@@ -206,15 +206,7 @@ pub fn validate_token(token: &str) -> Result<()> {
 pub fn read_token_file(path: &Path) -> Result<String> {
     let metadata =
         fs::metadata(path).with_context(|| format!("read token file {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            metadata.permissions().mode() & 0o077 == 0,
-            "token file {} must not be group- or world-readable (chmod 600)",
-            path.display()
-        );
-    }
+    crate::wire::ensure_private_file(path, &metadata)?;
     let token = fs::read_to_string(path)?.trim().to_owned();
     validate_token(&token)?;
     Ok(token)
@@ -1694,7 +1686,7 @@ fn check_transport(target: &Target) -> Result<((usize, usize, usize), u64)> {
 /// datagram transport must reassemble several chunks.
 fn write_fixture(storage: &dyn ObjectStorage, size: usize) -> Result<(String, u64)> {
     let data: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
-    let digest = format!("{:x}", Sha256::digest(&data));
+    let digest = crate::wire::sha256_hex(&data);
     let chunk = layer::Chunk {
         sha256: digest.clone(),
         size: data.len() as u64,

@@ -120,6 +120,18 @@ fn output_is_owner_only_and_never_overwrites_local_work() {
     let path = dir.path().join("download");
     write_output(&path, b"first").unwrap();
     assert!(write_output(&path, b"replacement").is_err());
+    // No temporary files are left next to the output, even after a refusal.
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rbq-download-")
+        })
+        .collect();
+    assert!(leftovers.is_empty());
     assert_eq!(read_input(&path).unwrap(), b"first");
     #[cfg(unix)]
     {

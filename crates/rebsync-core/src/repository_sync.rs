@@ -9,7 +9,6 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::Range};
 
 const MAX_KEYS: usize = 10000;
@@ -96,7 +95,7 @@ pub struct Report {
 }
 
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::wire::sha256_hex(bytes)
 }
 
 fn inventory(repository: &dyn RepositoryApi, prefix: &str) -> Result<BTreeMap<String, Entry>> {

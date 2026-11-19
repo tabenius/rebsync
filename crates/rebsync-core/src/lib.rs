@@ -16,6 +16,7 @@ pub mod phone;
 #[cfg(feature = "peer-http")]
 mod private_http;
 pub mod process;
+pub mod rbq_contract;
 #[cfg(feature = "peer-http")]
 pub mod repository;
 #[cfg(feature = "peer-http")]
@@ -26,6 +27,7 @@ pub mod storage;
 pub mod sync;
 #[cfg(feature = "peer-transport")]
 pub mod transport;
+pub mod wire;
 
 pub use config::{Config, ConfigOverrides, EffectiveConfig, load_config};
 pub use inventory::{Inventory, Repository, discover};

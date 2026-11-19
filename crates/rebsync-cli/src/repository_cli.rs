@@ -48,7 +48,7 @@ enum RepositoryAction {
         prefix: String,
         #[arg(long)]
         after: Option<String>,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = rebsync_core::rbq_contract::LIST_LIMIT_DEFAULT)]
         limit: usize,
     },
     /// Download and hash-verify bytes into a NEW owner-only file; never overwrite.

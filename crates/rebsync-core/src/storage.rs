@@ -13,6 +13,7 @@ use std::ops::Range;
 
 /// Largest key accepted by the storage boundary. S3 permits 1024 UTF-8 bytes.
 pub const MAX_KEY_BYTES: usize = 1024;
+pub const MAX_SEGMENT_BYTES: usize = 255;
 
 /// A validated, slash-separated object key.
 ///
@@ -71,7 +72,8 @@ pub fn validate_prefix(prefix: &str) -> Result<(), StorageError> {
             "prefix must not start with '/'".into(),
         ));
     }
-    for segment in prefix.trim_end_matches('/').split('/') {
+    // At most one trailing '/' ("notes/"); "notes//" has an empty segment.
+    for segment in prefix.strip_suffix('/').unwrap_or(prefix).split('/') {
         validate_segment(segment)?;
     }
     Ok(())
@@ -86,10 +88,10 @@ fn validate_segment(segment: &str) -> Result<(), StorageError> {
             "path traversal segment is not allowed".into(),
         ));
     }
-    if segment.len() > 255 {
-        return Err(StorageError::InvalidKey(
-            "path segment exceeds 255 bytes".into(),
-        ));
+    if segment.len() > MAX_SEGMENT_BYTES {
+        return Err(StorageError::InvalidKey(format!(
+            "path segment exceeds {MAX_SEGMENT_BYTES} bytes"
+        )));
     }
     if !segment
         .bytes()
@@ -269,7 +271,7 @@ mod object_store_fs {
                         std::fs::set_permissions(requested, std::fs::Permissions::from_mode(0o700));
                 }
                 std::fs::metadata(requested)
-                    .map(|meta| meta.permissions().mode() & 0o077 == 0)
+                    .map(|meta| crate::wire::is_owner_only(&meta))
                     .unwrap_or(false)
             };
             #[cfg(not(unix))]

@@ -156,6 +156,12 @@ feature (enabled by default). This is not automatic peer synchronization or
 an encrypted restic repository. Account isolation is **not** client-side
 encryption: infrastructure administrators can access stored bytes.
 
+The wire contract (limits, key grammar, token and endpoint formats, headers,
+response fields and conformance vectors) is
+[`contracts/rbq-repository.v1.json`](contracts/rbq-repository.v1.json). This
+repository owns it; Dash vendors a pinned copy and tests its server against the
+same vectors (`crates/rebsync-core/tests/rbq_contract.rs` here).
+
 ### Local object store
 
 `rbq` can publish Rebeqah-managed objects into a local filesystem root behind

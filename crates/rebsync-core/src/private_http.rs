@@ -1,19 +1,29 @@
 //! Shared transport policy for account-private Dash endpoints. Never follows
 //! redirects or includes server bodies, URLs or credentials in diagnostics.
+//! Token and endpoint formats come from the shared rbq contract
+//! ([`crate::rbq_contract`]); bounded reads and the HTTP client from [`crate::wire`].
+use crate::rbq_contract::{valid_endpoint_id, valid_token};
+use crate::wire::{self, http};
 use anyhow::{Context, Result, bail, ensure};
 use std::{io::Read, path::Path, time::Duration};
 
-pub(crate) fn bounded(mut reader: impl Read, max: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader
-        .by_ref()
-        .take((max + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= max,
-        "private request data exceeds its size limit"
-    );
-    Ok(bytes)
+pub(crate) fn bounded(reader: impl Read, max: usize) -> Result<Vec<u8>> {
+    wire::read_bounded(reader, max as u64)?.context("private request data exceeds its size limit")
+}
+
+/// What each error status listed in the rbq contract (`errors` in
+/// `contracts/rbq-repository.v1.json`) means for the user. Other statuses get a
+/// generic message with the code.
+pub fn status_message(code: u16) -> Option<&'static str> {
+    Some(match code {
+        401 => "credential expired or revoked; rotate it in Dash",
+        403 => "access forbidden; check credential opt-ins and current membership",
+        404 => "private resource or endpoint not found",
+        409 => "immutable key conflict, changed revision or quota exceeded",
+        413 => "private request exceeds size limit",
+        429 => "rate limit reached; retry later",
+        _ => return None,
+    })
 }
 
 pub(crate) fn read_token(path: &Path) -> Result<String> {
@@ -36,7 +46,7 @@ pub(crate) fn read_token(path: &Path) -> Result<String> {
     {
         use std::os::unix::fs::MetadataExt;
         ensure!(
-            metadata.mode() & 0o077 == 0,
+            wire::is_owner_only(&metadata),
             "token file must be owner-only (chmod 600)"
         );
         // SAFETY: geteuid takes no arguments and has no memory preconditions.
@@ -81,42 +91,26 @@ impl PrivateHttp {
         let path = base.path().trim_end_matches('/').to_owned();
         let id = path.strip_prefix(prefix).unwrap_or("");
         ensure!(
-            id.len() == 36
-                && id.bytes().enumerate().all(|(i, b)| {
-                    if [8, 13, 18, 23].contains(&i) {
-                        b == b'-'
-                    } else {
-                        b.is_ascii_hexdigit()
-                    }
-                }),
+            valid_endpoint_id(id),
             "private endpoint requires a credential UUID at its documented path"
         );
-        ensure!(
-            token.starts_with("rbm_")
-                && token.len() == 68
-                && token[4..].bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid Dash bearer token"
-        );
+        ensure!(valid_token(token), "invalid Dash bearer token");
         base.set_path(&path);
         Ok(Self {
             base,
             token: token.into(),
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .timeout_connect(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
-                .build(),
+            agent: http::agent(Duration::from_secs(10), Duration::from_secs(60)),
         })
     }
 
     pub(crate) fn request(&self, method: &str, suffix: &str) -> ureq::Request {
-        self.agent
-            .request(
+        http::authorize(
+            self.agent.request(
                 method,
                 &format!("{}{suffix}", self.base.as_str().trim_end_matches('/')),
-            )
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .set("User-Agent", concat!("rbq/", env!("CARGO_PKG_VERSION")))
+            ),
+            &self.token,
+        )
     }
 
     pub(crate) fn response(
@@ -125,18 +119,11 @@ impl PrivateHttp {
         match result {
             Ok(response) if (200..300).contains(&response.status()) => Ok(response),
             Ok(_) => bail!("private endpoint redirect refused"),
-            Err(ureq::Error::Status(401, _)) => {
-                bail!("credential expired or revoked; rotate it in Dash")
-            }
-            Err(ureq::Error::Status(403, _)) => {
-                bail!("access forbidden; check credential opt-ins and current membership")
-            }
-            Err(ureq::Error::Status(404, _)) => bail!("private resource or endpoint not found"),
-            Err(ureq::Error::Status(409, _)) => {
-                bail!("immutable key conflict, changed revision or quota exceeded")
-            }
-            Err(ureq::Error::Status(413, _)) => bail!("private request exceeds size limit"),
-            Err(ureq::Error::Status(code, _)) => bail!("private request failed (HTTP {code})"),
+            // Never include the response body: it is server-controlled text.
+            Err(ureq::Error::Status(code, _)) => match status_message(code) {
+                Some(message) => bail!("{message}"),
+                None => bail!("private request failed (HTTP {code})"),
+            },
             Err(_) => bail!("private connection failed; verify network and endpoint"),
         }
     }
