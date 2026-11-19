@@ -14,6 +14,9 @@
 //! - Append-only (the default) refuses every deletion except locks, which a
 //!   normal backup must remove. Pruning is a separate administrative act.
 //! - An optional quota counts stored bytes; uploads beyond it get 507.
+//! - Failed logins are throttled per client address: after
+//!   [`LOGIN_FAILURES`] failures within [`LOGIN_WINDOW`], that client gets 429
+//!   without its password being checked until the window passes.
 //! - Error responses never echo request data; logs are the caller's choice.
 use crate::storage::{ObjectKey, ObjectStorage, PutOutcome, StorageError};
 use crate::wire;
@@ -27,6 +30,11 @@ const NAMESPACE: &str = "restic";
 const TYPES: [&str; 5] = ["data", "keys", "locks", "snapshots", "index"];
 const V2: &str = "application/vnd.x.restic.rest.v2";
 const V1: &str = "application/vnd.x.restic.rest.v1";
+/// Failed logins allowed per client address within [`LOGIN_WINDOW`].
+pub const LOGIN_FAILURES: u32 = 10;
+pub const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// Addresses tracked at most; the oldest windows are dropped beyond this.
+const TRACKED_CLIENTS: usize = 4096;
 
 /// Server policy. `password` is the secret itself, read by the caller from an
 /// owner-only file (see [`read_password_file`]).
@@ -42,6 +50,8 @@ pub struct ResticOptions {
 
 /// A parsed request, independent of the HTTP library.
 pub struct Request<'a> {
+    /// The peer address, for login throttling (None: not throttled).
+    pub client: Option<std::net::IpAddr>,
     pub method: &'a str,
     pub path: &'a str,
     pub query: &'a str,
@@ -87,6 +97,8 @@ pub struct Repository {
     append_only: bool,
     max_bytes: Option<u64>,
     used: Mutex<u64>,
+    login_limit: (u32, std::time::Duration),
+    failures: Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
 }
 
 fn digest(text: &str) -> [u8; 32] {
@@ -169,7 +181,57 @@ impl Repository {
             append_only,
             max_bytes,
             used: Mutex::new(used),
+            login_limit: (LOGIN_FAILURES, LOGIN_WINDOW),
+            failures: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Override the failed-login limit (tests, or stricter deployments).
+    pub fn with_login_limit(mut self, failures: u32, window: std::time::Duration) -> Self {
+        self.login_limit = (failures.max(1), window);
+        self
+    }
+
+    /// Whether `client` has used up its failed logins for the current window.
+    fn throttled(&self, client: std::net::IpAddr) -> bool {
+        let mut failures = self.failures.lock().expect("login lock");
+        match failures.get(&client) {
+            Some((count, since)) if since.elapsed() < self.login_limit.1 => {
+                *count >= self.login_limit.0
+            }
+            Some(_) => {
+                failures.remove(&client);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn record_login(&self, client: std::net::IpAddr, ok: bool) {
+        let mut failures = self.failures.lock().expect("login lock");
+        if ok {
+            failures.remove(&client);
+            return;
+        }
+        if failures.len() >= TRACKED_CLIENTS && !failures.contains_key(&client) {
+            let window = self.login_limit.1;
+            failures.retain(|_, (_, since)| since.elapsed() < window);
+            if failures.len() >= TRACKED_CLIENTS
+                && let Some(oldest) = failures
+                    .iter()
+                    .min_by_key(|(_, (_, since))| *since)
+                    .map(|(ip, _)| *ip)
+            {
+                failures.remove(&oldest);
+            }
+        }
+        let entry = failures
+            .entry(client)
+            .or_insert((0, std::time::Instant::now()));
+        if entry.1.elapsed() >= self.login_limit.1 {
+            *entry = (0, std::time::Instant::now());
+        }
+        entry.0 += 1;
     }
 
     /// Bytes currently stored in the repository namespace.
@@ -197,7 +259,21 @@ impl Repository {
     }
 
     pub fn handle(&self, request: &Request) -> Reply {
-        if !self.authorized(request.authorization) {
+        if let Some(client) = request.client
+            && self.throttled(client)
+        {
+            let mut reply = Reply::empty(429);
+            reply.headers.push((
+                "Retry-After",
+                self.login_limit.1.as_secs().max(1).to_string(),
+            ));
+            return reply;
+        }
+        let authorized = self.authorized(request.authorization);
+        if let Some(client) = request.client {
+            self.record_login(client, authorized);
+        }
+        if !authorized {
             let mut reply = Reply::empty(401);
             reply
                 .headers
@@ -481,6 +557,7 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
         }
     }
     let reply = repository.handle(&Request {
+        client: request.remote_addr().map(|address| address.ip()),
         method: &method,
         path,
         query,

@@ -170,8 +170,11 @@ restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:
   root). `--max-bytes` refuses uploads beyond a quota (HTTP 507); usage is
   recounted from storage at start.
 - **Limits.** Uploads are held in memory up to 129 MiB (restic packs default to
-  16 MiB). There is no rate limiting of failed logins yet. Repository *format*
-  compatibility is restic's: the server stores its objects opaquely.
+  16 MiB). Repository *format* compatibility is restic's: the server stores its
+  objects opaquely.
+- **Failed logins** are throttled per client address. After 10 failures within
+  60 seconds that address gets HTTP 429 (`Retry-After`), without its password
+  being checked, until the window passes. Other clients are unaffected.
 
 ## Local object storage
 
