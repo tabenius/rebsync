@@ -1,0 +1,18 @@
+{
+  "schema": "ragbaz.handoff-index/1",
+  "updatedOn": "2026-11-18",
+  "tasks": [
+    {
+      "slug": "android-release",
+      "title": "Release the Rebeqah Android APK",
+      "priority": "p1",
+      "status": "blocked",
+      "branch": "fix-ndk-home",
+      "handoff": ".handoff/android-release-20261118.md",
+      "mvh": ".handoff/android-release.mvh.json",
+      "owner": "human-owner",
+      "blockers": ["Find the keystore holding certificate b093a277", "GitHub Actions quota exhausted"],
+      "related": ["https://github.com/tabenius/rebsync/pull/8", "https://github.com/tabenius/ragbaz-common/pull/19"]
+    }
+  ]
+}

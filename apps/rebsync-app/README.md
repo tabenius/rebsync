@@ -93,6 +93,38 @@ which is gitignored, or the variables `RBQ_STORE_FILE`,
 `RBQ_STORE_PASSWORD`, `RBQ_KEY_ALIAS` and `RBQ_KEY_PASSWORD` for CI.
 Never commit a keystore. Without one, the release APK is unsigned.
 
+### One release path for every runner
+
+`scripts/release-android.sh` holds the whole release; the GitHub workflow only
+calls it, so a laptop, Chromebook, self-hosted runner or another CI runs the
+same steps:
+
+```bash
+git checkout v0.2.3                        # releases build from the exact tag
+export RBQ_KEYSTORE_PROPERTIES=/private/path/keystore.properties
+scripts/release-android.sh doctor          # every problem at once, each with its fix
+scripts/release-android.sh all             # build, verify, collect into dist/
+scripts/release-android.sh publish         # GitHub candidate release (gh + GH_TOKEN)
+```
+
+- **`doctor` runs before any build.** It checks, in seconds:
+  - the tag against the app version and `HEAD`, and a clean tree;
+  - the tools: Python 3.11+, JDK 17+ with keytool, Node, cargo and the Rust
+    Android targets;
+  - the SDK: platform, build-tools and NDK;
+  - free disk space;
+  - the signing key's certificate against `release/android-signing.json`,
+    so a wrong key fails before a long build.
+
+  On GitHub each problem also becomes an annotation.
+- **One place for toolchain versions.** NDK, build-tools, the platform and the
+  Rust targets are set at the top of the script, and `install-sdk` installs
+  exactly those.
+- **Sigstore needs a CI identity.** `sign-inventory` signs only where a
+  Sigstore OIDC identity exists (GitHub Actions). Elsewhere it says plainly
+  that the inventory is unsigned. The www.ragbaz R2 publisher accepts only a
+  CI-signed inventory.
+
 CI release: push an immutable tag `vX.Y.Z` (after bumping the app versions in
 `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and its lock).
 `.github/workflows/rebeqah-android.yml` builds, signs, verifies and publishes a
