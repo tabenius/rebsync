@@ -39,6 +39,8 @@ pub const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60)
 /// Upload memory held at once across all requests (default). Reservations
 /// count each request's buffer and the storage layer's copy of it.
 pub const UPLOAD_BUDGET_BYTES: u64 = 2 * MAX_UPLOAD_BYTES;
+/// Largest body accepted without Content-Length (chunked or unspecified).
+pub const MAX_UNDECLARED_BYTES: u64 = 64 * 1024;
 /// How long an upload waits for budget before 503.
 const UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Addresses tracked at most; the oldest windows are dropped beyond this.
@@ -647,20 +649,15 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
     }
     let mut _reservation = None;
     if method == "POST" {
-        // Without Content-Length or Transfer-Encoding the body is empty
-        // (HTTP/1.1; restic 0.18 sends `POST /?create=true` that way). A body
-        // of unknown length (chunked) is refused, so buffers are sized once.
-        let length = match declared {
-            Some(length) => length,
-            None if header(&request, "Transfer-Encoding").is_none() => 0,
-            None => {
-                send(request, Reply::empty(411));
-                return;
-            }
+        // restic declares Content-Length for every object; its empty create
+        // request can arrive chunked (its transport wraps bodies). Bodies of
+        // unknown length are therefore accepted only up to a small cap.
+        let (peak, exact) = match declared {
+            // Buffer sized once, plus the storage layer's copy.
+            Some(length) => (2 * length, Some(length)),
+            // A growing buffer may double, plus the copy.
+            None => (3 * MAX_UNDECLARED_BYTES, None),
         };
-        // Reserve peak memory: the request buffer plus the storage layer's
-        // copy of it.
-        let peak = 2 * length;
         match repository.reserve_upload(peak, UPLOAD_WAIT) {
             Some(reservation) => _reservation = Some(reservation),
             None => {
@@ -670,10 +667,20 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
                 return;
             }
         }
-        let mut buffer = vec![0u8; length as usize];
-        let read = std::io::Read::read_exact(request.as_reader(), &mut buffer).map(|()| buffer);
+        let read = match exact {
+            Some(length) => {
+                let mut buffer = vec![0u8; length as usize];
+                std::io::Read::read_exact(request.as_reader(), &mut buffer).map(|()| Some(buffer))
+            }
+            None => wire::read_bounded(request.as_reader(), MAX_UNDECLARED_BYTES),
+        };
         match read {
-            Ok(bytes) => body = bytes,
+            Ok(Some(bytes)) => body = bytes,
+            Ok(None) => {
+                // Too large without a declared length: ask for Content-Length.
+                send(request, Reply::empty(411));
+                return;
+            }
             Err(_) => {
                 let _ = request.respond(tiny_http::Response::empty(400));
                 return;

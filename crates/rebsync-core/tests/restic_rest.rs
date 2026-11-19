@@ -1013,7 +1013,7 @@ fn concurrent_failures_from_one_address_cannot_exceed_the_limit() {
 }
 
 #[test]
-fn uploads_must_declare_their_length() {
+fn bodies_without_declared_length_are_small_or_refused() {
     use std::io::{Read, Write};
     let f = Fixture::new();
     let options = ResticOptions {
@@ -1030,23 +1030,50 @@ fn uploads_must_declare_their_length() {
         let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
         std::thread::spawn(move || server.serve(repository, 1));
     }
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .unwrap();
-    write!(stream, "POST /config HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", f.auth).unwrap();
-    let mut first = [0u8; 12];
-    stream.read_exact(&mut first).unwrap();
-    assert_eq!(&first, b"HTTP/1.1 411");
+    let exchange = |request: String| {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut first = [0u8; 12];
+        stream.read_exact(&mut first).unwrap();
+        String::from_utf8_lossy(&first).into_owned()
+    };
+    let auth = &f.auth;
+    // restic's create: an empty chunked body (its transport wraps bodies).
+    assert_eq!(
+        exchange(format!(
+            "POST /?create=true HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    // Or no length headers at all: an empty body.
+    assert_eq!(
+        exchange(format!(
+            "POST /?create=true HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    // A small chunked object is accepted and stored.
+    assert_eq!(
+        exchange(format!(
+            "POST /config HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\ncfg\r\n0\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    assert_eq!(call(&repository, auth, "GET", "/config", b"").body, b"cfg");
+    // A large one without Content-Length is refused.
+    let big = restic_rest::MAX_UNDECLARED_BYTES as usize + 1;
+    let chunk = format!("{big:x}\r\n{}\r\n0\r\n\r\n", "a".repeat(big));
+    assert_eq!(
+        exchange(format!(
+            "POST /keys/{} HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunk}",
+            "0".repeat(64)
+        )),
+        "HTTP/1.1 411"
+    );
     assert_eq!(repository.uploads_in_flight(), 0);
-    // No length and no Transfer-Encoding is an empty body (restic 0.18's create).
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .unwrap();
-    write!(stream, "POST /?create=true HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nConnection: close\r\n\r\n", f.auth).unwrap();
-    stream.read_exact(&mut first).unwrap();
-    assert_eq!(&first, b"HTTP/1.1 200");
     server.unblock();
 }
 
