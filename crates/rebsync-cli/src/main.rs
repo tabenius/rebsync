@@ -140,6 +140,52 @@ enum Action {
         #[command(subcommand)]
         command: PeerAction,
     },
+    /// Enrolled removable drives: identify by marker, then push/pull layers.
+    Drive {
+        #[command(subcommand)]
+        command: DriveAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DriveAction {
+    /// Enroll the drive mounted at PATH: writes .rbq-drive.json there.
+    Enroll {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// Take over a drive already marked elsewhere, keeping its identity.
+        #[arg(long)]
+        adopt: bool,
+        /// Enroll even on the local object store's device (not independent).
+        #[arg(long)]
+        allow_same_device: bool,
+    },
+    /// Enrolled drives: where each is mounted now, and whether it is independent.
+    List {
+        /// Extra directories to look in besides mount points.
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Copy local layer objects the drive lacks (never overwrites).
+    Push {
+        name: String,
+        /// Layers (default: all).
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Copy the drive's layer objects this store lacks; verifies snapshots.
+    Pull {
+        name: String,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Forget an enrollment; the drive's marker and data are left untouched.
+    Forget { name: String },
 }
 #[derive(Subcommand)]
 enum PhoneAction {
@@ -984,9 +1030,89 @@ fn serve(_: &rebsync_core::Config, _: ()) -> Result<i32> {
     bail!("rbq was built without the serve feature; rebuild with --features serve")
 }
 
+/// Object prefixes for the named layers (every layer when none are named).
+#[cfg(feature = "peer")]
+fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
+    use rebsync_core::{layer, peer};
+    if layers.is_empty() {
+        return Ok(peer::default_prefixes());
+    }
+    layers
+        .iter()
+        .map(|l| {
+            if layer::LAYERS.contains(&l.as_str()) {
+                Ok(format!("{l}/"))
+            } else {
+                bail!("unknown layer {l}; use mneme, frog, agenda or git")
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "peer")]
+fn drive_action(config: &rebsync_core::Config, action: DriveAction, json: bool) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, drive, journal::Journal, peer};
+    let (value, code, report) = match action {
+        DriveAction::Enroll {
+            path,
+            name,
+            adopt,
+            allow_same_device,
+        } => {
+            let enrollment = drive::enroll(config, &path, &name, adopt, allow_same_device)?;
+            (serde_json::to_value(&enrollment)?, 0, false)
+        }
+        DriveAction::List { search } => (
+            serde_json::to_value(drive::status(config, &search)?)?,
+            0,
+            false,
+        ),
+        DriveAction::Forget { name } => (
+            serde_json::to_value(drive::forget(config, &name)?)?,
+            0,
+            false,
+        ),
+        DriveAction::Push {
+            name,
+            layers,
+            search,
+        } => {
+            let target = drive::open(config, &name, &search)?;
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let report = peer::push(&storage, &target, &layer_prefixes(&layers)?, &mut journal)?;
+            let code = if report.clean() { 0 } else { 2 };
+            (serde_json::to_value(report)?, code, true)
+        }
+        DriveAction::Pull {
+            name,
+            layers,
+            search,
+        } => {
+            let source = drive::open(config, &name, &search)?;
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let report = peer::pull(&storage, &source, &layer_prefixes(&layers)?, &mut journal)?;
+            let code = if report.clean() { 0 } else { 2 };
+            (serde_json::to_value(report)?, code, true)
+        }
+    };
+    if json || !report {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        ui::peer_report(&value, code);
+    }
+    Ok(code)
+}
+
+#[cfg(not(feature = "peer"))]
+fn drive_action(_: &rebsync_core::Config, _: DriveAction, _: bool) -> Result<i32> {
+    bail!("rbq was built without the peer feature; rebuild with --features peer")
+}
+
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
-    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer, transport};
+    use rebsync_core::{FsObjectStorage, journal::Journal, peer, transport};
     use std::sync::{Arc, atomic::AtomicBool};
 
     let connection = |args: &PeerTargetArgs| -> Result<(String, Option<String>)> {
@@ -1018,21 +1144,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
         }
     };
-    let prefixes = |layers_: &[String]| -> Result<Vec<String>> {
-        if layers_.is_empty() {
-            return Ok(peer::default_prefixes());
-        }
-        layers_
-            .iter()
-            .map(|l| {
-                if layers::LAYERS.contains(&l.as_str()) {
-                    Ok(format!("{l}/"))
-                } else {
-                    bail!("unknown layer {l}; use mneme, frog, agenda or git")
-                }
-            })
-            .collect()
-    };
+    let prefixes = layer_prefixes;
     let (value, code) = match action {
         PeerAction::Status { target } => {
             let remote = remote(&target)?;
@@ -1262,6 +1374,7 @@ fn entry() -> Result<i32> {
             return layer_action(&config.config, "agenda", command, cli.json);
         }
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
+        Some(Action::Drive { command }) => return drive_action(&config.config, command, cli.json),
         Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
         Some(Action::ResticServe(args)) => return restic_serve(&config.config, &args),
         Some(Action::Serve {

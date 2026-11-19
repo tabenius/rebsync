@@ -603,6 +603,36 @@ debugging/pairing on both devices and remove only tunnels you created. See
 [Android's ADB documentation](https://developer.android.com/tools/adb) and
 [ChromeOS Linux guidance](https://support.google.com/chromebook/answer/9145439).
 
+## Enrolled drives (`rbq drive`)
+
+USB sticks, SD cards and external disks become destinations only after you
+enroll them by name. rbq never writes to a removable drive it has not been
+told about.
+
+```bash
+rbq drive enroll /media/$USER/STICK --name stick   # writes STICK/.rbq-drive.json
+rbq drive push stick                                # layer objects → STICK/rbq-store
+rbq drive list                                      # where each drive is mounted now
+# on another machine:
+rbq drive enroll /media/$USER/STICK --name stick --adopt
+rbq drive pull stick                                # verifies received snapshots
+```
+
+- **Identity is the marker, not the path.** Enrollment writes a random drive ID
+  to `.rbq-drive.json` and records it, with the filesystem UUID where the
+  system exposes one. The drive is found again by scanning mount points (and
+  `--search DIR`) for that marker, wherever it is mounted. A copied marker on
+  a different filesystem is refused.
+- **Independent or not.** A drive on the same device as the local object store
+  is refused (`--allow-same-device` overrides it) and listed as
+  `"independent": false`: copying there does not protect against losing the disk.
+- **Exchange is the peer engine.** Push and pull use `rbq peer`'s additive,
+  never-overwriting exchange. Size conflicts are reported rather than copied
+  over, and pulled snapshots are verified before they are listed.
+- **Another machine** adopts a marked drive with `--adopt` and keeps its
+  identity. `rbq drive forget NAME` removes the enrollment but leaves the
+  drive's marker and data alone.
+
 ## Phone sync (Rebeqah)
 
 `rbq peer` exchanges layer objects with the Rebeqah Android app's
@@ -753,8 +783,10 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   discovery, scheduling or TLS yet.
 - Retention is manual (`rbq <layer> prune`); there is no scheduled policy, and
   pruning is not propagated to peers or restic.
-- No USB enrollment, Bluetooth or mesh autodiscovery. Phone sync remains a
-  manual HTTP connection or an explicit local-transport bridge.
+- Drives are enrolled and exchanged explicitly (`rbq drive`); there is no
+  automatic exchange on insertion, and no Bluetooth or mesh autodiscovery.
+  Phone sync remains a manual HTTP connection or an explicit local-transport
+  bridge.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.
 
