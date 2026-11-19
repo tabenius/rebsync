@@ -845,6 +845,27 @@ fn manifest_files(layer: &str, key: &str, value: &Value) -> Result<Vec<LayerFile
 /// Stream every chunk of one snapshot and check chunk and whole-file digests.
 /// Reads only; nothing is written.
 pub fn check_snapshot(storage: &dyn ObjectStorage, layer: &str, key: &str) -> SnapshotCheck {
+    match ObjectKey::parse(key).and_then(|key| storage.get(&key)) {
+        Ok(bytes) => check_snapshot_bytes(storage, layer, key, &bytes),
+        Err(error) => SnapshotCheck {
+            layer: layer.into(),
+            key: key.into(),
+            ok: false,
+            files: 0,
+            bytes: 0,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Validate a candidate manifest against stored chunks before publishing it.
+/// This avoids briefly exposing incomplete snapshots or needing rollback deletes.
+pub(crate) fn check_snapshot_bytes(
+    storage: &dyn ObjectStorage,
+    layer: &str,
+    key: &str,
+    bytes: &[u8],
+) -> SnapshotCheck {
     let mut check = SnapshotCheck {
         layer: layer.into(),
         key: key.into(),
@@ -854,8 +875,7 @@ pub fn check_snapshot(storage: &dyn ObjectStorage, layer: &str, key: &str) -> Sn
         error: None,
     };
     let result = (|| -> Result<(usize, u64)> {
-        let value: Value = serde_json::from_slice(&storage.get(&ObjectKey::parse(key)?)?)
-            .context("manifest is not JSON")?;
+        let value: Value = serde_json::from_slice(bytes).context("manifest is not JSON")?;
         let files = manifest_files(layer, key, &value)?;
         let mut total = 0;
         for file in &files {
