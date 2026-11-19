@@ -124,6 +124,11 @@ prunes backups or propagates deletions.
 
 ## Local object storage
 
+For account-private Dash storage, source-preserving **push/pull**, and read-only
+private artifact/Pieces/Frog/provenance navigation, see [the Linux Dash CLI
+guide](docs/DASH-CLI.md). These commands are separate from bare `rbq`'s backup
+plan and do not imply a production Dash rollout or a gift signature verifier.
+
 ### Private Dash repository access
 
 The separate `rbq repository` command accesses an opt-in, account-private

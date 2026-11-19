@@ -2,3 +2,4 @@
 *.jsonl
 /.rebeqah/
 __pycache__/
+/.wrangler/
