@@ -86,6 +86,21 @@ repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rbq"
 password_file = "/private/path/rbq-restic-password"
 ```
 
+To back up to another machine running `rbq restic-serve` (a restic REST
+peer), name the user in the URL and keep the HTTP password in an owner-only file:
+
+```toml
+[backup]
+repository = "rest:https://rbq@peer.local:8000/"
+rest_password_file = "/private/path/restic-http.pw"   # chmod 600
+cacert = "/private/path/peer-localhost.crt.pem"        # what restic-serve printed
+password_file = "/private/path/rbq-restic-password"
+```
+
+rbq hands the repository to restic through its environment, never its
+command line. A password written into `repository` itself is reported
+as an issue.
+
 Supply bucket-scoped `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the
 environment. Keep the password and an independently stored recovery copy outside
 all source repositories. No Cloudflare resources or credentials are automatically

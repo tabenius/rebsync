@@ -46,6 +46,15 @@ pub struct Git {
 pub struct Backup {
     pub repository: Option<String>,
     pub password_file: Option<PathBuf>,
+    /// PEM certificate restic must trust (`restic --cacert`), e.g. the one a
+    /// peer's `rbq restic-serve --tls-self-signed` prints.
+    #[serde(default)]
+    pub cacert: Option<PathBuf>,
+    /// Owner-only file holding the HTTP password of a `rest:` repository whose
+    /// URL names the user (`rest:https://USER@HOST:PORT/`). Keeps the secret
+    /// out of configuration files and process arguments.
+    #[serde(default)]
+    pub rest_password_file: Option<PathBuf>,
     pub datasets: Vec<Dataset>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,6 +169,8 @@ impl Config {
             backup: Backup {
                 repository: None,
                 password_file: None,
+                cacert: None,
+                rest_password_file: None,
                 datasets: vec![],
             },
             storage: StorageConfig::default(),
@@ -459,6 +470,12 @@ pub fn load_config_at(
         .collect();
     if let Some(path) = config.backup.password_file.take() {
         config.backup.password_file = Some(absolute(path, &config.rbq_home));
+    }
+    if let Some(path) = config.backup.cacert.take() {
+        config.backup.cacert = Some(absolute(path, &config.rbq_home));
+    }
+    if let Some(path) = config.backup.rest_password_file.take() {
+        config.backup.rest_password_file = Some(absolute(path, &config.rbq_home));
     }
     if let Some(path) = config.mneme.db.take() {
         config.mneme.db = Some(absolute(path, &config.rbq_home));

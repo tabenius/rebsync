@@ -83,6 +83,32 @@ pub fn ensure_private_file(
     Ok(())
 }
 
+/// Read a secret (password or token) from a file only its owner can read:
+/// at most 4 KiB of UTF-8, trailing newline removed.
+pub fn read_secret_file(path: &std::path::Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open secret file {}", path.display()))?;
+    ensure_private_file(path, &file.metadata()?)?;
+    let bytes =
+        read_bounded(file, 4096)?.with_context(|| format!("{} exceeds 4 KiB", path.display()))?;
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("{} must be UTF-8", path.display()))?;
+    Ok(text.trim_end_matches(['\n', '\r']).to_owned())
+}
+
+/// Percent-encode everything except RFC 3986 unreserved characters.
+pub fn percent_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 #[cfg(feature = "peer-http")]
 pub mod http {
     use std::time::Duration;

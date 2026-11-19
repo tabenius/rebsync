@@ -603,3 +603,163 @@ fn real_restic_over_tls_with_a_pinned_certificate() {
         false,
     );
 }
+
+fn private_file(path: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+#[test]
+fn rbq_backs_up_dirty_work_to_a_peer_over_pinned_tls_and_it_restores_off_machine() {
+    // Plan stage 2: encrypted preservation to a restic REST peer, restored elsewhere.
+    if !have_restic() {
+        eprintln!("skipped: restic not installed");
+        return;
+    }
+    let peer_dir = tempfile::tempdir().unwrap();
+    let (cert, key, _) =
+        rebsync_core::serve::certificate(&peer_dir.path().join("tls"), vec!["localhost".into()])
+            .unwrap();
+    let f = Fixture::new();
+    let server = Arc::new(
+        restic_rest::bind(&ResticOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            user: USER.into(),
+            password: PASSWORD.into(),
+            append_only: true,
+            max_bytes: None,
+            tls: Some((cert.clone(), key)),
+        })
+        .unwrap(),
+    );
+    let repository = Arc::new(f.repository(true, None));
+    {
+        let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
+        std::thread::spawn(move || server.serve(repository, 4));
+    }
+
+    // The machine being protected: dirty work in a Git repository.
+    let laptop = tempfile::tempdir().unwrap();
+    let home = laptop.path().join("home");
+    let project = home.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-q", "-b", "main"]);
+    std::fs::write(project.join("notes.txt"), "committed\n").unwrap();
+    git(&project, &["add", "notes.txt"]);
+    git(&project, &["commit", "-qm", "one"]);
+    std::fs::write(project.join("notes.txt"), "uncommitted edit\n").unwrap();
+    std::fs::write(project.join("draft.md"), "untracked draft\n").unwrap();
+
+    let secrets = laptop.path().join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    private_file(&secrets.join("http"), &format!("{PASSWORD}\n"));
+    private_file(&secrets.join("restic"), "repository-encryption-password\n");
+    let cacert = secrets.join("peer.pem");
+    std::fs::write(&cacert, &cert).unwrap();
+
+    let mut config = rebsync_core::Config::defaults(home.clone());
+    config.backup.repository = Some(format!("rest:https://{USER}@localhost:{}/", server.port));
+    config.backup.rest_password_file = Some(secrets.join("http"));
+    config.backup.password_file = Some(secrets.join("restic"));
+    config.backup.cacert = Some(cacert.clone());
+    config.git.fetch = false;
+    config.git.push = false;
+
+    rebsync_core::sync::initialize_backup(&config).unwrap();
+    let summary = rebsync_core::run(&config, rebsync_core::RunOptions { apply: true }).unwrap();
+    let outcome = &summary.repositories[0];
+    let snapshot = outcome
+        .backup_snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("backup failed: {:?}", outcome.issues));
+    assert!(!summary.issues.iter().any(|i| i.contains("inline password")));
+    let journal = std::fs::read_to_string(&summary.journal).unwrap();
+    assert!(
+        !journal.contains(PASSWORD),
+        "the HTTP password must never reach the journal"
+    );
+
+    // Restore on another machine: only the URL, the two secrets and the CA.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let restore = Command::new("restic")
+        .env(
+            "RESTIC_REPOSITORY",
+            format!("rest:https://{USER}:{PASSWORD}@localhost:{}/", server.port),
+        )
+        .args(["--no-cache", "--cacert"])
+        .arg(&cacert)
+        .arg("--password-file")
+        .arg(secrets.join("restic"))
+        .args(["restore", &snapshot, "--target"])
+        .arg(elsewhere.path())
+        .env("HOME", elsewhere.path())
+        .output()
+        .unwrap();
+    assert!(
+        restore.status.success(),
+        "restore: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+    let archive = walkdir::WalkDir::new(elsewhere.path())
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name() == "worktree.tar")
+        .expect("worktree archive restored")
+        .into_path();
+    let extracted = elsewhere.path().join("extracted");
+    std::fs::create_dir(&extracted).unwrap();
+    assert!(
+        Command::new("tar")
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&extracted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        std::fs::read_to_string(extracted.join("notes.txt")).unwrap(),
+        "uncommitted edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(extracted.join("draft.md")).unwrap(),
+        "untracked draft\n"
+    );
+
+    // Misconfigurations are refused before restic runs.
+    let mut no_user = config.clone();
+    no_user.backup.repository = Some(format!("rest:https://localhost:{}/", server.port));
+    let error = rebsync_core::sync::initialize_backup(&no_user)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("needs the user"), "{error}");
+    let mut inline = config.clone();
+    inline.backup.repository = Some(format!("rest:https://{USER}:x@localhost:{}/", server.port));
+    assert!(
+        rebsync_core::sync::initialize_backup(&inline)
+            .unwrap_err()
+            .to_string()
+            .contains("already carries a password")
+    );
+    inline.backup.rest_password_file = None;
+    let summary = rebsync_core::run(&inline, rebsync_core::RunOptions { apply: false }).unwrap();
+    assert!(
+        summary.issues.iter().any(|i| i.contains("inline password")),
+        "{:?}",
+        summary.issues
+    );
+    server.unblock();
+}
