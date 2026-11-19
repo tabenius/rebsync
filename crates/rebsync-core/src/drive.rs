@@ -292,6 +292,14 @@ fn locate(enrollment: &Enrollment, candidates: &[PathBuf]) -> std::result::Resul
                             path.display()
                         ));
                     }
+                    // A UUID was recorded: one that cannot be read now (a copied
+                    // marker on tmpfs, say) is not proof of identity.
+                    (Some(expected), None) => {
+                        problem = Some(format!(
+                            "{} carries this drive's marker but its filesystem UUID cannot be read to confirm the enrolled {expected}",
+                            path.display()
+                        ));
+                    }
                     _ => return Ok(path),
                 }
             }
@@ -326,6 +334,30 @@ pub fn status(config: &Config, candidates: &[PathBuf]) -> Result<Vec<DriveStatus
         .collect())
 }
 
+/// The drive's object store directory, refusing one that is a symlink or
+/// resolves outside the drive: copies there would not be on the drive.
+fn store_dir(root: &Path) -> Result<PathBuf> {
+    let store = root.join(STORE_DIR);
+    match std::fs::symlink_metadata(&store) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "{} must be a directory on the drive, not a symlink",
+                store.display()
+            );
+            let resolved = std::fs::canonicalize(&store)?;
+            ensure!(
+                resolved.starts_with(std::fs::canonicalize(root)?),
+                "{} resolves outside the drive",
+                store.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect drive store"),
+    }
+    Ok(store)
+}
+
 /// Open an enrolled, present, verified drive's object store.
 pub fn open(config: &Config, name: &str, candidates: &[PathBuf]) -> Result<DrivePeer> {
     let enrollment = enrolled(config)?.remove(name).with_context(|| {
@@ -333,8 +365,7 @@ pub fn open(config: &Config, name: &str, candidates: &[PathBuf]) -> Result<Drive
     })?;
     let root = locate(&enrollment, candidates)
         .map_err(|problem| anyhow::anyhow!("drive {name}: {problem}"))?;
-    let storage =
-        FsObjectStorage::open(root.join(STORE_DIR)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let storage = FsObjectStorage::open(store_dir(&root)?).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(DrivePeer {
         base: format!("drive:{name}"),
         independent: independent(config, &root),
@@ -351,8 +382,8 @@ pub fn coverage(config: &Config, prefixes: &[String]) -> Result<(Value, Vec<Stri
     if !config.storage.root.is_dir() {
         return Ok((Value::Null, Vec::new()));
     }
-    let local_store =
-        FsObjectStorage::open(&config.storage.root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_store = FsObjectStorage::open_read_only(&config.storage.root)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut local = BTreeMap::new();
     for prefix in prefixes {
         for meta in local_store
@@ -377,10 +408,18 @@ pub fn coverage(config: &Config, prefixes: &[String]) -> Result<(Value, Vec<Stri
             }
         };
         let independent = independent(config, &root);
-        let store = root.join(STORE_DIR);
+        let store = match store_dir(&root) {
+            Ok(store) => store,
+            Err(problem) => {
+                issues.push(format!("drive {}: {problem}", enrollment.name));
+                drives.push(json!({"name": enrollment.name, "present": true, "problem": problem.to_string()}));
+                continue;
+            }
+        };
         let mut remote = BTreeMap::new();
         if store.is_dir() {
-            let drive = FsObjectStorage::open(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let drive =
+                FsObjectStorage::open_read_only(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
             for prefix in prefixes {
                 for meta in drive
                     .list_prefix(prefix, 0)

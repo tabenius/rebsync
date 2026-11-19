@@ -147,7 +147,7 @@ fn pem_body(pem: &[u8]) -> Option<Vec<u8>> {
     crate::wire::base64_decode(&body).filter(|out| !out.is_empty())
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|h| h.trim().to_owned())

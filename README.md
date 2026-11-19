@@ -170,11 +170,19 @@ restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:
   root). `--max-bytes` refuses uploads beyond a quota (HTTP 507); usage is
   recounted from storage at start.
 - **Limits.** Each upload is held in memory, up to 129 MiB (restic packs
-  default to 16 MiB). Bodies are read only after authentication, and only
-  within a server-wide 256 MiB in-flight budget. An upload that can't get
-  budget within 30 seconds gets 503 with `Retry-After`, so memory stays bounded
-  however many clients connect. Repository *format* compatibility is restic's: the server stores its
-  objects opaquely.
+  default to 16 MiB), and must declare its `Content-Length` (restic always
+  does; others get 411). Bodies are read only after authentication. Each
+  upload reserves twice its size, for the buffer plus the storage layer's
+  copy, from a server-wide budget of two maximum uploads (about 258 MiB). An
+  upload that can't get budget within 30 seconds gets 503 with `Retry-After`.
+  Repository *format* compatibility is restic's: the server stores its objects
+  opaquely. On a filesystem without hard links (FAT/exFAT), where atomic
+  create-if-absent isn't available, the server serializes its own creates;
+  don't run two servers on one such store.
+- **Certificate names.** `--tls-self-signed` covers localhost, the listen
+  address, this machine's name (`NAME` and `NAME.local`) when listening on a
+  wildcard address, and every `--tls-name NAME`. Each set of names gets its
+  own certificate path.
 - **Failed logins** are throttled per client address. After 10 failures within
   60 seconds that address gets HTTP 429 (`Retry-After`), without its password
   being checked, until the window passes. Other clients are unaffected.
@@ -639,11 +647,14 @@ rbq drive enroll /media/$USER/STICK --name stick --adopt
 rbq drive pull stick                                # verifies received snapshots
 ```
 
+- **The store must be on the drive.** An `rbq-store` that is a symlink, or
+  that resolves outside the drive, is refused.
 - **Identity is the marker, not the path.** Enrollment writes a random drive ID
   to `.rbq-drive.json` and records it, with the filesystem UUID where the
   system exposes one. The drive is found again by scanning mount points (and
   `--search DIR`) for that marker, wherever it is mounted. A copied marker on
-  a different filesystem is refused.
+  a different filesystem is refused, as is one whose filesystem UUID can't be
+  read when a UUID was recorded at enrollment.
 - **Independent or not.** A drive on the same device as the local object store
   is refused (`--allow-same-device` overrides it) and listed as
   `"independent": false`: copying there does not protect against losing the disk.

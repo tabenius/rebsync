@@ -270,3 +270,85 @@ fn coverage_reports_what_is_not_yet_on_an_independent_drive() {
         "{issues:?}"
     );
 }
+
+#[test]
+fn a_symlinked_store_and_an_unverifiable_uuid_are_refused() {
+    let Some(stick) = other_filesystem() else {
+        return eprintln!("skipped: no second filesystem");
+    };
+    let home = tempfile::tempdir().unwrap();
+    let config = config(home.path());
+    publish(&config, b"data");
+    drive::enroll(&config, stick.path(), "usb", false, false).unwrap();
+    // rbq-store pointing back at the local object store is not a copy on the drive.
+    std::os::unix::fs::symlink(&config.storage.root, stick.path().join(STORE_DIR)).unwrap();
+    let error = drive::open(&config, "usb", &[])
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("not a symlink"), "{error}");
+    let (value, issues) = drive::coverage(&config, &peer::default_prefixes()).unwrap();
+    assert_eq!(value["covered_by_drive"], false);
+    assert!(
+        issues.iter().any(|i| i.contains("not a symlink")),
+        "{issues:?}"
+    );
+    std::fs::remove_file(stick.path().join(STORE_DIR)).unwrap();
+
+    // A recorded filesystem UUID that cannot be read now does not verify.
+    let registry = home.path().join(".rebeqah/rbq/drives.json");
+    let mut drives: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
+    drives["usb"]["filesystem_uuid"] = json!("0000-ENROLLED");
+    std::fs::write(&registry, serde_json::to_vec(&drives).unwrap()).unwrap();
+    let error = drive::open(&config, "usb", &[])
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("cannot be read"), "{error}");
+}
+
+#[test]
+fn coverage_leaves_both_stores_untouched() {
+    let Some(stick) = other_filesystem() else {
+        return eprintln!("skipped: no second filesystem");
+    };
+    let home = tempfile::tempdir().unwrap();
+    let config = config(home.path());
+    publish(&config, b"data");
+    drive::enroll(&config, stick.path(), "usb", false, false).unwrap();
+    let target = drive::open(&config, "usb", &[]).unwrap();
+    let local = FsObjectStorage::open(&config.storage.root).unwrap();
+    peer::push(
+        &local,
+        &target,
+        &peer::default_prefixes(),
+        &mut Journal::open(&config.rbq_home).unwrap(),
+    )
+    .unwrap();
+    let snapshot = |dir: &Path| {
+        let mut entries: Vec<_> = walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|e| {
+                (
+                    e.path().to_path_buf(),
+                    e.metadata().unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    };
+    let before = (
+        snapshot(&config.storage.root),
+        snapshot(&stick.path().join(STORE_DIR)),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    drive::coverage(&config, &peer::default_prefixes()).unwrap();
+    let after = (
+        snapshot(&config.storage.root),
+        snapshot(&stick.path().join(STORE_DIR)),
+    );
+    assert_eq!(before, after, "no files created, removed or touched");
+}
