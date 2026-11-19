@@ -261,3 +261,67 @@ fn out_of_scope_and_nonadvancing_pagination_are_rejected() {
     );
     assert!(repository_sync::sources(&remote).is_err());
 }
+
+#[test]
+fn pull_preserves_conflicting_local_bytes_and_rejects_public_destinations() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = FsObjectStorage::open(dir.path().join("local")).unwrap();
+    snapshot(&local, dir.path(), b"original");
+    let remote = Memory::default();
+    let source = Source::new("laptop", "Laptop").unwrap();
+    let layers = vec!["frog".into()];
+    repository_sync::push(&remote, &local, &source, &layers).unwrap();
+    let destination = FsObjectStorage::open(dir.path().join("destination")).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"original"));
+    let key = ObjectKey::parse(&format!(
+        "sources/v1/laptop/objects/frog/v1/chunks/sha256/{}/{digest}",
+        &digest[..2]
+    ))
+    .unwrap();
+    destination.put_if_absent(&key, b"conflict").unwrap();
+    let report = repository_sync::pull(&remote, &destination, "laptop", &layers).unwrap();
+    assert!(!report.complete);
+    assert_eq!(report.conflicts.len(), 1);
+    assert!(!report.rejected.is_empty());
+    assert_eq!(destination.get(&key).unwrap(), b"conflict");
+    assert!(
+        !destination
+            .list_prefix("sources/v1/", 0)
+            .unwrap()
+            .iter()
+            .any(|meta| meta.key.contains("/snapshots/"))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("public");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let public = FsObjectStorage::open(&path).unwrap();
+        assert!(repository_sync::pull(&remote, &public, "laptop", &layers).is_err());
+        assert!(public.list_prefix("", 0).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn oversized_export_chunks_require_explicit_owner_reexport_not_silent_rechunking() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = FsObjectStorage::open(dir.path().join("local")).unwrap();
+    let bytes = vec![b'x'; 262145];
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let key =
+        ObjectKey::parse(&format!("frog/v1/chunks/sha256/{}/{digest}", &digest[..2])).unwrap();
+    storage.put_if_absent(&key, &bytes).unwrap();
+    let remote = Memory::default();
+    let report = repository_sync::push(
+        &remote,
+        &storage,
+        &Source::new("laptop", "Laptop").unwrap(),
+        &["frog".into()],
+    )
+    .unwrap();
+    assert!(!report.complete);
+    assert_eq!(report.rejected.len(), 1);
+    assert!(remote.objects.borrow().is_empty());
+    assert_eq!(storage.get(&key).unwrap(), bytes);
+}
