@@ -359,6 +359,79 @@ fn plain_http_is_refused_off_loopback() {
     assert!(error.contains("requires TLS"), "{error}");
 }
 
+/// One raw HTTP/1.1 exchange; returns the status line and headers.
+fn raw_get(port: u16, path: &str, range: &str) -> (String, Vec<(String, String)>, usize) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nRange: {range}\r\nConnection: close\r\n\r\n",
+        basic(USER, PASSWORD)
+    )
+    .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&response[..split]).into_owned();
+    let mut lines = head.split("\r\n");
+    let status = lines.next().unwrap().to_owned();
+    let headers = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_owned()))
+        .collect();
+    (status, headers, response.len() - split - 4)
+}
+
+#[test]
+fn large_range_replies_carry_content_length_not_chunked_encoding() {
+    // restic 0.18 rejects a range read whose Content-Length differs from the
+    // requested length; tiny_http chunks bodies over 32 KiB unless told not to.
+    let f = Fixture::new();
+    let options = ResticOptions {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+        append_only: true,
+        max_bytes: None,
+        tls: None,
+    };
+    let server = Arc::new(restic_rest::bind(&options).unwrap());
+    let repository = Arc::new(f.repository(true, None));
+    {
+        let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
+        std::thread::spawn(move || server.serve(repository, 1));
+    }
+    let pack: Vec<u8> = (0..300_000u32).map(|n| (n % 251) as u8).collect();
+    let id = sha(&pack);
+    assert_eq!(
+        call(&repository, &f.auth, "POST", &format!("/data/{id}"), &pack).status,
+        200
+    );
+    let (status, headers, body) = raw_get(server.port, &format!("/data/{id}"), "bytes=1000-200999");
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert!(status.contains("206"), "{status}");
+    assert_eq!(header("content-length").as_deref(), Some("200000"));
+    assert_eq!(header("transfer-encoding"), None);
+    assert_eq!(
+        header("content-range").as_deref(),
+        Some("bytes 1000-200999/300000")
+    );
+    assert_eq!(body, 200_000);
+    let (status, headers, _) = raw_get(server.port, &format!("/data/{id}"), "bytes=300000-");
+    assert!(status.contains("416"), "{status}");
+    assert!(
+        headers
+            .iter()
+            .any(|(n, v)| n == "content-range" && v == "bytes */300000")
+    );
+    server.unblock();
+}
+
 fn have_restic() -> bool {
     Command::new("restic")
         .arg("version")

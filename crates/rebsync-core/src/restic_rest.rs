@@ -249,15 +249,32 @@ impl Repository {
             reply.head_length = Some(meta.size);
             return reply;
         }
-        let (status, result) = match range {
+        let (status, result, content_range) = match range {
             Some(header) => match parse_range(header, meta.size) {
-                Some(range) => (206, self.storage.get_range(key, range)),
-                None => return Reply::empty(416),
+                Some(range) => {
+                    let content_range =
+                        format!("bytes {}-{}/{}", range.start, range.end - 1, meta.size);
+                    (206, self.storage.get_range(key, range), Some(content_range))
+                }
+                None => {
+                    let mut reply = Reply::empty(416);
+                    reply
+                        .headers
+                        .push(("Content-Range", format!("bytes */{}", meta.size)));
+                    return reply;
+                }
             },
-            None => (200, self.storage.get(key)),
+            None => (200, self.storage.get(key), None),
         };
         match result {
-            Ok(bytes) => Reply::bytes(status, "application/octet-stream", bytes),
+            Ok(bytes) => {
+                let mut reply = Reply::bytes(status, "application/octet-stream", bytes);
+                reply.headers.push(("Accept-Ranges", "bytes".into()));
+                if let Some(content_range) = content_range {
+                    reply.headers.push(("Content-Range", content_range));
+                }
+                reply
+            }
             Err(error) => Reply::empty(storage_status(&error)),
         }
     }
@@ -488,12 +505,16 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
         .head_length
         .map(|n| n as usize)
         .unwrap_or(reply.body.len());
+    // Always send Content-Length: restic 0.18 rejects a range read whose
+    // Content-Length differs from the requested length, and tiny_http would
+    // otherwise switch bodies over 32 KiB to chunked encoding.
     let response = tiny_http::Response::new(
         tiny_http::StatusCode(reply.status),
         headers,
         std::io::Cursor::new(reply.body),
         Some(length),
         None,
-    );
+    )
+    .with_chunked_threshold(usize::MAX);
     let _ = request.respond(response);
 }
