@@ -77,6 +77,7 @@ fn call_with(
 ) -> Reply {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     repository.handle(&Request {
+        client: None,
         method,
         path,
         query,
@@ -107,6 +108,7 @@ fn every_request_needs_the_right_credentials() {
         );
     }
     let no_header = repo.handle(&Request {
+        client: None,
         method: "GET",
         path: "/config",
         query: "",
@@ -762,4 +764,72 @@ fn rbq_backs_up_dirty_work_to_a_peer_over_pinned_tls_and_it_restores_off_machine
         summary.issues
     );
     server.unblock();
+}
+
+#[test]
+fn failed_logins_are_throttled_per_client_without_checking_the_password() {
+    let f = Fixture::new();
+    let repo = f
+        .repository(true, None)
+        .with_login_limit(3, std::time::Duration::from_millis(300));
+    let (attacker, other): (std::net::IpAddr, std::net::IpAddr) =
+        ("192.0.2.7".parse().unwrap(), "192.0.2.8".parse().unwrap());
+    let ask = |client, auth: &str| {
+        repo.handle(&Request {
+            client: Some(client),
+            method: "GET",
+            path: "/config",
+            query: "",
+            authorization: Some(auth),
+            accept: None,
+            range: None,
+            body: b"",
+        })
+        .status
+    };
+    let wrong = basic(USER, "wrong-password-xxxxxxx");
+    for _ in 0..3 {
+        assert_eq!(ask(attacker, &wrong), 401);
+    }
+    assert_eq!(ask(attacker, &wrong), 429);
+    // Even the right password waits out the window: no oracle while throttled.
+    assert_eq!(ask(attacker, &f.auth), 429);
+    // Other clients are unaffected.
+    assert_eq!(ask(other, &f.auth), 404);
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(
+        ask(attacker, &f.auth),
+        404,
+        "window expired, correct credentials work"
+    );
+    // A success clears the client's failures.
+    for _ in 0..2 {
+        assert_eq!(ask(attacker, &wrong), 401);
+    }
+    assert_eq!(ask(attacker, &f.auth), 404);
+    for _ in 0..2 {
+        assert_eq!(ask(attacker, &wrong), 401);
+    }
+    assert_eq!(
+        ask(attacker, &wrong),
+        401,
+        "count restarted after the success"
+    );
+    let throttled = repo.handle(&Request {
+        client: Some(attacker),
+        method: "GET",
+        path: "/config",
+        query: "",
+        authorization: Some(&wrong),
+        accept: None,
+        range: None,
+        body: b"",
+    });
+    assert_eq!(throttled.status, 429);
+    assert!(
+        throttled
+            .headers
+            .iter()
+            .any(|(name, _)| *name == "Retry-After")
+    );
 }
