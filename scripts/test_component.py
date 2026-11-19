@@ -3,9 +3,9 @@
 import argparse
 import copy
 import json
+import tomllib
 from pathlib import Path
 import unittest
-import tomllib
 
 from jsonschema import ValidationError
 
@@ -59,10 +59,7 @@ if __name__ == "__main__":
     parser.add_argument("--schema", type=Path, required=True)
     args = parser.parse_args()
     SCHEMA = json.loads(args.schema.read_text())
-    MANIFEST = json.loads(
-        (Path(__file__).resolve().parents[1] / "ragbaz.component.json").read_text()
-    )
-    VERSION = tomllib.loads(
-        (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text()
-    )["workspace"]["package"]["version"]
+    ROOT = Path(__file__).resolve().parents[1]
+    MANIFEST = json.loads((ROOT / "ragbaz.component.json").read_text())
+    VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     unittest.main(argv=[__file__])
