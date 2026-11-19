@@ -18,8 +18,8 @@ fn announces_on_the_network_and_is_discoverable_by_mdns() {
     let mdns = running
         .announcements
         .iter()
-        .find(|a| a.mechanism == "mdns" || a.mechanism == "avahi");
-    let Some(mdns) = mdns.filter(|a| a.ok) else {
+        .find(|a| a.ok && (a.mechanism == "mdns" || a.mechanism == "avahi"));
+    let Some(mdns) = mdns else {
         eprintln!(
             "multicast unavailable here; announcements: {:?}",
             running.announcements
