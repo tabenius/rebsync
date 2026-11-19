@@ -854,8 +854,8 @@ fn upload_memory_is_reserved_from_a_server_wide_budget() {
     drop((second, third));
     assert_eq!(repo.uploads_in_flight(), 0);
     // A waiting upload proceeds as soon as another finishes.
-    let repo = Arc::new(f.repository(true, None).with_upload_budget(max));
-    let held = repo.reserve_upload(max, quick).unwrap();
+    let repo = Arc::new(f.repository(true, None).with_upload_budget(2 * max));
+    let held = repo.reserve_upload(2 * max, quick).unwrap();
     let waiter = {
         let repo = Arc::clone(&repo);
         std::thread::spawn(move || {
@@ -906,4 +906,223 @@ fn unauthenticated_uploads_are_refused_before_their_body_is_read() {
     assert_eq!(&first, b"HTTP/1.1 401");
     assert_eq!(repository.uploads_in_flight(), 0, "no memory was reserved");
     server.unblock();
+}
+
+#[test]
+fn an_identical_retry_succeeds_even_when_the_quota_is_full() {
+    let f = Fixture::new();
+    let pack = b"0123456789".to_vec();
+    let repo = f.repository(true, Some(pack.len() as u64));
+    let path = format!("/data/{}", sha(&pack));
+    assert_eq!(call(&repo, &f.auth, "POST", &path, &pack).status, 200);
+    assert_eq!(
+        call(&repo, &f.auth, "POST", &path, &pack).status,
+        200,
+        "lost-response retry"
+    );
+    let other = b"x".to_vec();
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "POST",
+            &format!("/data/{}", sha(&other)),
+            &other
+        )
+        .status,
+        507
+    );
+}
+
+#[test]
+fn creates_are_serialized_where_storage_lacks_atomic_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage: Arc<dyn ObjectStorage> = Arc::new(
+        FsObjectStorage::open(dir.path().join("store"))
+            .unwrap()
+            .without_hard_links(),
+    );
+    assert!(!storage.capabilities().atomic_create_if_absent);
+    let repo = Arc::new(Repository::new(Arc::clone(&storage), USER, PASSWORD, true, None).unwrap());
+    let auth = basic(USER, PASSWORD);
+    let statuses: Vec<(u16, Vec<u8>)> = std::thread::scope(|scope| {
+        (0..16)
+            .map(|n| {
+                let (repo, auth) = (Arc::clone(&repo), auth.clone());
+                scope.spawn(move || {
+                    let body = format!("config {n}").into_bytes();
+                    (call(&repo, &auth, "POST", "/config", &body).status, body)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+    let winners: Vec<_> = statuses
+        .iter()
+        .filter(|(status, _)| *status == 200)
+        .collect();
+    assert_eq!(winners.len(), 1, "{statuses:?}");
+    assert!(
+        statuses
+            .iter()
+            .all(|(status, _)| matches!(status, 200 | 403))
+    );
+    assert_eq!(call(&repo, &auth, "GET", "/config", b"").body, winners[0].1);
+}
+
+#[test]
+fn concurrent_failures_from_one_address_cannot_exceed_the_limit() {
+    let f = Fixture::new();
+    let repo = Arc::new(
+        f.repository(true, None)
+            .with_login_limit(3, std::time::Duration::from_secs(60)),
+    );
+    let client: std::net::IpAddr = "192.0.2.9".parse().unwrap();
+    let wrong = basic(USER, "wrong-password-xxxxxxx");
+    let statuses: Vec<u16> = std::thread::scope(|scope| {
+        (0..32)
+            .map(|_| {
+                let (repo, wrong) = (Arc::clone(&repo), wrong.clone());
+                scope.spawn(move || {
+                    repo.handle(&Request {
+                        client: Some(client),
+                        method: "GET",
+                        path: "/config",
+                        query: "",
+                        authorization: Some(&wrong),
+                        accept: None,
+                        range: None,
+                        body: b"",
+                    })
+                    .status
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 401).count(),
+        3,
+        "{statuses:?}"
+    );
+    assert_eq!(statuses.iter().filter(|s| **s == 429).count(), 29);
+}
+
+#[test]
+fn bodies_without_declared_length_are_small_or_refused() {
+    use std::io::{Read, Write};
+    let f = Fixture::new();
+    let options = ResticOptions {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+        append_only: true,
+        max_bytes: None,
+        tls: None,
+    };
+    let server = Arc::new(restic_rest::bind(&options).unwrap());
+    let repository = Arc::new(f.repository(true, None));
+    {
+        let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
+        std::thread::spawn(move || server.serve(repository, 1));
+    }
+    let exchange = |request: String| {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut first = [0u8; 12];
+        stream.read_exact(&mut first).unwrap();
+        String::from_utf8_lossy(&first).into_owned()
+    };
+    let auth = &f.auth;
+    // restic's create: an empty chunked body (its transport wraps bodies).
+    assert_eq!(
+        exchange(format!(
+            "POST /?create=true HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    // Or no length headers at all: an empty body.
+    assert_eq!(
+        exchange(format!(
+            "POST /?create=true HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    // A small chunked object is accepted and stored.
+    assert_eq!(
+        exchange(format!(
+            "POST /config HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\ncfg\r\n0\r\n\r\n"
+        )),
+        "HTTP/1.1 200"
+    );
+    assert_eq!(call(&repository, auth, "GET", "/config", b"").body, b"cfg");
+    // A large one without Content-Length is refused.
+    let big = restic_rest::MAX_UNDECLARED_BYTES as usize + 1;
+    let chunk = format!("{big:x}\r\n{}\r\n0\r\n\r\n", "a".repeat(big));
+    assert_eq!(
+        exchange(format!(
+            "POST /keys/{} HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunk}",
+            "0".repeat(64)
+        )),
+        "HTTP/1.1 411"
+    );
+    // The reservation is released when the handler returns, just after it
+    // has answered: wait briefly instead of racing the server thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while repository.uploads_in_flight() != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(repository.uploads_in_flight(), 0);
+    server.unblock();
+}
+
+#[test]
+fn self_signed_certificates_cover_the_requested_names() {
+    let home = tempfile::tempdir().unwrap();
+    let config = rebsync_core::Config::defaults(home.path().to_path_buf());
+    let (a, _, path_a, _) = restic_rest::self_signed_certificate(
+        &config,
+        vec!["localhost".into(), "backup.example".into()],
+    )
+    .unwrap();
+    let (_, _, path_b, _) =
+        restic_rest::self_signed_certificate(&config, vec!["localhost".into()]).unwrap();
+    assert_ne!(
+        path_a, path_b,
+        "a different name set gets its own certificate"
+    );
+    let again = restic_rest::self_signed_certificate(
+        &config,
+        vec!["backup.example".into(), "localhost".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        again.2, path_a,
+        "same names (any order) reuse the certificate"
+    );
+    let Ok(output) = Command::new("openssl")
+        .args(["x509", "-noout", "-ext", "subjectAltName"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(&a)?;
+            child.wait_with_output()
+        })
+    else {
+        return eprintln!("skipped SAN check: openssl not installed");
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("DNS:backup.example") && text.contains("DNS:localhost"),
+        "{text}"
+    );
 }

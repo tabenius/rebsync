@@ -300,6 +300,43 @@ mod object_store_fs {
             })
         }
 
+        /// Open an existing root for reading only: never creates or chmods the
+        /// root and skips the hard-link write probe, so inspecting a store
+        /// (for example a drive during a dry run) changes nothing on disk.
+        /// Writes through this handle are not create-if-absent atomic.
+        pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, StorageError> {
+            let requested = root.as_ref();
+            let canonical = std::fs::canonicalize(requested).map_err(|error| {
+                StorageError::Unavailable(format!(
+                    "resolve storage root {}: {error}",
+                    requested.display()
+                ))
+            })?;
+            if !canonical.is_dir() {
+                return Err(StorageError::Unavailable(format!(
+                    "storage root {} is not a directory",
+                    requested.display()
+                )));
+            }
+            let owner_only = std::fs::metadata(&canonical)
+                .map(|meta| crate::wire::is_owner_only(&meta))
+                .unwrap_or(false);
+            let store =
+                LocalFileSystem::new_with_prefix(&canonical).map_err(map_object_store_error)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|error| {
+                    StorageError::Unavailable(format!("create storage runtime: {error}"))
+                })?;
+            Ok(Self {
+                root: canonical,
+                store: Arc::new(store),
+                runtime,
+                hard_links: false,
+                owner_only,
+            })
+        }
+
         /// Test hook: behave as on a filesystem without hard links.
         #[doc(hidden)]
         pub fn without_hard_links(mut self) -> Self {

@@ -36,8 +36,11 @@ const V1: &str = "application/vnd.x.restic.rest.v1";
 /// Failed logins allowed per client address within [`LOGIN_WINDOW`].
 pub const LOGIN_FAILURES: u32 = 10;
 pub const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-/// Upload bytes buffered at once across all requests (default).
-pub const UPLOAD_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+/// Upload memory held at once across all requests (default). Reservations
+/// count each request's buffer and the storage layer's copy of it.
+pub const UPLOAD_BUDGET_BYTES: u64 = 2 * MAX_UPLOAD_BYTES;
+/// Largest body accepted without Content-Length (chunked or unspecified).
+pub const MAX_UNDECLARED_BYTES: u64 = 64 * 1024;
 /// How long an upload waits for budget before 503.
 const UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Addresses tracked at most; the oldest windows are dropped beyond this.
@@ -109,6 +112,7 @@ pub struct Repository {
     upload_budget: u64,
     in_flight: Mutex<u64>,
     released: std::sync::Condvar,
+    create_lock: Mutex<()>,
 }
 
 /// Upload memory reserved from the server-wide budget; released on drop.
@@ -209,12 +213,14 @@ impl Repository {
             upload_budget: UPLOAD_BUDGET_BYTES,
             in_flight: Mutex::new(0),
             released: std::sync::Condvar::new(),
+            create_lock: Mutex::new(()),
         })
     }
 
-    /// Override the server-wide in-flight upload budget (at least one upload).
+    /// Override the server-wide in-flight upload budget (at least one
+    /// maximum-size upload and its storage copy).
     pub fn with_upload_budget(mut self, bytes: u64) -> Self {
-        self.upload_budget = bytes.max(MAX_UPLOAD_BYTES);
+        self.upload_budget = bytes.max(2 * MAX_UPLOAD_BYTES);
         self
     }
 
@@ -255,28 +261,26 @@ impl Repository {
     }
 
     /// Whether `client` has used up its failed logins for the current window.
-    fn throttled(&self, client: std::net::IpAddr) -> bool {
+    /// Throttle check, credential check and accounting as one step under the
+    /// lock, so concurrent requests from one address cannot exceed the limit
+    /// or clear a count another request has just raised. Returns
+    /// `(throttled, authorized)`.
+    fn login(&self, client: std::net::IpAddr, authorization: Option<&str>) -> (bool, bool) {
         let mut failures = self.failures.lock().expect("login lock");
-        match failures.get(&client) {
-            Some((count, since)) if since.elapsed() < self.login_limit.1 => {
-                *count >= self.login_limit.0
-            }
-            Some(_) => {
+        let window = self.login_limit.1;
+        if let Some((count, since)) = failures.get(&client) {
+            if since.elapsed() >= window {
                 failures.remove(&client);
-                false
+            } else if *count >= self.login_limit.0 {
+                return (true, false);
             }
-            None => false,
         }
-    }
-
-    fn record_login(&self, client: std::net::IpAddr, ok: bool) {
-        let mut failures = self.failures.lock().expect("login lock");
-        if ok {
+        let authorized = self.authorized(authorization);
+        if authorized {
             failures.remove(&client);
-            return;
+            return (false, true);
         }
         if failures.len() >= TRACKED_CLIENTS && !failures.contains_key(&client) {
-            let window = self.login_limit.1;
             failures.retain(|_, (_, since)| since.elapsed() < window);
             if failures.len() >= TRACKED_CLIENTS
                 && let Some(oldest) = failures
@@ -290,10 +294,8 @@ impl Repository {
         let entry = failures
             .entry(client)
             .or_insert((0, std::time::Instant::now()));
-        if entry.1.elapsed() >= self.login_limit.1 {
-            *entry = (0, std::time::Instant::now());
-        }
         entry.0 += 1;
+        (false, false)
     }
 
     /// Bytes currently stored in the repository namespace.
@@ -334,19 +336,17 @@ impl Repository {
         client: Option<std::net::IpAddr>,
         authorization: Option<&str>,
     ) -> Option<Reply> {
-        if let Some(client) = client
-            && self.throttled(client)
-        {
+        let (throttled, authorized) = match client {
+            Some(client) => self.login(client, authorization),
+            None => (false, self.authorized(authorization)),
+        };
+        if throttled {
             let mut reply = Reply::empty(429);
             reply.headers.push((
                 "Retry-After",
                 self.login_limit.1.as_secs().max(1).to_string(),
             ));
             return Some(reply);
-        }
-        let authorized = self.authorized(authorization);
-        if let Some(client) = client {
-            self.record_login(client, authorized);
         }
         if authorized {
             return None;
@@ -442,6 +442,18 @@ impl Repository {
             // restic names every object except config by its SHA-256.
             return Reply::empty(400);
         }
+        // An identical object already stored needs no quota: a retry after a
+        // lost response must succeed even when the quota is full.
+        if let Ok(meta) = self.storage.head(key)
+            && meta.size == body.len() as u64
+            && self.storage.get(key).is_ok_and(|existing| existing == body)
+        {
+            return Reply::empty(200);
+        }
+        // Without atomic create-if-absent (no hard links: FAT, some SD cards)
+        // the backend checks then writes; serialize creates in this server.
+        let _serial = (!self.storage.capabilities().atomic_create_if_absent)
+            .then(|| self.create_lock.lock().expect("create lock"));
         // Reserve quota before writing so concurrent uploads cannot overshoot.
         {
             let mut used = self.used.lock().expect("quota lock");
@@ -521,7 +533,13 @@ pub fn self_signed_certificate(
     config: &crate::Config,
     names: Vec<String>,
 ) -> Result<(Vec<u8>, Vec<u8>, std::path::PathBuf, String)> {
-    let dir = crate::sync::state_dir(config)?.join("tls-restic");
+    // One certificate per name set: serve::certificate reuses an existing
+    // one, so changed names must not silently keep the old certificate.
+    let mut names = names;
+    names.sort();
+    names.dedup();
+    let id = &wire::sha256_hex(names.join("\n").as_bytes())[..16];
+    let dir = crate::sync::state_dir(config)?.join("tls-restic").join(id);
     let (certificate, key, fingerprint) = crate::serve::certificate(&dir, names)?;
     Ok((certificate, key, dir.join("localhost.crt.pem"), fingerprint))
 }
@@ -631,8 +649,16 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
     }
     let mut _reservation = None;
     if method == "POST" {
-        // Reserve memory for the declared size (the maximum when unknown).
-        match repository.reserve_upload(declared.unwrap_or(MAX_UPLOAD_BYTES), UPLOAD_WAIT) {
+        // restic declares Content-Length for every object; its empty create
+        // request can arrive chunked (its transport wraps bodies). Bodies of
+        // unknown length are therefore accepted only up to a small cap.
+        let (peak, exact) = match declared {
+            // Buffer sized once, plus the storage layer's copy.
+            Some(length) => (2 * length, Some(length)),
+            // A growing buffer may double, plus the copy.
+            None => (3 * MAX_UNDECLARED_BYTES, None),
+        };
+        match repository.reserve_upload(peak, UPLOAD_WAIT) {
             Some(reservation) => _reservation = Some(reservation),
             None => {
                 let mut busy = Reply::empty(503);
@@ -641,10 +667,18 @@ pub fn respond(repository: &Repository, mut request: tiny_http::Request) {
                 return;
             }
         }
-        match wire::read_bounded(request.as_reader(), MAX_UPLOAD_BYTES) {
+        let read = match exact {
+            Some(length) => {
+                let mut buffer = vec![0u8; length as usize];
+                std::io::Read::read_exact(request.as_reader(), &mut buffer).map(|()| Some(buffer))
+            }
+            None => wire::read_bounded(request.as_reader(), MAX_UNDECLARED_BYTES),
+        };
+        match read {
             Ok(Some(bytes)) => body = bytes,
             Ok(None) => {
-                let _ = request.respond(tiny_http::Response::empty(413));
+                // Too large without a declared length: ask for Content-Length.
+                send(request, Reply::empty(411));
                 return;
             }
             Err(_) => {

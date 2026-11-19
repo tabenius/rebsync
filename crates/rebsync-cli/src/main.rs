@@ -496,6 +496,10 @@ struct ResticServeArgs {
     /// pass the printed path to `restic --cacert`.
     #[arg(long)]
     tls_self_signed: bool,
+    /// Extra DNS name or IP address the self-signed certificate must cover
+    /// (repeatable), e.g. the name clients use to reach this machine.
+    #[arg(long, requires = "tls_self_signed")]
+    tls_name: Vec<String>,
     /// Object store root; defaults to the configured storage root. Repository
     /// objects live under its `restic/` namespace.
     #[arg(long)]
@@ -952,9 +956,19 @@ fn restic_serve(config: &rebsync_core::Config, args: &ResticServeArgs) -> Result
                 "127.0.0.1".to_owned(),
                 "::1".to_owned(),
             ];
-            if !args.listen.ip().is_unspecified() && !args.listen.ip().is_loopback() {
-                names.push(args.listen.ip().to_string());
+            // Clients verify the name they connect to: include explicit names,
+            // the listen address, and this machine's name on wildcard listeners.
+            names.extend(args.tls_name.iter().cloned());
+            let ip = args.listen.ip();
+            if ip.is_unspecified() {
+                let host = rebsync_core::serve::hostname();
+                names.push(format!("{host}.local"));
+                names.push(host);
+            } else if !ip.is_loopback() {
+                names.push(ip.to_string());
             }
+            names.sort();
+            names.dedup();
             let (cert, key, path, print) = restic_rest::self_signed_certificate(config, names)?;
             fingerprint = Some((path, print));
             Some((cert, key))
