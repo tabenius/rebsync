@@ -24,6 +24,26 @@ struct Reference {
 
 #[derive(Subcommand)]
 enum ArtifactAction {
+    /// Read a bounded page of arrivals; a read is not gift acceptance or approval.
+    Arrivals {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Poll arrivals as JSON lines. No content or notification permission is inferred.
+    Watch {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..=3600))]
+        interval_seconds: u64,
+        /// Zero watches until interrupted. A positive value bounds page fetches.
+        #[arg(long, default_value_t = 0)]
+        batches: u64,
+        /// Explicitly request generic notify-send desktop notifications, no titles/content.
+        #[arg(long)]
+        notify: bool,
+    },
     /// List authorized sources, capabilities and factory references.
     Sources,
     /// List a bounded page; preserve both source_id and id in every reference.
@@ -65,7 +85,18 @@ pub fn run(args: &ArtifactArgs) -> Result<i32> {
     use rebsync_core::artifacts::{Artifacts, SourceRef};
     let reference = |value: &Reference| SourceRef::new(value.source.clone(), value.id.clone());
     let mut client = Artifacts::from_token_file(&args.endpoint, &args.token_file)?;
+    if let ArtifactAction::Watch {
+        after,
+        interval_seconds,
+        batches,
+        notify,
+    } = &args.command
+    {
+        return watch(&mut client, *after, *interval_seconds, *batches, *notify);
+    }
     let value = match &args.command {
+        ArtifactAction::Arrivals { after, limit } => client.arrivals(*after, *limit)?,
+        ArtifactAction::Watch { .. } => unreachable!("watch returns before one-page rendering"),
         ArtifactAction::Sources => client.sources()?,
         ArtifactAction::List {
             source,
@@ -103,6 +134,58 @@ pub fn run(args: &ArtifactArgs) -> Result<i32> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(0)
+}
+
+#[cfg(feature = "peer")]
+fn watch(
+    client: &mut rebsync_core::artifacts::Artifacts,
+    mut after: u64,
+    interval: u64,
+    batches: u64,
+    notify: bool,
+) -> Result<i32> {
+    use std::{io::Write, time::Duration};
+    let mut fetched = 0;
+    loop {
+        let mut value = client.arrivals(after, 50)?;
+        after = value["next_after"]
+            .as_u64()
+            .expect("arrival cursor validated by core");
+        if notify
+            && value["events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())
+        {
+            // No authored text, URL, recipient keys or capability is passed to a
+            // desktop helper. A notification never carries an approval action.
+            let accepted = rebsync_core::process::run(
+                rebsync_core::process::command("notify-send").args([
+                    "--",
+                    "RAGBAZ",
+                    "New activity in your private inbox.",
+                ]),
+                5,
+                None,
+            )
+            .is_ok_and(|output| output.success);
+            value["desktop_notification"] = if accepted {
+                "provider_accepted"
+            } else {
+                "unavailable_use_inbox"
+            }
+            .into();
+        }
+        println!("{}", serde_json::to_string(&value)?);
+        std::io::stdout().flush()?;
+        fetched += 1;
+        if batches > 0 && fetched >= batches {
+            return Ok(0);
+        }
+        // Drain pending pages promptly; only idle polling uses the interval.
+        if value["has_more"] != true {
+            std::thread::sleep(Duration::from_secs(interval));
+        }
+    }
 }
 
 #[cfg(not(feature = "peer"))]
