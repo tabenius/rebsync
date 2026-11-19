@@ -96,3 +96,18 @@ fn token_and_endpoint_vectors() {
         );
     }
 }
+
+#[cfg(feature = "peer-http")]
+#[test]
+fn every_contract_error_status_has_a_specific_message() {
+    let c = contract();
+    let errors = c["errors"].as_object().expect("errors is an object");
+    assert!(!errors.is_empty());
+    for code in errors.keys() {
+        let code: u16 = code.parse().expect("error keys are HTTP statuses");
+        assert!(
+            rebsync_core::repository::status_message(code).is_some(),
+            "no client message for contract status {code}"
+        );
+    }
+}

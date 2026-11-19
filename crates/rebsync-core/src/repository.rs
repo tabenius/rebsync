@@ -82,15 +82,11 @@ impl Repository {
         match result {
             Ok(response) if (200..300).contains(&response.status()) => Ok(response),
             Ok(_) => bail!("repository redirect refused"),
-            Err(ureq::Error::Status(401, _)) => {
-                bail!("repository credential expired or revoked; rotate it in Dash")
-            }
-            Err(ureq::Error::Status(404, _)) => bail!("repository object not found"),
-            Err(ureq::Error::Status(409, _)) => {
-                bail!("immutable key conflict or repository quota exceeded")
-            }
-            Err(ureq::Error::Status(413, _)) => bail!("repository object exceeds size limit"),
-            Err(ureq::Error::Status(code, _)) => bail!("repository request failed (HTTP {code})"),
+            // Never include the response body: it is server-controlled text.
+            Err(ureq::Error::Status(code, _)) => match status_message(code) {
+                Some(message) => bail!("{message}"),
+                None => bail!("repository request failed (HTTP {code})"),
+            },
             Err(_) => bail!("repository connection failed; verify network and endpoint"),
         }
     }
@@ -167,6 +163,23 @@ impl Repository {
     }
 }
 
+/// What each error status of the contract (`errors` in
+/// `contracts/rbq-repository.v1.json`) means for the user. Other statuses get a
+/// generic message with the code.
+pub fn status_message(code: u16) -> Option<&'static str> {
+    Some(match code {
+        401 => "repository credential expired or revoked; rotate it in Dash",
+        403 => {
+            "repository storage is not enabled for this credential; enable it in Dash and rotate"
+        }
+        404 => "repository object not found",
+        409 => "immutable key conflict or repository quota exceeded",
+        413 => "repository object exceeds size limit",
+        429 => "repository rate limit reached; retry later",
+        _ => return None,
+    })
+}
+
 pub fn read_input(path: &Path) -> Result<Vec<u8>> {
     bounded(
         std::fs::File::open(path).context("open object input")?,
@@ -174,20 +187,29 @@ pub fn read_input(path: &Path) -> Result<Vec<u8>> {
     )
 }
 
-/// Never replace local work when downloading an object.
+/// Never replace local work when downloading an object, and never leave a
+/// partial file: bytes go to an owner-only temporary file in the same
+/// directory, which is synced and then linked into place only if `path` does
+/// not exist. A failed write leaves nothing behind, so a retry can succeed.
 pub fn write_output(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
+    ensure!(
+        std::fs::symlink_metadata(path).is_err(),
+        "output exists; existing files are never overwritten"
+    );
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // tempfile creates the file with mode 0600 on Unix.
+    let mut temp = tempfile::Builder::new()
+        .prefix(".rbq-download-")
+        .tempfile_in(dir)
+        .context("create temporary output file")?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(path)
+        .map_err(|error| error.error)
         .context("create new output file (existing files are never overwritten)")?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
     Ok(())
 }
