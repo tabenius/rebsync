@@ -355,12 +355,7 @@ impl Repository {
 
 /// Read the server password from a file that only its owner can read.
 pub fn read_password_file(path: &std::path::Path) -> Result<String> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open password file {}", path.display()))?;
-    wire::ensure_private_file(path, &file.metadata()?)?;
-    let bytes = wire::read_bounded(file, 4096)?.context("password file exceeds 4 KiB")?;
-    let text = String::from_utf8(bytes).context("password file must be UTF-8")?;
-    Ok(text.trim_end_matches(['\n', '\r']).to_owned())
+    wire::read_secret_file(path)
 }
 
 /// A self-signed certificate for the restic listener, kept in rbq's private
