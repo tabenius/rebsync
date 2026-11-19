@@ -15,6 +15,11 @@ serve = ["storage", "rebsync-core/serve"]
 name = "rbq"
 path = "src/main.rs"
 
+# The olden name, kept so existing scripts, timers and muscle memory work.
+[[bin]]
+name = "rebsync"
+path = "src/rebsync.rs"
+
 [dependencies]
 rebsync-core = { path = "../rebsync-core", default-features = false }
 anyhow.workspace = true
