@@ -226,10 +226,22 @@ pub fn put_chunk(storage: &dyn ObjectStorage, prefix: &str, data: &[u8]) -> Resu
     let sha256 = format!("{:x}", Sha256::digest(data));
     let key = chunk_key(prefix, &sha256)?;
     let size = data.len() as u64;
-    // Most chunks of a republished snapshot exist already; HEAD avoids
-    // rewriting them. put_if_absent still guards the race.
+    // A same-sized object is not necessarily the promised digest. Verify
+    // existing bytes before reusing them; never publish a snapshot that relies
+    // on a corrupt chunk simply because HEAD reported the expected size.
+    let verify_existing = || -> Result<()> {
+        let actual = storage.get(&key)?;
+        ensure!(
+            actual.len() as u64 == size && format!("{:x}", Sha256::digest(&actual)) == sha256,
+            "{key}: existing chunk digest or size mismatch"
+        );
+        Ok(())
+    };
     match storage.head(&key) {
-        Ok(meta) if meta.size == size => return Ok((Chunk { sha256, size }, false)),
+        Ok(meta) if meta.size == size => {
+            verify_existing()?;
+            return Ok((Chunk { sha256, size }, false));
+        }
         Ok(meta) => {
             return Err(StorageError::Corrupt(format!(
                 "{key}: stored {} bytes, expected {size}",
@@ -250,6 +262,7 @@ pub fn put_chunk(storage: &dyn ObjectStorage, prefix: &str, data: &[u8]) -> Resu
                 ))
                 .into());
             }
+            verify_existing()?;
             false
         }
     };

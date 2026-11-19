@@ -199,6 +199,14 @@ only: no synchronization policy propagates repository deletions between peers.
 A manifest received from a peer is removed only when its own snapshot check
 fails, so damaged metadata is not advertised as restorable.
 
+**Replica integrity gate (candidate PR):** existing same-sized chunks are
+SHA-256 verified before deduplication; peer push rejects incomplete source
+snapshot manifests; matching peer inventory lengths trigger actual byte
+comparison on both push and pull. This adds potentially substantial read I/O
+and bandwidth to repeat syncs. It is a correctness-first interim policy until
+a sound verified-inventory/attestation protocol is designed and independently
+tested. No remote transfer status alone establishes owner-level recoverability.
+
 ## Owner schemas and migrations
 
 Frog, Mneme and Daily Agenda own their data formats and migration logic.
