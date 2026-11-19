@@ -12,6 +12,8 @@ pub mod mneme;
 pub mod peer;
 pub mod phone;
 pub mod process;
+#[cfg(feature = "peer-http")]
+pub mod repository;
 #[cfg(feature = "serve")]
 pub mod serve;
 pub mod storage;
