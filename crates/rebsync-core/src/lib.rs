@@ -22,6 +22,8 @@ pub mod repository;
 #[cfg(feature = "peer-http")]
 pub mod repository_sync;
 #[cfg(feature = "serve")]
+pub mod restic_rest;
+#[cfg(feature = "serve")]
 pub mod serve;
 pub mod storage;
 pub mod sync;

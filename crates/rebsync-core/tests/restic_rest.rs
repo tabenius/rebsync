@@ -1,0 +1,529 @@
+#![cfg(all(feature = "serve", feature = "storage-object-store"))]
+//! restic REST server: protocol and policy tests through the handler, then a
+//! real `restic` (skipped when not installed) over HTTP and TLS.
+use rebsync_core::restic_rest::{self, Reply, Repository, Request, ResticOptions};
+use rebsync_core::storage::{FsObjectStorage, ObjectStorage};
+use std::process::Command;
+use std::sync::Arc;
+
+const USER: &str = "backup";
+const PASSWORD: &str = "correct-horse-battery-staple";
+
+fn sha(bytes: &[u8]) -> String {
+    rebsync_core::wire::sha256_hex(bytes)
+}
+
+fn basic(user: &str, password: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let input = format!("{user}:{password}").into_bytes();
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| acc | (*b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                TABLE[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    format!("Basic {out}")
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    storage: Arc<dyn ObjectStorage>,
+    auth: String,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn ObjectStorage> =
+            Arc::new(FsObjectStorage::open(dir.path().join("store")).unwrap());
+        Self {
+            _dir: dir,
+            storage,
+            auth: basic(USER, PASSWORD),
+        }
+    }
+    fn repository(&self, append_only: bool, max_bytes: Option<u64>) -> Repository {
+        Repository::new(
+            Arc::clone(&self.storage),
+            USER,
+            PASSWORD,
+            append_only,
+            max_bytes,
+        )
+        .unwrap()
+    }
+}
+
+fn call(repository: &Repository, auth: &str, method: &str, path: &str, body: &[u8]) -> Reply {
+    call_with(repository, auth, method, path, body, None, None)
+}
+
+fn call_with(
+    repository: &Repository,
+    auth: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    accept: Option<&str>,
+    range: Option<&str>,
+) -> Reply {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    repository.handle(&Request {
+        method,
+        path,
+        query,
+        authorization: Some(auth),
+        accept,
+        range,
+        body,
+    })
+}
+
+#[test]
+fn every_request_needs_the_right_credentials() {
+    let f = Fixture::new();
+    let repo = f.repository(true, None);
+    for auth in [
+        basic(USER, "wrong-password-xxxxx"),
+        basic("other", PASSWORD),
+        "Bearer x".into(),
+        "Basic !!!".into(),
+    ] {
+        let reply = call(&repo, &auth, "GET", "/config", b"");
+        assert_eq!(reply.status, 401);
+        assert!(
+            reply
+                .headers
+                .iter()
+                .any(|(name, _)| *name == "WWW-Authenticate")
+        );
+    }
+    let no_header = repo.handle(&Request {
+        method: "GET",
+        path: "/config",
+        query: "",
+        authorization: None,
+        accept: None,
+        range: None,
+        body: b"",
+    });
+    assert_eq!(no_header.status, 401);
+    assert!(
+        Repository::new(Arc::clone(&f.storage), USER, "short", true, None).is_err(),
+        "weak passwords are refused"
+    );
+}
+
+#[test]
+fn uploads_are_verified_immutable_and_idempotent() {
+    let f = Fixture::new();
+    let repo = f.repository(true, None);
+    assert_eq!(
+        call(&repo, &f.auth, "POST", "/?create=true", b"").status,
+        200
+    );
+    assert_eq!(call(&repo, &f.auth, "HEAD", "/config", b"").status, 404);
+    assert_eq!(call(&repo, &f.auth, "POST", "/config", b"cfg").status, 200);
+    assert_eq!(
+        call(&repo, &f.auth, "POST", "/config", b"cfg").status,
+        200,
+        "identical retry"
+    );
+    assert_eq!(
+        call(&repo, &f.auth, "POST", "/config", b"other").status,
+        403,
+        "config is never replaced"
+    );
+    let head = call(&repo, &f.auth, "HEAD", "/config", b"");
+    assert_eq!(
+        (head.status, head.head_length, head.body.len()),
+        (200, Some(3), 0)
+    );
+
+    let pack = b"pack bytes".to_vec();
+    let id = sha(&pack);
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "POST",
+            &format!("/data/{}", sha(b"different")),
+            &pack
+        )
+        .status,
+        400,
+        "name must be the content hash"
+    );
+    assert_eq!(
+        call(&repo, &f.auth, "POST", &format!("/data/{id}"), &pack).status,
+        200
+    );
+    assert_eq!(
+        call(&repo, &f.auth, "POST", &format!("/data/{id}"), &pack).status,
+        200
+    );
+    assert_eq!(
+        call(&repo, &f.auth, "GET", &format!("/data/{id}"), b"").body,
+        pack
+    );
+    assert!(
+        f.storage
+            .head(
+                &rebsync_core::storage::ObjectKey::parse(&format!("restic/data/{}/{id}", &id[..2]))
+                    .unwrap()
+            )
+            .is_ok()
+    );
+    for path in [
+        "/data/../config",
+        "/data/ABC",
+        "/data/x/y",
+        "/other/abc",
+        "/data/%2e%2e",
+    ] {
+        assert!(
+            matches!(call(&repo, &f.auth, "GET", path, b"").status, 400 | 404),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn ranges_and_listings_follow_the_protocol() {
+    let f = Fixture::new();
+    let repo = f.repository(true, None);
+    let pack = b"0123456789".to_vec();
+    let id = sha(&pack);
+    call(&repo, &f.auth, "POST", &format!("/data/{id}"), &pack);
+    let part = call_with(
+        &repo,
+        &f.auth,
+        "GET",
+        &format!("/data/{id}"),
+        b"",
+        None,
+        Some("bytes=2-5"),
+    );
+    assert_eq!((part.status, part.body.as_slice()), (206, &b"2345"[..]));
+    let tail = call_with(
+        &repo,
+        &f.auth,
+        "GET",
+        &format!("/data/{id}"),
+        b"",
+        None,
+        Some("bytes=7-"),
+    );
+    assert_eq!(tail.body, b"789");
+    assert_eq!(
+        call_with(
+            &repo,
+            &f.auth,
+            "GET",
+            &format!("/data/{id}"),
+            b"",
+            None,
+            Some("bytes=10-12")
+        )
+        .status,
+        416
+    );
+
+    let v1 = call(&repo, &f.auth, "GET", "/data/", b"");
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&v1.body).unwrap(),
+        vec![id.clone()]
+    );
+    let v2 = call_with(
+        &repo,
+        &f.auth,
+        "GET",
+        "/data/",
+        b"",
+        Some("application/vnd.x.restic.rest.v2"),
+        None,
+    );
+    let entries: serde_json::Value = serde_json::from_slice(&v2.body).unwrap();
+    assert_eq!(entries, serde_json::json!([{"name": id, "size": 10}]));
+    assert_eq!(call(&repo, &f.auth, "GET", "/keys/", b"").body, b"[]");
+}
+
+#[test]
+fn append_only_refuses_deletion_except_locks_and_quota_is_enforced() {
+    let f = Fixture::new();
+    let repo = f.repository(true, Some(25));
+    let (pack, lock) = (b"0123456789".to_vec(), b"lock".to_vec());
+    call(
+        &repo,
+        &f.auth,
+        "POST",
+        &format!("/data/{}", sha(&pack)),
+        &pack,
+    );
+    call(
+        &repo,
+        &f.auth,
+        "POST",
+        &format!("/locks/{}", sha(&lock)),
+        &lock,
+    );
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "DELETE",
+            &format!("/data/{}", sha(&pack)),
+            b""
+        )
+        .status,
+        403
+    );
+    assert_eq!(call(&repo, &f.auth, "DELETE", "/config", b"").status, 403);
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "DELETE",
+            &format!("/locks/{}", sha(&lock)),
+            b""
+        )
+        .status,
+        200
+    );
+    assert_eq!(repo.used_bytes(), 10);
+    let big = vec![7u8; 16];
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "POST",
+            &format!("/data/{}", sha(&big)),
+            &big
+        )
+        .status,
+        507
+    );
+    let fits = vec![8u8; 15];
+    assert_eq!(
+        call(
+            &repo,
+            &f.auth,
+            "POST",
+            &format!("/data/{}", sha(&fits)),
+            &fits
+        )
+        .status,
+        200
+    );
+    assert_eq!(repo.used_bytes(), 25);
+    // The quota is recomputed from storage when the server restarts.
+    assert_eq!(f.repository(true, Some(25)).used_bytes(), 25);
+
+    let admin = f.repository(false, None);
+    assert_eq!(
+        call(
+            &admin,
+            &f.auth,
+            "DELETE",
+            &format!("/data/{}", sha(&pack)),
+            b""
+        )
+        .status,
+        200
+    );
+    assert_eq!(admin.used_bytes(), 15);
+}
+
+#[test]
+fn plain_http_is_refused_off_loopback() {
+    let options = ResticOptions {
+        bind: "0.0.0.0:0".parse().unwrap(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+        append_only: true,
+        max_bytes: None,
+        tls: None,
+    };
+    let error = restic_rest::bind(&options)
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("requires TLS"), "{error}");
+}
+
+fn have_restic() -> bool {
+    Command::new("restic")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn restic(
+    repo: &str,
+    extra: &[&str],
+    args: &[&str],
+    workdir: &std::path::Path,
+) -> std::process::Output {
+    Command::new("restic")
+        .args(["--repo", repo, "--no-cache", "--quiet"])
+        .args(extra)
+        .args(args)
+        .env("RESTIC_PASSWORD", "repository-encryption-password")
+        .env("HOME", workdir)
+        .env_remove("RESTIC_REPOSITORY")
+        .output()
+        .expect("run restic")
+}
+
+fn ok(output: &std::process::Output, what: &str) {
+    assert!(
+        output.status.success(),
+        "{what}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn exercise_real_restic(tls: Option<(Vec<u8>, Vec<u8>)>, extra: Vec<String>, try_forget: bool) {
+    let f = Fixture::new();
+    let work = tempfile::tempdir().unwrap();
+    let options = ResticOptions {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+        append_only: true,
+        max_bytes: None,
+        tls,
+    };
+    let server = Arc::new(restic_rest::bind(&options).unwrap());
+    let repository = Arc::new(f.repository(true, None));
+    {
+        let (server, repository) = (Arc::clone(&server), Arc::clone(&repository));
+        std::thread::spawn(move || server.serve(repository, 4));
+    }
+    let scheme = if server.tls { "https" } else { "http" };
+    let url = format!(
+        "rest:{scheme}://{USER}:{PASSWORD}@localhost:{}/",
+        server.port
+    );
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+
+    let source = work.path().join("source");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(
+        source.join("nested/b.bin"),
+        (0..200_000u32)
+            .flat_map(|n| n.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    ok(&restic(&url, &extra, &["init"], work.path()), "init");
+    ok(
+        &restic(
+            &url,
+            &extra,
+            &["backup", source.to_str().unwrap()],
+            work.path(),
+        ),
+        "backup",
+    );
+    let snapshots = restic(&url, &extra, &["snapshots", "--json"], work.path());
+    ok(&snapshots, "snapshots");
+    let list: serde_json::Value = serde_json::from_slice(&snapshots.stdout).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let id = list[0]["short_id"].as_str().unwrap().to_owned();
+
+    let target = work.path().join("restore");
+    ok(
+        &restic(
+            &url,
+            &extra,
+            &["restore", &id, "--target", target.to_str().unwrap()],
+            work.path(),
+        ),
+        "restore",
+    );
+    let restored = target.join(source.strip_prefix("/").unwrap());
+    assert_eq!(std::fs::read(restored.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(
+        std::fs::read(restored.join("nested/b.bin")).unwrap(),
+        std::fs::read(source.join("nested/b.bin")).unwrap()
+    );
+    ok(
+        &restic(&url, &extra, &["check", "--read-data"], work.path()),
+        "check --read-data",
+    );
+
+    // Append-only: forgetting a snapshot needs a deletion the server refuses.
+    // restic retries the refusal with backoff (about a minute), so only once.
+    if try_forget {
+        let forget = restic(&url, &extra, &["forget", &id], work.path());
+        assert!(
+            !forget.status.success(),
+            "forget must fail on an append-only server"
+        );
+        let after = restic(&url, &extra, &["snapshots", "--json"], work.path());
+        ok(&after, "snapshots after refused forget");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&after.stdout)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    // Normal operation removed its locks; nothing else was deleted.
+    assert_eq!(
+        restic(&url, &extra, &["list", "locks"], work.path()).stdout,
+        b""
+    );
+
+    let wrong = format!(
+        "rest:{scheme}://{USER}:not-the-password-xyz@localhost:{}/",
+        server.port
+    );
+    assert!(
+        !restic(&wrong, &extra, &["snapshots"], work.path())
+            .status
+            .success()
+    );
+    server.unblock();
+}
+
+#[test]
+fn real_restic_over_loopback_http() {
+    if !have_restic() {
+        eprintln!("skipped: restic not installed");
+        return;
+    }
+    exercise_real_restic(None, Vec::new(), true);
+}
+
+#[test]
+fn real_restic_over_tls_with_a_pinned_certificate() {
+    if !have_restic() {
+        eprintln!("skipped: restic not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key, _fingerprint) =
+        rebsync_core::serve::certificate(&dir.path().join("tls"), vec!["localhost".into()])
+            .unwrap();
+    let cacert = dir.path().join("ca.pem");
+    std::fs::write(&cacert, &cert).unwrap();
+    exercise_real_restic(
+        Some((cert, key)),
+        vec!["--cacert".into(), cacert.to_string_lossy().into_owned()],
+        false,
+    );
+}

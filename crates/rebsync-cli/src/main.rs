@@ -115,6 +115,11 @@ enum Action {
         #[command(subcommand)]
         command: GitAction,
     },
+    /// Serve the object store as a restic REST repository (append-only).
+    ///
+    /// `restic -r rest:https://USER:PASSWORD@HOST:PORT/` can then init, back
+    /// up, list, restore and check. Plain HTTP is accepted only on loopback.
+    ResticServe(ResticServeArgs),
     /// Serve a read-only instructions and status page (HTTPS on localhost by
     /// default) and announce it via Avahi/mDNS and D-Bus where available.
     Serve {
@@ -422,6 +427,43 @@ enum PeerAction {
     Serve(ServeArgs),
     /// Push, pull and verify a tiny snapshot over every local transport.
     Selftest,
+}
+#[derive(Args)]
+struct ResticServeArgs {
+    /// Address to listen on. Off loopback, TLS is required.
+    #[arg(long, default_value = "127.0.0.1:8000")]
+    listen: std::net::SocketAddr,
+    /// HTTP Basic user name restic must present.
+    #[arg(long, default_value = "rbq")]
+    user: String,
+    /// Owner-only file holding the HTTP password (at least 16 characters).
+    /// This is not the repository encryption password.
+    #[arg(long)]
+    password_file: PathBuf,
+    /// PEM certificate chain for TLS (with --tls-key).
+    #[arg(long, requires = "tls_key", conflicts_with = "tls_self_signed")]
+    tls_cert: Option<PathBuf>,
+    /// PEM private key for TLS (with --tls-cert).
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// Use a self-signed certificate kept in rbq's private state directory;
+    /// pass the printed path to `restic --cacert`.
+    #[arg(long)]
+    tls_self_signed: bool,
+    /// Object store root; defaults to the configured storage root. Repository
+    /// objects live under its `restic/` namespace.
+    #[arg(long)]
+    storage: Option<PathBuf>,
+    /// Refuse uploads once the repository holds this many bytes.
+    #[arg(long)]
+    max_bytes: Option<u64>,
+    /// Allow deleting snapshots, packs and indexes (forget/prune). Without it
+    /// only locks can be removed.
+    #[arg(long)]
+    allow_delete: bool,
+    /// Concurrent request handlers.
+    #[arg(long, default_value_t = 4)]
+    workers: usize,
 }
 #[derive(Args)]
 struct ServeArgs {
@@ -850,6 +892,93 @@ fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptio
     Ok(0)
 }
 
+#[cfg(feature = "serve")]
+fn restic_serve(config: &rebsync_core::Config, args: &ResticServeArgs) -> Result<i32> {
+    use rebsync_core::restic_rest::{self, Repository, ResticOptions};
+    use std::sync::Arc;
+    let password = restic_rest::read_password_file(&args.password_file)?;
+    let mut fingerprint = None;
+    let tls = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => Some((std::fs::read(cert)?, std::fs::read(key)?)),
+        _ if args.tls_self_signed => {
+            let mut names = vec![
+                "localhost".to_owned(),
+                "127.0.0.1".to_owned(),
+                "::1".to_owned(),
+            ];
+            if !args.listen.ip().is_unspecified() && !args.listen.ip().is_loopback() {
+                names.push(args.listen.ip().to_string());
+            }
+            let (cert, key, path, print) = restic_rest::self_signed_certificate(config, names)?;
+            fingerprint = Some((path, print));
+            Some((cert, key))
+        }
+        _ => None,
+    };
+    let root = args.storage.as_ref().unwrap_or(&config.storage.root);
+    let storage = Arc::new(rebsync_core::FsObjectStorage::open(root)?);
+    let repository = Arc::new(Repository::new(
+        storage,
+        &args.user,
+        &password,
+        !args.allow_delete,
+        args.max_bytes,
+    )?);
+    let options = ResticOptions {
+        bind: args.listen,
+        user: args.user.clone(),
+        password,
+        append_only: !args.allow_delete,
+        max_bytes: args.max_bytes,
+        tls,
+    };
+    let server = restic_rest::bind(&options)?;
+    eprintln!("rbq restic REST repository at {}", server.url);
+    eprintln!(
+        "  storage: {} (namespace restic/), {} bytes stored",
+        root.display(),
+        repository.used_bytes()
+    );
+    eprintln!(
+        "  {}{}",
+        if args.allow_delete {
+            "deletion allowed"
+        } else {
+            "append-only: only locks can be deleted"
+        },
+        args.max_bytes
+            .map(|max| format!(", quota {max} bytes"))
+            .unwrap_or_default()
+    );
+    if let Some((path, print)) = &fingerprint {
+        eprintln!(
+            "  self-signed certificate {} (SHA-256 {print})",
+            path.display()
+        );
+        eprintln!(
+            "  restic --cacert {} -r rest:{}",
+            path.display(),
+            server
+                .url
+                .replacen("://", &format!("://{}:PASSWORD@", args.user), 1)
+        );
+    } else {
+        eprintln!(
+            "  restic -r rest:{}",
+            server
+                .url
+                .replacen("://", &format!("://{}:PASSWORD@", args.user), 1)
+        );
+    }
+    server.serve(repository, args.workers);
+    Ok(0)
+}
+
+#[cfg(not(feature = "serve"))]
+fn restic_serve(_: &rebsync_core::Config, _: &ResticServeArgs) -> Result<i32> {
+    bail!("restic-serve requires the serve feature; rebuild with --features serve")
+}
+
 #[cfg(not(feature = "serve"))]
 fn serve(_: &rebsync_core::Config, _: ()) -> Result<i32> {
     bail!("rbq was built without the serve feature; rebuild with --features serve")
@@ -1134,6 +1263,7 @@ fn entry() -> Result<i32> {
         }
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
         Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
+        Some(Action::ResticServe(args)) => return restic_serve(&config.config, &args),
         Some(Action::Serve {
             port,
             bind,
