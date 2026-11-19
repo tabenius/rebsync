@@ -343,6 +343,101 @@ pub fn open(config: &Config, name: &str, candidates: &[PathBuf]) -> Result<Drive
     })
 }
 
+/// Which published layer objects have a copy on an enrolled drive. Read-only:
+/// creates nothing, writes nothing, and only reads drives that are mounted,
+/// verified and independent of the local store. Returns a summary and the
+/// issues to report ("what remains unprotected").
+pub fn coverage(config: &Config, prefixes: &[String]) -> Result<(Value, Vec<String>)> {
+    if !config.storage.root.is_dir() {
+        return Ok((Value::Null, Vec::new()));
+    }
+    let local_store =
+        FsObjectStorage::open(&config.storage.root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut local = BTreeMap::new();
+    for prefix in prefixes {
+        for meta in local_store
+            .list_prefix(prefix, 0)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        {
+            local.insert(meta.key, meta.size);
+        }
+    }
+    if local.is_empty() {
+        return Ok((Value::Null, Vec::new()));
+    }
+    let total_bytes: u64 = local.values().sum();
+    let (mut drives, mut issues, mut covered) = (Vec::new(), Vec::new(), false);
+    let enrollments = enrolled(config)?;
+    for enrollment in enrollments.values() {
+        let root = match locate(enrollment, &[]) {
+            Ok(root) => root,
+            Err(problem) => {
+                drives.push(json!({"name": enrollment.name, "present": false, "problem": problem}));
+                continue;
+            }
+        };
+        let independent = independent(config, &root);
+        let store = root.join(STORE_DIR);
+        let mut remote = BTreeMap::new();
+        if store.is_dir() {
+            let drive = FsObjectStorage::open(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
+            for prefix in prefixes {
+                for meta in drive
+                    .list_prefix(prefix, 0)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                {
+                    remote.insert(meta.key, meta.size);
+                }
+            }
+        }
+        let (mut missing, mut missing_bytes, mut conflicts) = (0usize, 0u64, 0usize);
+        for (key, size) in &local {
+            match remote.get(key) {
+                Some(other) if other == size => {}
+                Some(_) => conflicts += 1,
+                None => {
+                    missing += 1;
+                    missing_bytes += size;
+                }
+            }
+        }
+        if independent == Some(true) && missing == 0 && conflicts == 0 {
+            covered = true;
+        }
+        if missing > 0 {
+            issues.push(format!(
+                "drive {}: {missing} layer objects ({missing_bytes} bytes) not yet copied; run rbq drive push {}",
+                enrollment.name, enrollment.name
+            ));
+        }
+        if conflicts > 0 {
+            issues.push(format!(
+                "drive {}: {conflicts} layer objects differ in size from the local copy; inspect before exchanging",
+                enrollment.name
+            ));
+        }
+        drives.push(json!({"name": enrollment.name, "present": true, "path": root, "independent": independent,
+            "missing": missing, "missing_bytes": missing_bytes, "conflicts": conflicts}));
+    }
+    if !covered {
+        issues.push(if enrollments.is_empty() {
+            format!(
+                "{} published layer objects ({total_bytes} bytes) are only in the local store; enroll a removable drive (rbq drive enroll PATH --name NAME) or exchange with a peer",
+                local.len()
+            )
+        } else {
+            format!(
+                "no mounted, independent enrolled drive holds all {} published layer objects ({total_bytes} bytes); peer copies are not tracked",
+                local.len()
+            )
+        });
+    }
+    Ok((
+        json!({"objects": local.len(), "bytes": total_bytes, "covered_by_drive": covered, "drives": drives}),
+        issues,
+    ))
+}
+
 /// An enrolled drive seen through the peer interface, so push and pull reuse
 /// the peer engine's ordering, conflict reporting and verification.
 pub struct DrivePeer {
