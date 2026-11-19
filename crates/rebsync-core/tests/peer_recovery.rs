@@ -4,8 +4,10 @@
 
 use anyhow::Result;
 use rebsync_core::{
-    Config, FsObjectStorage, ObjectKey, ObjectStorage, PutOutcome,
-    gitlayer, journal::Journal, layer, peer::{self, PeerApi},
+    Config, FsObjectStorage, ObjectKey, ObjectStorage, PutOutcome, gitlayer,
+    journal::Journal,
+    layer,
+    peer::{self, PeerApi},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
@@ -16,11 +18,19 @@ struct CarryingPeer<'a> {
     store: &'a FsObjectStorage,
 }
 impl PeerApi for CarryingPeer<'_> {
-    fn base(&self) -> &str { "synthetic-offline-carrying-peer" }
-    fn status(&self) -> Result<Value> { Ok(json!({"protocol": "test-carrier"})) }
+    fn base(&self) -> &str {
+        "synthetic-offline-carrying-peer"
+    }
+    fn status(&self) -> Result<Value> {
+        Ok(json!({"protocol": "test-carrier"}))
+    }
     fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
-        Ok(self.store.list_prefix(prefix, 0)?
-            .into_iter().map(|meta| (meta.key, meta.size)).collect())
+        Ok(self
+            .store
+            .list_prefix(prefix, 0)?
+            .into_iter()
+            .map(|meta| (meta.key, meta.size))
+            .collect())
     }
     fn get(&self, key: &str) -> Result<Vec<u8>> {
         Ok(self.store.get(&ObjectKey::parse(key)?)?)
@@ -46,17 +56,35 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
         .env("GIT_COMMITTER_NAME", "Test")
         .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
-        .args(args).output().unwrap();
-    assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
 #[test]
 fn three_store_peer_exchange_restores_git_and_other_layer_without_producer() -> Result<()> {
     let t = tempfile::tempdir()?;
-    let (a, carrier, b) = (t.path().join("a"), t.path().join("phone"), t.path().join("b"));
-    for home in [&a, &carrier, &b] { fs::create_dir_all(home)?; }
+    let (a, carrier, b) = (
+        t.path().join("a"),
+        t.path().join("phone"),
+        t.path().join("b"),
+    );
+    for home in [&a, &carrier, &b] {
+        fs::create_dir_all(home)?;
+    }
     let a_cfg = config(&a);
     let b_cfg = config(&b);
     let a_store = FsObjectStorage::open(&a_cfg.storage.root)?;
@@ -81,16 +109,28 @@ fn three_store_peer_exchange_restores_git_and_other_layer_without_producer() -> 
     fs::create_dir_all(&sample)?;
     fs::write(sample.join("sample.txt"), "verified portable data\n")?;
     let edition = layer::publish_files(
-        &a_store, "agenda", "synthetic", 4096,
-        &sample, &["sample.txt".to_owned()], json!({"fixture": true}), None
+        &a_store,
+        "agenda",
+        "synthetic",
+        4096,
+        &sample,
+        &["sample.txt".to_owned()],
+        json!({"fixture": true}),
+        None,
     )?;
 
     let selection = vec!["git/".to_owned(), "agenda/".to_owned()];
-    let phone = CarryingPeer { store: &phone_store };
+    let phone = CarryingPeer {
+        store: &phone_store,
+    };
     let sent = peer::push(&a_store, &phone, &selection, &mut a_journal)?;
     assert!(sent.clean(), "{sent:?}");
     assert!(sent.transferred > 0);
-    assert!(layer::fsck(&phone_store, &["git", "agenda"])?.failures.is_empty());
+    assert!(
+        layer::fsck(&phone_store, &["git", "agenda"])?
+            .failures
+            .is_empty()
+    );
     // An identical second push must not create additional objects.
     let repeated = peer::push(&a_store, &phone, &selection, &mut a_journal)?;
     assert!(repeated.clean());
@@ -101,16 +141,26 @@ fn three_store_peer_exchange_restores_git_and_other_layer_without_producer() -> 
     let received = peer::pull(&b_store, &phone, &selection, &mut b_journal)?;
     assert!(received.clean(), "{received:?}");
     assert_eq!(received.verified.len(), 2);
-    assert!(layer::fsck(&b_store, &["git", "agenda"])?.failures.is_empty());
+    assert!(
+        layer::fsck(&b_store, &["git", "agenda"])?
+            .failures
+            .is_empty()
+    );
     gitlayer::verify(&b_cfg, &b_store, &git_id)?;
     let restored_repo = b.join("recovered-git");
     gitlayer::restore(&b_cfg, &b_store, &git_id, &restored_repo, &mut b_journal)?;
     assert_eq!(git(&restored_repo, &["rev-parse", "HEAD"]), original);
-    assert_eq!(fs::read_to_string(restored_repo.join("README"))?, "immutable original\n");
+    assert_eq!(
+        fs::read_to_string(restored_repo.join("README"))?,
+        "immutable original\n"
+    );
     let manifest = layer::load(&b_store, "agenda", &edition.id)?;
     let restored_edition = b.join("recovered-edition");
     layer::assemble(&b_store, &manifest, &restored_edition)?;
-    assert_eq!(fs::read_to_string(restored_edition.join("sample.txt"))?, "verified portable data\n");
+    assert_eq!(
+        fs::read_to_string(restored_edition.join("sample.txt"))?,
+        "verified portable data\n"
+    );
     Ok(())
 }
 
@@ -124,8 +174,14 @@ fn incomplete_source_manifest_is_not_advertised_to_a_carrying_peer() -> Result<(
     fs::create_dir_all(&data)?;
     fs::write(data.join("sample.txt"), b"hello")?;
     let published = layer::publish_files(
-        &store, "agenda", "synthetic", 4096, &data,
-        &["sample.txt".to_owned()], json!({"fixture": true}), None
+        &store,
+        "agenda",
+        "synthetic",
+        4096,
+        &data,
+        &["sample.txt".to_owned()],
+        json!({"fixture": true}),
+        None,
     )?;
     let manifest = layer::load(&store, "agenda", &published.id)?;
     let digest = &manifest.files[0].chunks[0].sha256;
@@ -136,7 +192,12 @@ fn incomplete_source_manifest_is_not_advertised_to_a_carrying_peer() -> Result<(
     let phone = CarryingPeer { store: &carrier };
     let report = peer::push(&store, &phone, &["agenda/".to_owned()], &mut journal)?;
     assert!(!report.clean());
-    assert!(report.rejected.iter().any(|message| message.contains("not recoverable")));
+    assert!(
+        report
+            .rejected
+            .iter()
+            .any(|message| message.contains("not recoverable"))
+    );
     assert!(carrier.list_prefix("agenda/v1/snapshots/", 0)?.is_empty());
     Ok(())
 }
@@ -154,8 +215,14 @@ fn peer_exchange_detects_same_size_corrupt_replica_in_both_directions() -> Resul
     fs::create_dir_all(&data)?;
     fs::write(data.join("sample.txt"), b"immutable object bytes")?;
     let published = layer::publish_files(
-        &store, "agenda", "synthetic", 4096, &data,
-        &["sample.txt".to_owned()], json!({"fixture": true}), None
+        &store,
+        "agenda",
+        "synthetic",
+        4096,
+        &data,
+        &["sample.txt".to_owned()],
+        json!({"fixture": true}),
+        None,
     )?;
     let manifest = layer::load(&store, "agenda", &published.id)?;
     let chunk_key = layer::chunk_key("agenda/v1", &manifest.files[0].chunks[0].sha256)?;
@@ -170,7 +237,12 @@ fn peer_exchange_detects_same_size_corrupt_replica_in_both_directions() -> Resul
     fs::write(&remote_path, &corrupt)?;
     let repeated = peer::push(&store, &phone, &["agenda/".to_owned()], &mut journal)?;
     assert!(!repeated.clean(), "{repeated:?}");
-    assert!(repeated.conflicts.iter().any(|m| m.contains("existing peer object differs")));
+    assert!(
+        repeated
+            .conflicts
+            .iter()
+            .any(|m| m.contains("existing peer object differs"))
+    );
 
     let b = t.path().join("b");
     fs::create_dir_all(&b)?;
@@ -178,8 +250,13 @@ fn peer_exchange_detects_same_size_corrupt_replica_in_both_directions() -> Resul
     let mut b_journal = Journal::open(&b)?;
     let received = peer::pull(&b_store, &phone, &["agenda/".to_owned()], &mut b_journal)?;
     assert!(!received.clean());
-    assert!(received.rejected.iter().any(|m| m.contains("chunk content does not match") || m.contains("existing object"))
-        || !received.verification_failed.is_empty());
+    assert!(
+        received
+            .rejected
+            .iter()
+            .any(|m| m.contains("chunk content does not match") || m.contains("existing object"))
+            || !received.verification_failed.is_empty()
+    );
     assert!(carrier.get(&chunk_key)? != store.get(&chunk_key)?);
     Ok(())
 }

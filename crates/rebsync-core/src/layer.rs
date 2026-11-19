@@ -232,8 +232,7 @@ pub fn put_chunk(storage: &dyn ObjectStorage, prefix: &str, data: &[u8]) -> Resu
     let verify_existing = || -> Result<()> {
         let actual = storage.get(&key)?;
         ensure!(
-            actual.len() as u64 == size
-                && format!("{:x}", Sha256::digest(&actual)) == sha256,
+            actual.len() as u64 == size && format!("{:x}", Sha256::digest(&actual)) == sha256,
             "{key}: existing chunk digest or size mismatch"
         );
         Ok(())

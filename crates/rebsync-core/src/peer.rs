@@ -570,13 +570,17 @@ pub fn push(
                     // Even matching sizes must not conceal a damaged replica.
                     let source = storage.get(&ObjectKey::parse(key)?)?;
                     if source.len() as u64 != *size || admissible(key, &source).is_err() {
-                        report.rejected.push(format!("{key}: local object integrity failure"));
+                        report
+                            .rejected
+                            .push(format!("{key}: local object integrity failure"));
                         continue;
                     }
                     if key.contains("/snapshots/") {
                         let layer_name = key.split('/').next().unwrap_or_default();
                         if !layer::check_snapshot(storage, layer_name, key).ok {
-                            report.rejected.push(format!("{key}: local snapshot not recoverable"));
+                            report
+                                .rejected
+                                .push(format!("{key}: local snapshot not recoverable"));
                             continue;
                         }
                     }
@@ -584,7 +588,9 @@ pub fn push(
                     if replica == source {
                         report.already_present += 1;
                     } else {
-                        report.conflicts.push(format!("{key}: existing peer object differs from source"));
+                        report
+                            .conflicts
+                            .push(format!("{key}: existing peer object differs from source"));
                     }
                 }
                 Some(remote_size) => report.conflicts.push(format!(
@@ -603,7 +609,9 @@ pub fn push(
                 if !check.ok {
                     report.rejected.push(format!(
                         "{key}: snapshot is not recoverable: {}",
-                        check.error.unwrap_or_else(|| "unknown integrity error".to_owned())
+                        check
+                            .error
+                            .unwrap_or_else(|| "unknown integrity error".to_owned())
                     ));
                     continue;
                 }
@@ -662,11 +670,15 @@ pub fn pull(
                         || admissible(key, &existing).is_err()
                         || admissible(key, &incoming).is_err()
                     {
-                        report.rejected.push(format!("{key}: existing object fails integrity validation"));
+                        report
+                            .rejected
+                            .push(format!("{key}: existing object fails integrity validation"));
                     } else if existing == incoming {
                         report.already_present += 1;
                     } else {
-                        report.conflicts.push(format!("{key}: same-size local and peer objects differ"));
+                        report
+                            .conflicts
+                            .push(format!("{key}: same-size local and peer objects differ"));
                     }
                 }
                 Some(local_size) => report.conflicts.push(format!(
