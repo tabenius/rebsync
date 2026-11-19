@@ -1,6 +1,8 @@
 //! Preservation-first orchestration. No terminal I/O belongs in this crate.
 pub use chrono;
 pub mod agenda;
+#[cfg(feature = "peer-http")]
+pub mod artifacts;
 pub mod config;
 pub mod frog;
 pub mod gitlayer;
@@ -11,10 +13,14 @@ pub mod migration;
 pub mod mneme;
 pub mod peer;
 pub mod phone;
+#[cfg(feature = "peer-http")]
+mod private_http;
 pub mod process;
 pub mod rbq_contract;
 #[cfg(feature = "peer-http")]
 pub mod repository;
+#[cfg(feature = "peer-http")]
+pub mod repository_sync;
 #[cfg(feature = "serve")]
 pub mod serve;
 pub mod storage;

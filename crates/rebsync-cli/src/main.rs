@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rebsync_core::{ConfigOverrides, RunOptions, load_config};
 use std::path::PathBuf;
+mod artifacts_cli;
 mod repository_cli;
 mod ui;
 
@@ -65,6 +66,8 @@ struct Common {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Navigate authorized Dash artifacts using read-only private MCP tools (JSON).
+    Artifacts(artifacts_cli::ArtifactArgs),
     /// Access your private Dash-hosted RBQ repository (JSON output, no local sync).
     Repository(repository_cli::RepositoryArgs),
     /// Generate a shell completion script on stdout, without reading configuration.
@@ -1045,7 +1048,7 @@ fn entry() -> Result<i32> {
         cli.json
             || matches!(
                 cli.command,
-                Some(Action::Completions { .. } | Action::Repository(_))
+                Some(Action::Completions { .. } | Action::Repository(_) | Action::Artifacts(_))
             ),
     );
     if let Some(Action::Completions { shell }) = &cli.command {
@@ -1062,6 +1065,9 @@ fn entry() -> Result<i32> {
     }
     if let Some(Action::Repository(args)) = &cli.command {
         return repository_cli::run(args);
+    }
+    if let Some(Action::Artifacts(args)) = &cli.command {
+        return artifacts_cli::run(args);
     }
     let config = load_config(ConfigOverrides {
         rbq_home: cli.home,
@@ -1087,6 +1093,7 @@ fn entry() -> Result<i32> {
         Some(Action::Repository(_)) => {
             unreachable!("repository actions return before config loading")
         }
+        Some(Action::Artifacts(_)) => unreachable!("artifact actions return before config loading"),
         Some(Action::Config { .. }) => {
             let mut value = serde_json::to_value(&config)?;
             // Repository URLs can contain inline credentials; don't expose them in explain output.

@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "rebsync-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1110,12 +1110,13 @@ dependencies = [
 
 [[package]]
 name = "rebsync-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
  "fs2",
  "futures",
+ "libc",
  "mdns-sd",
  "object_store",
  "rcgen",

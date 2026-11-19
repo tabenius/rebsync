@@ -2,93 +2,39 @@
 //! bounded responses, hash-verified reads and immutable append. No terminal I/O.
 //!
 //! Constants and validators of the wire contract are in [`crate::rbq_contract`].
-use crate::wire::{self, http};
-use anyhow::{Context, Result, bail, ensure};
-use serde_json::Value;
-use std::{io::Read, path::Path, time::Duration};
-
+pub use crate::private_http::status_message;
+use crate::private_http::{PrivateHttp, bounded, read_token};
 pub use crate::rbq_contract::*;
+use crate::wire;
+use anyhow::{Context, Result, ensure};
+use serde_json::Value;
+use std::path::Path;
+
 const MAX_JSON_BYTES: usize = 262144;
 
 pub struct Repository {
-    base: url::Url,
-    token: String,
-    agent: ureq::Agent,
-}
-
-fn bounded(reader: impl Read, max: usize) -> Result<Vec<u8>> {
-    wire::read_bounded(reader, max as u64)?
-        .context("repository response or input exceeds its size limit")
+    http: PrivateHttp,
 }
 
 impl Repository {
     pub fn connect(endpoint: &str, token: &str) -> Result<Self> {
-        // Never include invalid input or server error bodies in diagnostics.
-        let mut base =
-            url::Url::parse(endpoint).map_err(|_| anyhow::anyhow!("invalid repository URL"))?;
-        let local = base.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
-        ensure!(
-            base.scheme() == "https" || (base.scheme() == "http" && local),
-            "repository URL requires HTTPS (HTTP allowed only on loopback for local testing)"
-        );
-        ensure!(
-            base.username().is_empty()
-                && base.password().is_none()
-                && base.query().is_none()
-                && base.fragment().is_none(),
-            "repository URL must not contain credentials, query or fragment"
-        );
-        let path = base.path().trim_end_matches('/').to_owned();
-        let id = path.strip_prefix(ENDPOINT_PATH_PREFIX).unwrap_or("");
-        ensure!(
-            valid_endpoint_id(id),
-            "use the /api/rbq/ID endpoint returned by rbq_get_repository"
-        );
-        ensure!(valid_token(token), "invalid Dash bearer token");
-        base.set_path(&path);
         Ok(Self {
-            base,
-            token: token.into(),
-            agent: http::agent(Duration::from_secs(10), Duration::from_secs(60)),
+            http: PrivateHttp::connect(endpoint, ENDPOINT_PATH_PREFIX, token)?,
         })
     }
 
     pub fn from_token_file(endpoint: &str, path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path).context("open private repository token file")?;
-        wire::ensure_private_file(path, &file.metadata()?)?;
-        let token = bounded(file, 256)?;
-        let token = std::str::from_utf8(&token).context("token file must be UTF-8")?;
-        Self::connect(endpoint, token.trim())
+        Self::connect(endpoint, &read_token(path)?)
     }
 
     fn request(&self, method: &str, suffix: &str) -> ureq::Request {
-        http::authorize(
-            self.agent.request(
-                method,
-                &format!("{}{suffix}", self.base.as_str().trim_end_matches('/')),
-            ),
-            &self.token,
-        )
+        self.http.request(method, suffix)
     }
 
     fn response(
         result: std::result::Result<ureq::Response, ureq::Error>,
     ) -> Result<ureq::Response> {
-        match result {
-            Ok(response) if (200..300).contains(&response.status()) => Ok(response),
-            Ok(_) => bail!("repository redirect refused"),
-            // Never include the response body: it is server-controlled text.
-            Err(ureq::Error::Status(code, _)) => match status_message(code) {
-                Some(message) => bail!("{message}"),
-                None => bail!("repository request failed (HTTP {code})"),
-            },
-            Err(_) => bail!("repository connection failed; verify network and endpoint"),
-        }
+        PrivateHttp::response(result)
     }
 
     fn json(response: ureq::Response) -> Result<Value> {
@@ -155,29 +101,13 @@ impl Repository {
         let value = Self::json(response)?;
         ensure!(
             value["key"] == key
+                && value["created"].is_boolean()
                 && value["sha256"] == wire::sha256_hex(bytes)
                 && value["size_bytes"].as_u64() == Some(bytes.len() as u64),
             "repository append acknowledgement mismatch"
         );
         Ok(value)
     }
-}
-
-/// What each error status of the contract (`errors` in
-/// `contracts/rbq-repository.v1.json`) means for the user. Other statuses get a
-/// generic message with the code.
-pub fn status_message(code: u16) -> Option<&'static str> {
-    Some(match code {
-        401 => "repository credential expired or revoked; rotate it in Dash",
-        403 => {
-            "repository storage is not enabled for this credential; enable it in Dash and rotate"
-        }
-        404 => "repository object not found",
-        409 => "immutable key conflict or repository quota exceeded",
-        413 => "repository object exceeds size limit",
-        429 => "repository rate limit reached; retry later",
-        _ => return None,
-    })
 }
 
 pub fn read_input(path: &Path) -> Result<Vec<u8>> {
