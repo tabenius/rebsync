@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rebsync_core::{ConfigOverrides, RunOptions, load_config};
 use std::path::PathBuf;
+mod repository_cli;
 mod ui;
 
 #[derive(Parser)]
@@ -64,6 +65,8 @@ struct Common {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Access your private Dash-hosted RBQ repository (JSON output, no local sync).
+    Repository(repository_cli::RepositoryArgs),
     /// Generate a shell completion script on stdout, without reading configuration.
     Completions {
         #[arg(value_enum)]
@@ -1039,7 +1042,11 @@ fn entry() -> Result<i32> {
     let cli = Cli::parse();
     ui::configure(
         cli.color,
-        cli.json || matches!(cli.command, Some(Action::Completions { .. })),
+        cli.json
+            || matches!(
+                cli.command,
+                Some(Action::Completions { .. } | Action::Repository(_))
+            ),
     );
     if let Some(Action::Completions { shell }) = &cli.command {
         if cli.json {
@@ -1052,6 +1059,9 @@ fn entry() -> Result<i32> {
     // state directories, journals or object stores just to inspect a phone.
     if let Some(Action::Phone { command }) = &cli.command {
         return phone_action(command, cli.json);
+    }
+    if let Some(Action::Repository(args)) = &cli.command {
+        return repository_cli::run(args);
     }
     let config = load_config(ConfigOverrides {
         rbq_home: cli.home,
@@ -1074,6 +1084,9 @@ fn entry() -> Result<i32> {
             unreachable!("completions return before config loading")
         }
         Some(Action::Phone { .. }) => unreachable!("phone actions return before config loading"),
+        Some(Action::Repository(_)) => {
+            unreachable!("repository actions return before config loading")
+        }
         Some(Action::Config { .. }) => {
             let mut value = serde_json::to_value(&config)?;
             // Repository URLs can contain inline credentials; don't expose them in explain output.

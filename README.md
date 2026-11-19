@@ -124,6 +124,35 @@ prunes backups or propagates deletions.
 
 ## Local object storage
 
+### Private Dash repository access
+
+The separate `rbq repository` command accesses an opt-in, account-private
+repository hosted by Dash. In Dash's **Your MCP link**, enable private RBQ
+storage when creating/rotating a credential, then call `rbq_get_repository`
+through that MCP client. It returns the token-free repository endpoint. Save
+the same bearer token in an owner-only file using a private editor, not in a
+URL or shell command:
+
+```bash
+chmod 600 ~/.config/rbq/dash.token
+rbq repository --endpoint "$RBQ_ENDPOINT" --token-file ~/.config/rbq/dash.token describe
+rbq repository --endpoint "$RBQ_ENDPOINT" --token-file ~/.config/rbq/dash.token append notes/first.mdoc --file ./first.mdoc
+rbq repository --endpoint "$RBQ_ENDPOINT" --token-file ~/.config/rbq/dash.token list --prefix notes/
+rbq repository --endpoint "$RBQ_ENDPOINT" --token-file ~/.config/rbq/dash.token read notes/first.mdoc --output ./downloaded.mdoc
+```
+
+Output is JSON. Reads verify SHA-256 and refuse to overwrite local files.
+Appends are immutable (identical retries succeed); objects are limited to
+256 KiB. Listing is paginated with `--limit` and `--after`. HTTPS is required;
+redirects are refused (loopback HTTP is allowed for local development only).
+Credential expiry/revocation applies to every request; rotation retains the
+repository identity but changes its endpoint and token. Requires the `peer`
+feature (enabled by default). This is not automatic peer synchronization or
+an encrypted restic repository. Account isolation is **not** client-side
+encryption: infrastructure administrators can access stored bytes.
+
+### Local object store
+
 `rbq` can publish Rebeqah-managed objects into a local filesystem root behind
 a narrow `ObjectStorage` trait. This is the **client-side** contract for future
 S3/R2 adapters, not an S3 server, not a restic REST server, and not a change to how
