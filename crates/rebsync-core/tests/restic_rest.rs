@@ -1073,6 +1073,12 @@ fn bodies_without_declared_length_are_small_or_refused() {
         )),
         "HTTP/1.1 411"
     );
+    // The reservation is released when the handler returns, just after it
+    // has answered: wait briefly instead of racing the server thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while repository.uploads_in_flight() != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(repository.uploads_in_flight(), 0);
     server.unblock();
 }
