@@ -328,7 +328,12 @@ to validate:
 
    Chunks are create-if-absent and written before the manifest. Nothing is
    overwritten or deleted. An unchanged index re-exports byte-identically and
-   reuses every chunk.
+   reuses every chunk. An optional tool-output sidecar is described only inside
+   the opaque owner JSON as `owner["tool_output_sidecar"]`; its chunks share the
+   same namespace without changing the manifest's top-level `chunks`. Snapshots
+   without that field remain valid `rbq.mneme.snapshot.v1` snapshots. rbq asks
+   for a sidecar only when `mneme snapshot --help` lists `create-sidecar`; once
+   the owner offers it, any failure to export it fails the publish.
 3. With `mneme.restic = true` (the default) the verified export and its manifest
    are also backed up through the encrypted restic repository.
 

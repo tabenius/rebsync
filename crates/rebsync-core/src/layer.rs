@@ -666,6 +666,14 @@ fn referenced_chunks(manifest: &Value) -> Result<Vec<String>> {
             take(file.get("chunks").context("file without chunks")?)?;
         }
     }
+    // Mneme's optional sidecar chunks live in the same content-addressed
+    // namespace but only in opaque owner JSON. Keep the strict record check
+    // scoped to the mneme manifest schema; other layer schemas are untouched.
+    if manifest.get("schema").and_then(Value::as_str) == Some(crate::mneme::LAYER_SCHEMA)
+        && let Some(record) = crate::mneme::sidecar_owner_record(manifest.get("owner"))?
+    {
+        found.extend(record.chunks.into_iter().map(|chunk| chunk.sha256));
+    }
     Ok(found)
 }
 
@@ -848,7 +856,23 @@ fn manifest_files(layer: &str, key: &str, value: &Value) -> Result<Vec<LayerFile
                 file.chunks.iter().map(|c| c.size).sum::<u64>() == file.bytes,
                 "chunk sizes do not add up"
             );
-            Ok(vec![file])
+            let mut files = vec![file];
+            if let Some(record) = crate::mneme::sidecar_owner_record(value.get("owner"))? {
+                files.push(LayerFile {
+                    path: record.path,
+                    sha256: record.sha256,
+                    bytes: record.bytes,
+                    chunks: record
+                        .chunks
+                        .into_iter()
+                        .map(|chunk| Chunk {
+                            sha256: chunk.sha256,
+                            size: chunk.bytes,
+                        })
+                        .collect(),
+                });
+            }
+            Ok(files)
         }
         other => bail!("unsupported manifest schema {other:?}"),
     }
