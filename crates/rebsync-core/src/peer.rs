@@ -747,14 +747,29 @@ pub fn pull(
     Ok(report)
 }
 
-/// Default prefixes: every layer.
+/// Default peer exchange excludes explicitly sensitive evacuation handoffs.
+/// The hypomnema layer remains available via `--layer hypomnema`, but must never
+/// silently follow the default multi-layer peer transfer policy.
 pub fn default_prefixes() -> Vec<String> {
-    layer::LAYERS.iter().map(|l| format!("{l}/")).collect()
+    layer::LAYERS
+        .iter()
+        .copied()
+        .filter(|layer| *layer != "hypomnema")
+        .map(|layer| format!("{layer}/"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evacuation_handoffs_require_explicit_peer_layer_selection() {
+        let defaults = default_prefixes();
+        assert_eq!(defaults, vec!["mneme/", "frog/", "agenda/", "git/"]);
+        assert!(!defaults.contains(&"hypomnema/".to_owned()));
+        assert!(layer::LAYERS.contains(&"hypomnema"));
+    }
 
     #[cfg(feature = "peer-http")]
     #[test]
