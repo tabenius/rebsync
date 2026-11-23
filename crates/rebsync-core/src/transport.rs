@@ -53,8 +53,15 @@ const MAX_CONTROL: usize = 8 * 1024 * 1024;
 pub const MAX_OBJECT: u64 = 64 * 1024 * 1024;
 const MAX_LIST: usize = 10_000;
 const PAGE: usize = 5000;
+/// A request envelope carries a token, an op and at most a key, prefix and
+/// cursor. Servers read requests with this bound, so an unauthenticated peer
+/// cannot make the server allocate the 8 MiB a response frame may need.
+const MAX_REQUEST: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 8;
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
+/// Total time a new connection has to deliver its first authenticated
+/// request. Without it eight silent peers hold every slot for `IO_TIMEOUT`.
+const AUTH_DEADLINE: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
 // Datagram wire format: "RBQ1" | kind:u8 | id:u32 | seq:u32 | total:u32 | payload
@@ -146,13 +153,20 @@ impl Target {
     /// TCP listeners on a non-loopback address expose plaintext traffic to the
     /// local network. Callers should warn instead of silently pretending this
     /// is private.
+    /// Only a loopback address is private. The unspecified addresses
+    /// (`0.0.0.0`, `::`) bind every interface and are the most exposed of all.
     pub fn is_public(&self) -> bool {
         match self {
             Self::Tcp { host, .. } => {
-                !matches!(
-                    host.as_str(),
-                    "127.0.0.1" | "::1" | "localhost" | "0.0.0.0" | "[::]"
-                ) && host != "::"
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                if host.eq_ignore_ascii_case("localhost") {
+                    return false;
+                }
+                match host.parse::<std::net::IpAddr>() {
+                    Ok(ip) => !ip.is_loopback(),
+                    // A name may resolve anywhere; warn rather than assume.
+                    Err(_) => true,
+                }
             }
             #[cfg(unix)]
             _ => false,
@@ -557,6 +571,46 @@ impl Stream {
         }
         Ok(())
     }
+}
+
+impl Stream {
+    fn set_read_timeout(&self, timeout: Duration) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(Some(timeout)),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.set_read_timeout(Some(timeout)),
+        }
+    }
+}
+
+/// Read one frame that must arrive completely before `deadline`. The socket
+/// timeout is shortened before every read, so a peer trickling one byte at a
+/// time cannot stretch a per-read timeout into an unbounded hold.
+fn read_frame_before(
+    stream: &mut Stream,
+    max: usize,
+    deadline: Instant,
+) -> Result<Option<Vec<u8>>> {
+    struct Deadline<'a> {
+        stream: &'a mut Stream,
+        deadline: Instant,
+    }
+    impl Read for Deadline<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self
+                .deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "request deadline passed")
+                })?;
+            self.stream.set_read_timeout(remaining)?;
+            self.stream.read(buf)
+        }
+    }
+    let frame = read_frame(&mut Deadline { stream, deadline }, max);
+    stream.set_read_timeout(IO_TIMEOUT)?;
+    frame
 }
 
 impl Read for Stream {
@@ -1278,8 +1332,15 @@ fn prepare_socket_path(path: &Path, replace_stale: bool) -> Result<()> {
 }
 
 fn serve_connection(stream: &mut Stream, service: &Service, stop: &AtomicBool, peer: &str) {
+    let mut authenticated = false;
+    let connected = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        let frame = match read_frame(stream, MAX_CONTROL) {
+        let frame = if authenticated {
+            read_frame(stream, MAX_REQUEST)
+        } else {
+            read_frame_before(stream, MAX_REQUEST, connected + AUTH_DEADLINE)
+        };
+        let frame = match frame {
             Ok(Some(frame)) => frame,
             Ok(None) => return,
             Err(_) => return,
@@ -1307,14 +1368,19 @@ fn serve_connection(stream: &mut Stream, service: &Service, stop: &AtomicBool, p
             let _ = send_response(stream, None, error_response(401, "invalid token"));
             return;
         }
+        authenticated = true;
         let body = match &envelope.request {
             Request::Put { size, .. } => {
                 if *size > MAX_OBJECT {
+                    // The client has already written its body frame; the stream
+                    // cannot be resynchronised, so answer and close.
                     let _ =
                         send_response(stream, None, error_response(413, "object exceeds 64 MiB"));
-                    continue;
+                    return;
                 }
-                match read_frame(stream, MAX_OBJECT as usize) {
+                // The declared size bounds the read, not the protocol maximum:
+                // a 10-byte put cannot make the server buffer 64 MiB.
+                match read_frame(stream, *size as usize) {
                     Ok(Some(body)) => Some(body),
                     _ => {
                         let _ = send_response(stream, None, error_response(400, "missing body"));
@@ -1795,6 +1861,131 @@ mod tests {
         assert!(validate_token("a1B2").is_ok());
         assert!(validate_token("").is_err());
         assert!(validate_token("a b").is_err());
+    }
+
+    #[test]
+    fn only_loopback_listeners_count_as_private() {
+        let tcp = |host: &str| Target::Tcp {
+            host: host.into(),
+            port: 1,
+        };
+        for private in ["127.0.0.1", "127.8.9.10", "::1", "[::1]", "localhost"] {
+            assert!(!tcp(private).is_public(), "{private}");
+        }
+        for public in [
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "192.168.1.4",
+            "fd00::1",
+            "peer.local",
+        ] {
+            assert!(tcp(public).is_public(), "{public}");
+        }
+    }
+
+    fn tcp_server() -> (tempfile::TempDir, Server) {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)));
+        let server = Server::bind(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            service,
+            false,
+        )
+        .unwrap();
+        (root, server)
+    }
+
+    fn raw_connect(server: &Server) -> TcpStream {
+        let Target::Tcp { host, port } = &server.target else {
+            unreachable!()
+        };
+        let stream = TcpStream::connect((host.as_str(), *port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream
+    }
+
+    /// Read until the server closes. Returns how long that took.
+    fn closed_within(mut stream: TcpStream) -> Duration {
+        let started = Instant::now();
+        let mut sink = [0_u8; 256];
+        loop {
+            match stream.read(&mut sink) {
+                Ok(0) | Err(_) => return started.elapsed(),
+                Ok(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn silent_and_trickling_peers_lose_their_slot_at_the_auth_deadline() {
+        let (_root, server) = tcp_server();
+        let silent = raw_connect(&server);
+        let mut trickle = raw_connect(&server);
+        let waiter = thread::spawn(move || closed_within(silent));
+        // One header byte every second: each read is "fast", the request never ends.
+        let started = Instant::now();
+        for byte in [0_u8, 0, 0, 9, b'{'] {
+            if trickle.write_all(&[byte]).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1100));
+        }
+        let trickled = started.elapsed() + closed_within(trickle);
+        let silent = waiter.join().unwrap();
+        assert!(
+            silent < AUTH_DEADLINE + Duration::from_secs(3),
+            "{silent:?}"
+        );
+        assert!(
+            trickled < AUTH_DEADLINE + Duration::from_secs(4),
+            "{trickled:?}"
+        );
+        server.stop();
+    }
+
+    #[test]
+    fn oversized_requests_are_refused_before_allocation() {
+        let (_root, server) = tcp_server();
+        let mut stream = raw_connect(&server);
+        // Announce a request just over the request bound; send nothing else.
+        stream
+            .write_all(&((MAX_REQUEST + 1) as u32).to_be_bytes())
+            .unwrap();
+        assert!(closed_within(stream) < Duration::from_secs(2));
+        server.stop();
+    }
+
+    #[test]
+    fn put_body_is_bounded_by_its_declared_size() {
+        let (_root, server) = tcp_server();
+        let mut stream = Stream::Tcp(raw_connect(&server));
+        let envelope = RequestEnvelope {
+            schema: PROTOCOL.into(),
+            token: token(),
+            request: Request::Put {
+                key: "mneme/v1/chunks/sha256/aa/".to_owned() + &"a".repeat(64),
+                size: 4,
+            },
+        };
+        write_frame(
+            &mut stream,
+            &serde_json::to_vec(&envelope).unwrap(),
+            MAX_REQUEST,
+        )
+        .unwrap();
+        // A body frame larger than declared: the server must not read it.
+        stream.write_all(&(1024_u32).to_be_bytes()).unwrap();
+        let reply = read_frame(&mut stream, MAX_CONTROL).unwrap().unwrap();
+        let reply: ResponseEnvelope = serde_json::from_slice(&reply).unwrap();
+        assert!(matches!(reply.response, Response::Error { code: 400, .. }));
+        server.stop();
     }
 
     #[test]
