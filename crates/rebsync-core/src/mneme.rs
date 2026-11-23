@@ -24,7 +24,7 @@ use crate::{
     config::Config,
     journal::Journal,
     process,
-    storage::{ObjectKey, ObjectStorage, PutOutcome, StorageError},
+    storage::{ObjectKey, ObjectStorage, PutOutcome},
     sync,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -214,38 +214,14 @@ pub fn export(config: &Config, dir: &Path, journal: &mut Journal) -> Result<(Pat
 }
 
 fn put_chunk(storage: &dyn ObjectStorage, data: &[u8]) -> Result<(Chunk, bool)> {
-    let sha256 = format!("{:x}", Sha256::digest(data));
-    let key = chunk_key(&sha256)?;
-    let size = data.len() as u64;
-    // Most chunks of a republished index already exist; a HEAD avoids
-    // rewriting and fsyncing them. put_if_absent still guards the race.
-    match storage.head(&key) {
-        Ok(meta) if meta.size == size => return Ok((Chunk { sha256, size }, false)),
-        Ok(meta) => {
-            return Err(StorageError::Corrupt(format!(
-                "{key}: stored {} bytes, expected {size}",
-                meta.size
-            ))
-            .into());
-        }
-        Err(StorageError::NotFound(_)) => {}
-        Err(error) => return Err(error.into()),
-    }
-    let created = match storage.put_if_absent(&key, data)? {
-        PutOutcome::Created(_) => true,
-        PutOutcome::AlreadyExists(meta) => {
-            // Same digest, same key: a size mismatch means damaged storage.
-            if meta.size != size {
-                return Err(StorageError::Corrupt(format!(
-                    "{key}: stored {} bytes, expected {size}",
-                    meta.size
-                ))
-                .into());
-            }
-            false
-        }
-    };
-    Ok((Chunk { sha256, size }, created))
+    let (chunk, created) = crate::layer::put_chunk(storage, PREFIX, data)?;
+    Ok((
+        Chunk {
+            sha256: chunk.sha256,
+            size: chunk.size,
+        },
+        created,
+    ))
 }
 
 /// Chunk and publish an exported snapshot file. Chunks first, manifest last.
