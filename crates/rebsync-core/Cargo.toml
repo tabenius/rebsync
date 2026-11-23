@@ -11,6 +11,7 @@ storage-object-store = ["dep:object_store", "dep:futures", "dep:tokio"]
 peer-http = ["dep:ureq"]
 peer-transport = ["storage-object-store"]
 serve = ["dep:tiny_http", "dep:rcgen", "dep:mdns-sd"]
+unit-core = ["dep:ragbaz-unit-core"]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,3 +32,4 @@ ureq = { version = "2", default-features = false, features = ["json"], optional 
 tiny_http = { version = "0.12", features = ["ssl-rustls"], optional = true }
 rcgen = { version = "0.14", optional = true }
 mdns-sd = { version = "0.21", optional = true }
+ragbaz-unit-core = { path = "../../../ragbaz-unit-core", optional = true, features = ["inbox"] }

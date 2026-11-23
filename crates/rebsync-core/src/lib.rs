@@ -18,6 +18,8 @@ pub mod storage;
 pub mod sync;
 #[cfg(feature = "peer-transport")]
 pub mod transport;
+#[cfg(feature = "unit-core")]
+pub mod unit;
 
 pub use config::{Config, ConfigOverrides, EffectiveConfig, load_config};
 pub use inventory::{Inventory, Repository, discover};
