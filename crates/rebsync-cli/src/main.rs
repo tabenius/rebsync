@@ -387,15 +387,21 @@ struct PruneArgs {
 enum HypomnemaAction {
     /// Verify and publish an explicitly selected local gzip. No ambient scans or uploads.
     Publish {
-        #[arg(long)] bundle: PathBuf,
-        #[arg(long, default_value = "local")] label: String,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long, default_value = "local")]
+        label: String,
     },
     /// List immutable reviewed bundle snapshots.
     List,
     /// Reassemble and validate all bytes with the Mneme owner CLI.
     Verify { id: String },
     /// Recover into a new file; no overwrite, no execution of handoff instructions.
-    Restore { id: String, #[arg(long)] into: PathBuf },
+    Restore {
+        id: String,
+        #[arg(long)]
+        into: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -765,9 +771,15 @@ fn hypomnema_action(config: &rebsync_core::Config, action: HypomnemaAction) -> R
     const NAME: &str = "evac.bundle.json.gz";
     let storage = FsObjectStorage::open(&config.storage.root)?;
     let owner_verify = |path: &std::path::Path| -> Result<serde_json::Value> {
-        let output = Command::new("mneme").args(["evac", "verify", "--bundle"]).arg(path).output()?;
+        let output = Command::new("mneme")
+            .args(["evac", "verify", "--bundle"])
+            .arg(path)
+            .output()?;
         if !output.status.success() {
-            bail!("Mneme rejected evacuation bundle (exit {:?}); contents not published", output.status.code());
+            bail!(
+                "Mneme rejected evacuation bundle (exit {:?}); contents not published",
+                output.status.code()
+            );
         }
         let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         if report["schema"] != "hypomnema.bundle.v1" || !report["sha256"].is_string() {
@@ -804,8 +816,16 @@ fn hypomnema_action(config: &rebsync_core::Config, action: HypomnemaAction) -> R
             if owner["sha256"] != report["sha256"] {
                 bail!("source bundle changed during staging");
             }
-            let result = layer::publish_files(&storage, "hypomnema", &label, 65536,
-                staging.path(), &[NAME.to_owned()], report, None)?;
+            let result = layer::publish_files(
+                &storage,
+                "hypomnema",
+                &label,
+                65536,
+                staging.path(),
+                &[NAME.to_owned()],
+                report,
+                None,
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         HypomnemaAction::List => {
@@ -1162,7 +1182,9 @@ fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
             if layer::LAYERS.contains(&l.as_str()) {
                 Ok(format!("{l}/"))
             } else {
-                bail!("unknown layer {l}; use mneme, frog, agenda, git or hypomnema (explicit opt-in)")
+                bail!(
+                    "unknown layer {l}; use mneme, frog, agenda, git or hypomnema (explicit opt-in)"
+                )
             }
         })
         .collect()
