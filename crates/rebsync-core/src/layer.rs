@@ -31,6 +31,19 @@ use std::{
 pub const SNAPSHOT_SCHEMA: &str = "rbq.layer.snapshot.v1";
 /// Layers whose objects Rebeqah publishes and exchanges with peers.
 pub const LAYERS: &[&str] = &["mneme", "frog", "agenda", "git", "hypomnema", "binaries"];
+/// Layers other RAGBAZ components publish in rbq's layer format. rbq stores,
+/// verifies, prunes and exchanges them like its own, but never publishes them
+/// and does not report them in `rbq status`. Peer exchange takes them only
+/// when named with `--layer` (they are not in [`crate::peer::default_prefixes`]).
+///
+/// - `opendata`: dataset snapshots from tabenius/opendata (legal-entity data
+///   only; its publisher drops natural persons before writing).
+pub const EXTERNAL_LAYERS: &[&str] = &["opendata"];
+
+/// A layer rbq may store, verify and exchange: its own or a registered external one.
+pub fn is_known(layer: &str) -> bool {
+    LAYERS.contains(&layer) || EXTERNAL_LAYERS.contains(&layer)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,7 +133,7 @@ pub fn validate_label(label: &str) -> Result<()> {
 }
 
 fn validate_layer(layer: &str) -> Result<()> {
-    ensure!(LAYERS.contains(&layer), "unknown layer {layer:?}");
+    ensure!(is_known(layer), "unknown layer {layer:?}");
     Ok(())
 }
 

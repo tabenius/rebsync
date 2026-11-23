@@ -436,7 +436,7 @@ pub(crate) fn admissible(key: &str, bytes: &[u8]) -> Result<()> {
     admissible_key(key)?;
     let layer = key.split('/').next().unwrap_or_default();
     ensure!(
-        layer::LAYERS.contains(&layer) && key.starts_with(&format!("{layer}/v1/")),
+        layer::is_known(layer) && key.starts_with(&format!("{layer}/v1/")),
         "not a layer object"
     );
     if let Some((_, digest)) = key.rsplit_once("/chunks/sha256/") {
@@ -470,7 +470,7 @@ pub(crate) fn admissible_key(key: &str) -> Result<()> {
     ObjectKey::parse(key)?;
     let layer = key.split('/').next().unwrap_or_default();
     ensure!(
-        layer::LAYERS.contains(&layer) && key.starts_with(&format!("{layer}/v1/")),
+        layer::is_known(layer) && key.starts_with(&format!("{layer}/v1/")),
         "not a layer object"
     );
     let rest = key
@@ -775,6 +775,10 @@ mod tests {
         assert!(!defaults.contains(&"hypomnema/".to_owned()));
         assert!(layer::LAYERS.contains(&"hypomnema"));
         assert!(!default_prefixes().contains(&"binaries/".to_string()));
+        // External layers are exchanged only when named.
+        for external in layer::EXTERNAL_LAYERS {
+            assert!(!defaults.contains(&format!("{external}/")));
+        }
     }
 
     #[cfg(feature = "peer-http")]
@@ -928,6 +932,15 @@ mod tests {
         assert!(admissible("_probes/x", b"x").is_err());
         assert!(admissible("other/v1/chunks/sha256/aa/bb", b"x").is_err());
         assert!(admissible("agenda/v1/stray", b"x").is_err());
+        // A registered external layer is admitted under the same rules...
+        let data = b"opendata chunk";
+        let digest = crate::wire::sha256_hex(data);
+        let key = format!("opendata/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+        assert!(admissible(&key, data).is_ok());
+        assert!(admissible(&key, b"tampered").is_err());
+        assert!(admissible("opendata/v1/stray", b"x").is_err());
+        // ...and an unregistered one is not.
+        assert!(admissible("messages/v1/outbox/envelopes/x.json", b"{}").is_err());
         assert_eq!(
             ordered(vec![
                 "a/v1/snapshots/x.json".into(),

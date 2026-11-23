@@ -147,10 +147,7 @@ fn inventory(repository: &dyn RepositoryApi, prefix: &str) -> Result<BTreeMap<St
 
 fn check_layers(layers: &[String]) -> Result<()> {
     ensure!(
-        !layers.is_empty()
-            && layers
-                .iter()
-                .all(|name| layer::LAYERS.contains(&name.as_str())),
+        !layers.is_empty() && layers.iter().all(|name| layer::is_known(name.as_str())),
         "select one or more supported layers"
     );
     let unique: std::collections::BTreeSet<_> = layers.iter().collect();

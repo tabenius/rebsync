@@ -1432,11 +1432,12 @@ fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
     layers
         .iter()
         .map(|l| {
-            if layer::LAYERS.contains(&l.as_str()) {
+            if layer::is_known(l.as_str()) {
                 Ok(format!("{l}/"))
             } else {
                 bail!(
-                    "unknown layer {l}; use mneme, frog, agenda or git, or the explicit opt-ins hypomnema and binaries"
+                    "unknown layer {l}; use mneme, frog, agenda or git, the explicit opt-ins hypomnema and binaries, or an external layer ({})",
+                    layer::EXTERNAL_LAYERS.join(", ")
                 )
             }
         })
@@ -1635,7 +1636,11 @@ fn storage_fsck(config: &rebsync_core::Config, layers: Vec<String>) -> Result<i3
     use rebsync_core::{FsObjectStorage, layer};
     let storage = FsObjectStorage::open(&config.storage.root)?;
     let selected: Vec<&str> = if layers.is_empty() {
-        layer::LAYERS.to_vec()
+        layer::LAYERS
+            .iter()
+            .chain(layer::EXTERNAL_LAYERS)
+            .copied()
+            .collect()
     } else {
         layers.iter().map(String::as_str).collect()
     };
