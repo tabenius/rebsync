@@ -93,6 +93,8 @@ command, point `--storage-root` at
 ## Read-only artifact navigation
 
 Arrival events are a durable stream, independent of Web Push delivery:
+The `arrivals` and `watch` commands require CLI 0.1.3 or newer; 0.1.2 contains
+repository exchange and the earlier artifact navigation commands only.
 
 ```sh
 rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" arrivals --after 0
@@ -108,6 +110,8 @@ exit rather than pretending the stream is empty. `--notify` is explicit opt-in
 to a fixed `notify-send` command with generic text only; it never sends private
 subjects, gift contents, URLs or approval actions to the desktop. Missing desktop
 notification support is reported in JSON without losing the arrival page.
+Backfill pages coalesce desktop alerts to at most one attempt per polling
+interval rather than opening a notification for each historical page.
 
 Dash PWA Web Push and Tauri native notifications are delivery surfaces for the
 same inbox, not alternative gift identities or authorization systems. Arrival
