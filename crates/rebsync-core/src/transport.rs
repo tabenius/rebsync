@@ -53,6 +53,8 @@ const MAX_CONTROL: usize = 8 * 1024 * 1024;
 pub const MAX_OBJECT: u64 = 64 * 1024 * 1024;
 const MAX_LIST: usize = 10_000;
 const PAGE: usize = 5000;
+/// Most objects a client accepts from one peer listing (as `rbq-peer/0`).
+const MAX_INVENTORY: usize = 100_000;
 /// A request envelope carries a token, an op and at most a key, prefix and
 /// cursor. Servers read requests with this bound, so an unauthenticated peer
 /// cannot make the server allocate the 8 MiB a response frame may need.
@@ -77,6 +79,12 @@ const DATAGRAM_PAGE: usize = 32;
 const MAX_ASSEMBLIES: usize = 16;
 const ASSEMBLY_TTL: Duration = Duration::from_secs(60);
 const DATAGRAM_TIMEOUT: Duration = Duration::from_secs(30);
+const DATAGRAM_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long a client whose reply could not be delivered is ignored. Without
+/// this, a client that queues many requests and never reads costs the server
+/// one send timeout per request and starves everyone else.
+const DATAGRAM_STALL: Duration = Duration::from_secs(10);
+const MAX_STALLED: usize = 1024;
 const MAX_BODY_CHUNKS: u32 = (MAX_OBJECT as usize).div_ceil(CHUNK) as u32;
 
 /// A parsed connection target. Tokens are carried separately so they never end
@@ -226,12 +234,14 @@ pub fn read_token_file(path: &Path) -> Result<String> {
     Ok(token)
 }
 
+/// Compare fixed-length SHA-256 digests in constant time, so neither the
+/// position of the first wrong byte nor the token's length shows in timing.
 fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0_u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
+    let (a, b) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    a.iter()
+        .zip(b.iter())
+        .fold(0_u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1097,14 +1107,32 @@ impl PeerApi for TransportPeer {
         let mut link = self.lock()?;
         let mut found = BTreeMap::new();
         let mut after = String::new();
+        let limit = link.list_limit(PAGE);
         for _ in 0..10_000 {
-            let page = link.list(prefix, &after, PAGE)?;
+            let page = link.list(prefix, &after, limit)?;
+            // A hostile peer must not be able to grow this map without bound:
+            // the same caps the HTTP peer client applies.
+            ensure!(
+                page.items.len() <= limit,
+                "peer exceeded the listing page limit"
+            );
+            let mut last = after.clone();
             for item in &page.items {
                 ensure!(
-                    item.key.as_str() > after.as_str(),
+                    item.key.as_str() > last.as_str(),
                     "peer ignored pagination; refusing a repeated listing"
                 );
+                peer::admissible_key(&item.key)?;
+                ensure!(
+                    item.key.starts_with(prefix) && item.size <= MAX_OBJECT,
+                    "out-of-scope or oversized listing entry"
+                );
+                ensure!(
+                    found.len() < MAX_INVENTORY,
+                    "peer inventory exceeds {MAX_INVENTORY} objects; narrow the layer filter"
+                );
                 found.insert(item.key.clone(), item.size);
+                last.clone_from(&item.key);
             }
             if !page.truncated {
                 return Ok(found);
@@ -1261,6 +1289,10 @@ impl Server {
             .with_context(|| format!("listen unix-dgram://{}", path.display()))?;
         set_socket_permissions(path)?;
         socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+        // One thread serves every client. A client that stops reading fills
+        // its receive queue and would block `send_to` forever; give up on that
+        // reply instead.
+        socket.set_write_timeout(Some(DATAGRAM_SEND_TIMEOUT))?;
         let stop = Arc::new(AtomicBool::new(false));
         let join = {
             let stop = stop.clone();
@@ -1428,8 +1460,9 @@ fn serve_datagrams(
     service: &Service,
     stop: &AtomicBool,
 ) {
-    let mut assemblies: std::collections::HashMap<String, Assembly> =
+    let mut assemblies: std::collections::HashMap<PathBuf, Assembly> =
         std::collections::HashMap::new();
+    let mut stalled: std::collections::HashMap<PathBuf, Instant> = std::collections::HashMap::new();
     let mut buffer = vec![0_u8; MAX_DATAGRAM];
     while !stop.load(Ordering::Relaxed) {
         let (size, addr) = match socket.recv_from(&mut buffer) {
@@ -1441,11 +1474,23 @@ fn serve_datagrams(
                 ) =>
             {
                 purge_assemblies(&mut assemblies);
+                stalled.retain(|_, until| *until > Instant::now());
                 continue;
             }
             Err(_) => break,
         };
-        let key = format!("{addr:?}");
+        // Replies go to the sender's bound path. An unnamed sender cannot get
+        // one, and every unnamed address formats alike, so drop those before
+        // they can share (and clobber) one reassembly slot.
+        let Some(key) = addr.as_pathname().map(Path::to_path_buf) else {
+            continue;
+        };
+        if let Some(until) = stalled.get(&key) {
+            if *until > Instant::now() {
+                continue;
+            }
+            stalled.remove(&key);
+        }
         let (kind, id, seq, total, payload) = match parse_datagram(&buffer[..size]) {
             Ok(parsed) => parsed,
             Err(_) => continue,
@@ -1456,7 +1501,8 @@ fn serve_datagrams(
                 let envelope: RequestEnvelope = match serde_json::from_slice(payload) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        let _ = send_datagram(
+                        reply(
+                            &mut stalled,
                             socket,
                             &addr,
                             id,
@@ -1467,7 +1513,8 @@ fn serve_datagrams(
                     }
                 };
                 if envelope.schema != PROTOCOL {
-                    let _ = send_datagram(
+                    reply(
+                        &mut stalled,
                         socket,
                         &addr,
                         id,
@@ -1477,7 +1524,8 @@ fn serve_datagrams(
                     continue;
                 }
                 if !service.authorize(&envelope.token) {
-                    let _ = send_datagram(
+                    reply(
+                        &mut stalled,
                         socket,
                         &addr,
                         id,
@@ -1488,7 +1536,8 @@ fn serve_datagrams(
                 }
                 if let Request::Put { size, .. } = &envelope.request {
                     if *size > MAX_OBJECT {
-                        let _ = send_datagram(
+                        reply(
+                            &mut stalled,
                             socket,
                             &addr,
                             id,
@@ -1500,7 +1549,7 @@ fn serve_datagrams(
                     let expected = *size as usize;
                     if expected == 0 {
                         let (response, out) = service.handle(&envelope.request, Some(&[]));
-                        let _ = send_datagram(socket, &addr, id, response, out);
+                        reply(&mut stalled, socket, &addr, id, response, out);
                         continue;
                     }
                     let total = expected.div_ceil(CHUNK) as u32;
@@ -1508,7 +1557,7 @@ fn serve_datagrams(
                         && let Some(oldest) = assemblies
                             .values()
                             .min_by_key(|assembly| assembly.at)
-                            .map(|assembly| format!("{:?}", assembly.addr))
+                            .and_then(|assembly| assembly.addr.as_pathname().map(Path::to_path_buf))
                     {
                         assemblies.remove(&oldest);
                     }
@@ -1528,7 +1577,7 @@ fn serve_datagrams(
                     continue;
                 }
                 let (response, out) = service.handle(&envelope.request, None);
-                let _ = send_datagram(socket, &addr, id, response, out);
+                reply(&mut stalled, socket, &addr, id, response, out);
             }
             KIND_CHUNK => {
                 let Some(assembly) = assemblies.get_mut(&key) else {
@@ -1551,7 +1600,14 @@ fn serve_datagrams(
                 };
                 if let Some(message) = reject {
                     assemblies.remove(&key);
-                    let _ = send_datagram(socket, &addr, id, error_response(400, message), None);
+                    reply(
+                        &mut stalled,
+                        socket,
+                        &addr,
+                        id,
+                        error_response(400, message),
+                        None,
+                    );
                     continue;
                 }
                 let assembly = assemblies.get_mut(&key).expect("checked above");
@@ -1561,7 +1617,7 @@ fn serve_datagrams(
                 if assembly.body.len() == assembly.expected {
                     let assembly = assemblies.remove(&key).expect("checked above");
                     let (response, out) = service.handle(&assembly.request, Some(&assembly.body));
-                    let _ = send_datagram(socket, &addr, id, response, out);
+                    reply(&mut stalled, socket, &addr, id, response, out);
                 }
             }
             _ => {}
@@ -1570,9 +1626,33 @@ fn serve_datagrams(
 }
 
 #[cfg(unix)]
-fn purge_assemblies(assemblies: &mut std::collections::HashMap<String, Assembly>) {
+fn purge_assemblies(assemblies: &mut std::collections::HashMap<PathBuf, Assembly>) {
     let now = Instant::now();
     assemblies.retain(|_, assembly| now.duration_since(assembly.at) < ASSEMBLY_TTL);
+}
+
+/// Send a reply; if the client is not reading, suspend it (and drop any
+/// upload it had in progress on the next datagram it sends).
+#[cfg(unix)]
+fn reply(
+    stalled: &mut std::collections::HashMap<PathBuf, Instant>,
+    socket: &std::os::unix::net::UnixDatagram,
+    addr: &std::os::unix::net::SocketAddr,
+    id: u32,
+    response: Response,
+    body: Option<Vec<u8>>,
+) {
+    if send_datagram(socket, addr, id, response, body).is_err()
+        && let Some(path) = addr.as_pathname()
+    {
+        if stalled.len() >= MAX_STALLED {
+            let now = Instant::now();
+            stalled.retain(|_, until| *until > now);
+        }
+        if stalled.len() < MAX_STALLED {
+            stalled.insert(path.to_path_buf(), Instant::now() + DATAGRAM_STALL);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1858,6 +1938,7 @@ mod tests {
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "abcd"));
         assert!(!same("", "a"));
+        assert!(!same("a", ""));
         assert!(validate_token("a1B2").is_ok());
         assert!(validate_token("").is_err());
         assert!(validate_token("a b").is_err());
@@ -1985,6 +2066,96 @@ mod tests {
         let reply = read_frame(&mut stream, MAX_CONTROL).unwrap().unwrap();
         let reply: ResponseEnvelope = serde_json::from_slice(&reply).unwrap();
         assert!(matches!(reply.response, Response::Error { code: 400, .. }));
+        server.stop();
+    }
+
+    /// A link that answers every listing with whatever page it is given.
+    struct FakeLink(ListingPage);
+
+    impl Link for FakeLink {
+        fn describe(&self) -> String {
+            "fake".into()
+        }
+        fn list_limit(&self, requested: usize) -> usize {
+            requested.clamp(1, 4)
+        }
+        fn status(&mut self) -> Result<Status> {
+            bail!("unused")
+        }
+        fn list(&mut self, _: &str, _: &str, _: usize) -> Result<ListingPage> {
+            Ok(self.0.clone())
+        }
+        fn get(&mut self, _: &str) -> Result<Vec<u8>> {
+            bail!("unused")
+        }
+        fn put(&mut self, _: &str, _: &[u8]) -> Result<bool> {
+            bail!("unused")
+        }
+    }
+
+    fn listing(page: ListingPage) -> Result<BTreeMap<String, u64>> {
+        TransportPeer {
+            link: Mutex::new(Box::new(FakeLink(page))),
+            description: "fake".into(),
+        }
+        .list("mneme/")
+    }
+
+    fn chunk_key(n: u8) -> String {
+        let digest = format!("{n:02x}").repeat(32);
+        format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2])
+    }
+
+    #[test]
+    fn hostile_listings_are_refused() {
+        let page = |items: Vec<Item>| ListingPage {
+            items,
+            truncated: false,
+            next: None,
+        };
+        let item = |key: String, size| Item { key, size };
+        assert_eq!(listing(page(vec![item(chunk_key(1), 3)])).unwrap().len(), 1);
+        // More items than the page limit the client asked for.
+        assert!(listing(page((1..=5).map(|n| item(chunk_key(n), 1)).collect())).is_err());
+        // Out of the requested prefix, not a layer key, or oversized.
+        assert!(listing(page(vec![item(chunk_key(1).replace("mneme", "git"), 1)])).is_err());
+        assert!(listing(page(vec![item("mneme/v1/notes.txt".into(), 1)])).is_err());
+        assert!(listing(page(vec![item(chunk_key(1), MAX_OBJECT + 1)])).is_err());
+        // Keys must strictly increase within a page too.
+        assert!(listing(page(vec![item(chunk_key(2), 1), item(chunk_key(1), 1)])).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_datagram_client_that_never_reads_cannot_starve_others() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)));
+        let path = root.path().join("dgram.sock");
+        let server =
+            Server::bind(&Target::UnixDatagram { path: path.clone() }, service, false).unwrap();
+        // The hog asks for status over and over and never reads a reply.
+        let hog = std::os::unix::net::UnixDatagram::bind(root.path().join("hog")).unwrap();
+        hog.connect(&path).unwrap();
+        hog.set_nonblocking(true).unwrap();
+        let request = serde_json::to_vec(&RequestEnvelope {
+            schema: PROTOCOL.into(),
+            token: token(),
+            request: Request::Status,
+        })
+        .unwrap();
+        for id in 1..=2000 {
+            let _ = hog.send(&datagram(KIND_CONTROL, id, 0, 0, &request));
+        }
+        let started = Instant::now();
+        let mut honest = DatagramLink::connect(&path, token()).unwrap();
+        honest.status().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(hog);
         server.stop();
     }
 
