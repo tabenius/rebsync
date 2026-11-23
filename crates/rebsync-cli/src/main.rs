@@ -115,6 +115,11 @@ enum Action {
         #[command(subcommand)]
         command: GitAction,
     },
+    /// Serve the object store as a restic REST repository (append-only).
+    ///
+    /// `restic -r rest:https://USER:PASSWORD@HOST:PORT/` can then init, back
+    /// up, list, restore and check. Plain HTTP is accepted only on loopback.
+    ResticServe(ResticServeArgs),
     /// Serve a read-only instructions and status page (HTTPS on localhost by
     /// default) and announce it via Avahi/mDNS and D-Bus where available.
     Serve {
@@ -135,6 +140,52 @@ enum Action {
         #[command(subcommand)]
         command: PeerAction,
     },
+    /// Enrolled removable drives: identify by marker, then push/pull layers.
+    Drive {
+        #[command(subcommand)]
+        command: DriveAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DriveAction {
+    /// Enroll the drive mounted at PATH: writes .rbq-drive.json there.
+    Enroll {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// Take over a drive already marked elsewhere, keeping its identity.
+        #[arg(long)]
+        adopt: bool,
+        /// Enroll even on the local object store's device (not independent).
+        #[arg(long)]
+        allow_same_device: bool,
+    },
+    /// Enrolled drives: where each is mounted now, and whether it is independent.
+    List {
+        /// Extra directories to look in besides mount points.
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Copy local layer objects the drive lacks (never overwrites).
+    Push {
+        name: String,
+        /// Layers (default: all).
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Copy the drive's layer objects this store lacks; verifies snapshots.
+    Pull {
+        name: String,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long)]
+        search: Vec<PathBuf>,
+    },
+    /// Forget an enrollment; the drive's marker and data are left untouched.
+    Forget { name: String },
 }
 #[derive(Subcommand)]
 enum PhoneAction {
@@ -422,6 +473,47 @@ enum PeerAction {
     Serve(ServeArgs),
     /// Push, pull and verify a tiny snapshot over every local transport.
     Selftest,
+}
+#[derive(Args)]
+struct ResticServeArgs {
+    /// Address to listen on. Off loopback, TLS is required.
+    #[arg(long, default_value = "127.0.0.1:8000")]
+    listen: std::net::SocketAddr,
+    /// HTTP Basic user name restic must present.
+    #[arg(long, default_value = "rbq")]
+    user: String,
+    /// Owner-only file holding the HTTP password (at least 16 characters).
+    /// This is not the repository encryption password.
+    #[arg(long)]
+    password_file: PathBuf,
+    /// PEM certificate chain for TLS (with --tls-key).
+    #[arg(long, requires = "tls_key", conflicts_with = "tls_self_signed")]
+    tls_cert: Option<PathBuf>,
+    /// PEM private key for TLS (with --tls-cert).
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// Use a self-signed certificate kept in rbq's private state directory;
+    /// pass the printed path to `restic --cacert`.
+    #[arg(long)]
+    tls_self_signed: bool,
+    /// Extra DNS name or IP address the self-signed certificate must cover
+    /// (repeatable), e.g. the name clients use to reach this machine.
+    #[arg(long, requires = "tls_self_signed")]
+    tls_name: Vec<String>,
+    /// Object store root; defaults to the configured storage root. Repository
+    /// objects live under its `restic/` namespace.
+    #[arg(long)]
+    storage: Option<PathBuf>,
+    /// Refuse uploads once the repository holds this many bytes.
+    #[arg(long)]
+    max_bytes: Option<u64>,
+    /// Allow deleting snapshots, packs and indexes (forget/prune). Without it
+    /// only locks can be removed.
+    #[arg(long)]
+    allow_delete: bool,
+    /// Concurrent request handlers.
+    #[arg(long, default_value_t = 4)]
+    workers: usize,
 }
 #[derive(Args)]
 struct ServeArgs {
@@ -850,14 +942,191 @@ fn serve(config: &rebsync_core::Config, options: rebsync_core::serve::ServeOptio
     Ok(0)
 }
 
+#[cfg(feature = "serve")]
+fn restic_serve(config: &rebsync_core::Config, args: &ResticServeArgs) -> Result<i32> {
+    use rebsync_core::restic_rest::{self, Repository, ResticOptions};
+    use std::sync::Arc;
+    let password = restic_rest::read_password_file(&args.password_file)?;
+    let mut fingerprint = None;
+    let tls = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => Some((std::fs::read(cert)?, std::fs::read(key)?)),
+        _ if args.tls_self_signed => {
+            let mut names = vec![
+                "localhost".to_owned(),
+                "127.0.0.1".to_owned(),
+                "::1".to_owned(),
+            ];
+            // Clients verify the name they connect to: include explicit names,
+            // the listen address, and this machine's name on wildcard listeners.
+            names.extend(args.tls_name.iter().cloned());
+            let ip = args.listen.ip();
+            if ip.is_unspecified() {
+                let host = rebsync_core::serve::hostname();
+                names.push(format!("{host}.local"));
+                names.push(host);
+            } else if !ip.is_loopback() {
+                names.push(ip.to_string());
+            }
+            names.sort();
+            names.dedup();
+            let (cert, key, path, print) = restic_rest::self_signed_certificate(config, names)?;
+            fingerprint = Some((path, print));
+            Some((cert, key))
+        }
+        _ => None,
+    };
+    let root = args.storage.as_ref().unwrap_or(&config.storage.root);
+    let storage = Arc::new(rebsync_core::FsObjectStorage::open(root)?);
+    let repository = Arc::new(Repository::new(
+        storage,
+        &args.user,
+        &password,
+        !args.allow_delete,
+        args.max_bytes,
+    )?);
+    let options = ResticOptions {
+        bind: args.listen,
+        user: args.user.clone(),
+        password,
+        append_only: !args.allow_delete,
+        max_bytes: args.max_bytes,
+        tls,
+    };
+    let server = restic_rest::bind(&options)?;
+    eprintln!("rbq restic REST repository at {}", server.url);
+    eprintln!(
+        "  storage: {} (namespace restic/), {} bytes stored",
+        root.display(),
+        repository.used_bytes()
+    );
+    eprintln!(
+        "  {}{}",
+        if args.allow_delete {
+            "deletion allowed"
+        } else {
+            "append-only: only locks can be deleted"
+        },
+        args.max_bytes
+            .map(|max| format!(", quota {max} bytes"))
+            .unwrap_or_default()
+    );
+    if let Some((path, print)) = &fingerprint {
+        eprintln!(
+            "  self-signed certificate {} (SHA-256 {print})",
+            path.display()
+        );
+        eprintln!(
+            "  restic --cacert {} -r rest:{}",
+            path.display(),
+            server
+                .url
+                .replacen("://", &format!("://{}:PASSWORD@", args.user), 1)
+        );
+    } else {
+        eprintln!(
+            "  restic -r rest:{}",
+            server
+                .url
+                .replacen("://", &format!("://{}:PASSWORD@", args.user), 1)
+        );
+    }
+    server.serve(repository, args.workers);
+    Ok(0)
+}
+
+#[cfg(not(feature = "serve"))]
+fn restic_serve(_: &rebsync_core::Config, _: &ResticServeArgs) -> Result<i32> {
+    bail!("restic-serve requires the serve feature; rebuild with --features serve")
+}
+
 #[cfg(not(feature = "serve"))]
 fn serve(_: &rebsync_core::Config, _: ()) -> Result<i32> {
     bail!("rbq was built without the serve feature; rebuild with --features serve")
 }
 
+/// Object prefixes for the named layers (every layer when none are named).
+#[cfg(feature = "peer")]
+fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
+    use rebsync_core::{layer, peer};
+    if layers.is_empty() {
+        return Ok(peer::default_prefixes());
+    }
+    layers
+        .iter()
+        .map(|l| {
+            if layer::LAYERS.contains(&l.as_str()) {
+                Ok(format!("{l}/"))
+            } else {
+                bail!("unknown layer {l}; use mneme, frog, agenda or git")
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "peer")]
+fn drive_action(config: &rebsync_core::Config, action: DriveAction, json: bool) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, drive, journal::Journal, peer};
+    let (value, code, report) = match action {
+        DriveAction::Enroll {
+            path,
+            name,
+            adopt,
+            allow_same_device,
+        } => {
+            let enrollment = drive::enroll(config, &path, &name, adopt, allow_same_device)?;
+            (serde_json::to_value(&enrollment)?, 0, false)
+        }
+        DriveAction::List { search } => (
+            serde_json::to_value(drive::status(config, &search)?)?,
+            0,
+            false,
+        ),
+        DriveAction::Forget { name } => (
+            serde_json::to_value(drive::forget(config, &name)?)?,
+            0,
+            false,
+        ),
+        DriveAction::Push {
+            name,
+            layers,
+            search,
+        } => {
+            let target = drive::open(config, &name, &search)?;
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let report = peer::push(&storage, &target, &layer_prefixes(&layers)?, &mut journal)?;
+            let code = if report.clean() { 0 } else { 2 };
+            (serde_json::to_value(report)?, code, true)
+        }
+        DriveAction::Pull {
+            name,
+            layers,
+            search,
+        } => {
+            let source = drive::open(config, &name, &search)?;
+            let storage = FsObjectStorage::open(&config.storage.root)?;
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let report = peer::pull(&storage, &source, &layer_prefixes(&layers)?, &mut journal)?;
+            let code = if report.clean() { 0 } else { 2 };
+            (serde_json::to_value(report)?, code, true)
+        }
+    };
+    if json || !report {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        ui::peer_report(&value, code);
+    }
+    Ok(code)
+}
+
+#[cfg(not(feature = "peer"))]
+fn drive_action(_: &rebsync_core::Config, _: DriveAction, _: bool) -> Result<i32> {
+    bail!("rbq was built without the peer feature; rebuild with --features peer")
+}
+
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
-    use rebsync_core::{FsObjectStorage, journal::Journal, layer as layers, peer, transport};
+    use rebsync_core::{FsObjectStorage, journal::Journal, peer, transport};
     use std::sync::{Arc, atomic::AtomicBool};
 
     let connection = |args: &PeerTargetArgs| -> Result<(String, Option<String>)> {
@@ -889,21 +1158,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
         }
     };
-    let prefixes = |layers_: &[String]| -> Result<Vec<String>> {
-        if layers_.is_empty() {
-            return Ok(peer::default_prefixes());
-        }
-        layers_
-            .iter()
-            .map(|l| {
-                if layers::LAYERS.contains(&l.as_str()) {
-                    Ok(format!("{l}/"))
-                } else {
-                    bail!("unknown layer {l}; use mneme, frog, agenda or git")
-                }
-            })
-            .collect()
-    };
+    let prefixes = layer_prefixes;
     let (value, code) = match action {
         PeerAction::Status { target } => {
             let remote = remote(&target)?;
@@ -1133,7 +1388,9 @@ fn entry() -> Result<i32> {
             return layer_action(&config.config, "agenda", command, cli.json);
         }
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
+        Some(Action::Drive { command }) => return drive_action(&config.config, command, cli.json),
         Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
+        Some(Action::ResticServe(args)) => return restic_serve(&config.config, &args),
         Some(Action::Serve {
             port,
             bind,

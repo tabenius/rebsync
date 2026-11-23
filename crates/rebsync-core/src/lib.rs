@@ -4,6 +4,8 @@ pub mod agenda;
 #[cfg(feature = "peer-http")]
 pub mod artifacts;
 pub mod config;
+#[cfg(feature = "storage-object-store")]
+pub mod drive;
 pub mod frog;
 pub mod gitlayer;
 pub mod inventory;
@@ -21,6 +23,8 @@ pub mod rbq_contract;
 pub mod repository;
 #[cfg(feature = "peer-http")]
 pub mod repository_sync;
+#[cfg(feature = "serve")]
+pub mod restic_rest;
 #[cfg(feature = "serve")]
 pub mod serve;
 pub mod storage;

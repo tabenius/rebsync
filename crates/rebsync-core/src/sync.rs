@@ -33,6 +33,9 @@ pub struct RunSummary {
     pub dry_run: bool,
     pub repositories: Vec<RepoOutcome>,
     pub datasets: Vec<Value>,
+    /// Published layer objects and their copies on enrolled drives (null when
+    /// there are none, or rbq was built without object storage).
+    pub layer_copies: Value,
     pub issues: Vec<String>,
 }
 impl RunSummary {
@@ -148,12 +151,62 @@ fn restic(config: &Config) -> Result<Command> {
         .as_ref()
         .context("backup.repository is not configured")?;
     let mut cmd = process::command("restic");
-    cmd.args(["--repo", repository, "--json"]);
+    // The repository goes through the environment, never argv: a rest: URL
+    // may carry credentials, and /proc/PID/cmdline is readable by every local
+    // user while /proc/PID/environ is not.
+    cmd.env(
+        "RESTIC_REPOSITORY",
+        repository_with_credentials(repository, config)?,
+    );
+    cmd.env_remove("RESTIC_REPOSITORY_FILE");
+    cmd.arg("--json");
     if let Some(path) = &config.backup.password_file {
         cmd.arg("--password-file").arg(path);
     }
+    if let Some(path) = &config.backup.cacert {
+        cmd.arg("--cacert").arg(path);
+    }
     cmd.env_remove("RESTIC_PASSWORD_COMMAND");
     Ok(cmd)
+}
+
+/// `(user, has inline password)` of a URL-style repository with userinfo.
+fn userinfo(repository: &str) -> Option<(&str, bool)> {
+    let after = repository.split_once("://")?.1;
+    let authority = after.split('/').next()?;
+    let (info, _) = authority.rsplit_once('@')?;
+    Some(match info.split_once(':') {
+        Some((user, _)) => (user, true),
+        None => (info, false),
+    })
+}
+
+/// Insert the password from `backup.rest_password_file` into a
+/// `rest:https://USER@HOST/` URL (only ever handed to restic's environment).
+fn repository_with_credentials(repository: &str, config: &Config) -> Result<String> {
+    let Some(path) = &config.backup.rest_password_file else {
+        return Ok(repository.to_owned());
+    };
+    let rest = repository
+        .strip_prefix("rest:")
+        .context("backup.rest_password_file applies only to rest: repositories")?;
+    let (scheme, after) = rest
+        .split_once("://")
+        .context("rest: repository needs a URL")?;
+    let (authority, path_part) = after.split_once('/').unwrap_or((after, ""));
+    let (user, host) = authority.rsplit_once('@').context(
+        "backup.rest_password_file needs the user in the URL, e.g. rest:https://rbq@HOST:8000/",
+    )?;
+    if user.contains(':') {
+        bail!(
+            "backup.repository already carries a password; remove it when using rest_password_file"
+        );
+    }
+    let password = crate::wire::read_secret_file(path)?;
+    Ok(format!(
+        "rest:{scheme}://{user}:{}@{host}/{path_part}",
+        crate::wire::percent_encode(&password)
+    ))
 }
 pub(crate) fn restic_backup(
     config: &Config,
@@ -749,6 +802,11 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
     {
         issues.push("backup destination is a filesystem path; independence from this machine has not been established".into());
     }
+    if let Some(repository) = &config.backup.repository
+        && userinfo(repository).is_some_and(|(_, inline)| inline)
+    {
+        issues.push("backup.repository carries an inline password; move it to an owner-only backup.rest_password_file".into());
+    }
     let mut outcomes = vec![];
     for repo in inventory.repositories {
         journal.event(
@@ -853,12 +911,26 @@ pub fn run(config: &Config, options: RunOptions) -> Result<RunSummary> {
         journal.event("dataset-outcome", name, result.clone())?;
         datasets.push(result);
     }
+    #[cfg(feature = "storage-object-store")]
+    let layer_copies = match crate::drive::coverage(config, &crate::peer::default_prefixes()) {
+        Ok((value, mut found)) => {
+            issues.append(&mut found);
+            value
+        }
+        Err(error) => {
+            issues.push(format!("layer copies could not be checked: {error}"));
+            Value::Null
+        }
+    };
+    #[cfg(not(feature = "storage-object-store"))]
+    let layer_copies = Value::Null;
     let summary = RunSummary {
         run_id: journal.run_id.clone(),
         journal: journal.path.clone(),
         dry_run: !options.apply,
         repositories: outcomes,
         datasets,
+        layer_copies,
         issues,
     };
     journal.event("run-end", &config.rbq_home, json!({"repositories":summary.repositories.len(),"needs_attention":summary.needs_attention()}))?;

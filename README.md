@@ -86,6 +86,21 @@ repository = "s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/PRIVATE_BUCKET/rbq"
 password_file = "/private/path/rbq-restic-password"
 ```
 
+To back up to another machine running `rbq restic-serve` (a restic REST
+peer), name the user in the URL and keep the HTTP password in an owner-only file:
+
+```toml
+[backup]
+repository = "rest:https://rbq@peer.local:8000/"
+rest_password_file = "/private/path/restic-http.pw"   # chmod 600
+cacert = "/private/path/peer-localhost.crt.pem"        # what restic-serve printed
+password_file = "/private/path/rbq-restic-password"
+```
+
+rbq hands the repository to restic through its environment, never its
+command line. A password written into `repository` itself is reported
+as an issue.
+
 Supply bucket-scoped `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the
 environment. Keep the password and an independently stored recovery copy outside
 all source repositories. No Cloudflare resources or credentials are automatically
@@ -121,6 +136,56 @@ Agenda editions and the Frog database have their own owner-validated layers (see
 A filesystem restic repository may be useful for tests or an enrolled USB drive,
 but rbq does not assert that it is independent of this machine. It never
 prunes backups or propagates deletions.
+
+## Serving a restic repository (`rbq restic-serve`)
+
+`rbq restic-serve` exposes rbq's object store as a restic REST repository
+(protocol v1 and v2), so another machine can back up *to* this one with plain
+`restic`. It is storage milestone 1's restic REST interoperability, tested
+against real restic: `init`, `backup`, `snapshots`, `restore`, `check
+--read-data`, lock removal, and a refused `forget`.
+
+```bash
+umask 077; head -c 24 /dev/urandom | base64 > ~/.config/rbq/restic-http.pw
+rbq restic-serve --password-file ~/.config/rbq/restic-http.pw --tls-self-signed --listen 0.0.0.0:8000
+# prints the certificate path and the exact restic command, e.g.
+restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:PASSWORD@host:8000/ init
+```
+
+- **Authentication.** Every request needs HTTP Basic credentials. The password
+  comes from an owner-only file (at least 16 characters) and is compared in
+  constant time. It only guards the transport: restic still encrypts the data
+  with its own repository password, which the server never sees.
+- **Transport.** Plain HTTP is accepted only on loopback (for example behind
+  `ssh -L`). Any other listener needs TLS: `--tls-cert/--tls-key`, or
+  `--tls-self-signed` with the printed certificate pinned through `restic --cacert`.
+- **Append-only by default.** Only locks can be deleted, which a normal backup
+  needs. `forget`/`prune` are refused until the server is started with
+  `--allow-delete` (do that only for an administrative session).
+- **Verified, immutable uploads.** Every object except `config` must be named
+  by the SHA-256 of its bytes. Objects are created only if absent: an identical
+  retry succeeds and nothing is ever replaced.
+- **Namespace and quota.** One repository per server, stored under the
+  `restic/` namespace of the object store (`--storage DIR` picks a dedicated
+  root). `--max-bytes` refuses uploads beyond a quota (HTTP 507); usage is
+  recounted from storage at start.
+- **Limits.** Each upload is held in memory, up to 129 MiB (restic packs
+  default to 16 MiB). Bodies without `Content-Length` (restic sends its empty
+  create request chunked) are accepted only up to 64 KiB; larger ones get 411. Bodies are read only after authentication. Each
+  upload reserves twice its size, for the buffer plus the storage layer's
+  copy, from a server-wide budget of two maximum uploads (about 258 MiB). An
+  upload that can't get budget within 30 seconds gets 503 with `Retry-After`.
+  Repository *format* compatibility is restic's: the server stores its objects
+  opaquely. On a filesystem without hard links (FAT/exFAT), where atomic
+  create-if-absent isn't available, the server serializes its own creates;
+  don't run two servers on one such store.
+- **Certificate names.** `--tls-self-signed` covers localhost, the listen
+  address, this machine's name (`NAME` and `NAME.local`) when listening on a
+  wildcard address, and every `--tls-name NAME`. Each set of names gets its
+  own certificate path.
+- **Failed logins** are throttled per client address. After 10 failures within
+  60 seconds that address gets HTTP 429 (`Retry-After`), without its password
+  being checked, until the window passes. Other clients are unaffected.
 
 ## Local object storage
 
@@ -567,6 +632,45 @@ debugging/pairing on both devices and remove only tunnels you created. See
 [Android's ADB documentation](https://developer.android.com/tools/adb) and
 [ChromeOS Linux guidance](https://support.google.com/chromebook/answer/9145439).
 
+## Enrolled drives (`rbq drive`)
+
+USB sticks, SD cards and external disks become destinations only after you
+enroll them by name. rbq never writes to a removable drive it has not been
+told about.
+
+```bash
+rbq drive enroll /media/$USER/STICK --name stick   # writes STICK/.rbq-drive.json
+rbq drive push stick                                # layer objects → STICK/rbq-store
+rbq drive list                                      # where each drive is mounted now
+# on another machine:
+rbq drive enroll /media/$USER/STICK --name stick --adopt
+rbq drive pull stick                                # verifies received snapshots
+```
+
+- **The store must be on the drive.** An `rbq-store` that is a symlink, or
+  that resolves outside the drive, is refused.
+- **Identity is the marker, not the path.** Enrollment writes a random drive ID
+  to `.rbq-drive.json` and records it, with the filesystem UUID where the
+  system exposes one. The drive is found again by scanning mount points (and
+  `--search DIR`) for that marker, wherever it is mounted. A copied marker on
+  a different filesystem is refused, as is one whose filesystem UUID can't be
+  read when a UUID was recorded at enrollment.
+- **Independent or not.** A drive on the same device as the local object store
+  is refused (`--allow-same-device` overrides it) and listed as
+  `"independent": false`: copying there does not protect against losing the disk.
+- **Exchange is the peer engine.** Push and pull use `rbq peer`'s additive,
+  never-overwriting exchange. Size conflicts are reported rather than copied
+  over, and pulled snapshots are verified before they are listed.
+- **Another machine** adopts a marked drive with `--adopt` and keeps its
+  identity. `rbq drive forget NAME` removes the enrollment but leaves the
+  drive's marker and data alone.
+- **What is still unprotected.** Every `rbq` run (dry-run included) compares
+  published layer objects with each mounted, independent enrolled drive.
+  It reports how many objects are not yet copied, with the `rbq drive push NAME`
+  that fixes it, or that they exist only in the local store. This is read-only,
+  and the JSON summary carries it as `layer_copies`. Copies on peers are not
+  tracked.
+
 ## Phone sync (Rebeqah)
 
 `rbq peer` exchanges layer objects with the Rebeqah Android app's
@@ -706,8 +810,9 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   early restic REST serving, resumable multipart and peer capability negotiation.
   The [Rust abstraction evaluation](docs/STORAGE-EVALUATION.md) compares pinned
   object_store/OpenDAL candidates in an isolated workspace. A feature-gated
-  `object_store` filesystem adapter now implements the production trait; S3/R2,
-  multipart and peer negotiation are not implemented yet.
+  `object_store` filesystem adapter now implements the production trait, and
+  `rbq restic-serve` serves it to restic over REST. S3/R2 adapters, resumable
+  multipart, streaming uploads and peer negotiation are not implemented yet.
 - R2 is supported through restic's existing S3 backend, but requires account setup
   and an actual off-machine restore test before being trusted.
 - No automatic GitHub creation/forking, Frog discovery adapter, AI execution or
@@ -716,8 +821,10 @@ normally returns `2`, intentionally: unimplemented coverage is not success.
   discovery, scheduling or TLS yet.
 - Retention is manual (`rbq <layer> prune`); there is no scheduled policy, and
   pruning is not propagated to peers or restic.
-- No USB enrollment, Bluetooth or mesh autodiscovery. Phone sync remains a
-  manual HTTP connection or an explicit local-transport bridge.
+- Drives are enrolled and exchanged explicitly (`rbq drive`); there is no
+  automatic exchange on insertion, and no Bluetooth or mesh autodiscovery.
+  Phone sync remains a manual HTTP connection or an explicit local-transport
+  bridge.
 - No tags/LFS migration or automatic organization-wide repository creation.
 - No claim that copying data to this same disk protects against laptop loss.
 
