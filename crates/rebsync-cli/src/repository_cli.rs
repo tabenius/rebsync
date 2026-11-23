@@ -30,7 +30,7 @@ enum RepositoryAction {
         source_id: String,
         #[arg(long)]
         source_name: String,
-        #[arg(long, value_parser = ["mneme", "frog", "agenda", "git"])]
+        #[arg(long, value_parser = ["mneme", "frog", "agenda", "git", "opendata"])]
         layer: Vec<String>,
     },
     /// Pull into STORE/sources/v1/SOURCE_ID/objects; no flattening or deletion.
@@ -39,7 +39,7 @@ enum RepositoryAction {
         store: PathBuf,
         #[arg(long)]
         source_id: String,
-        #[arg(long, value_parser = ["mneme", "frog", "agenda", "git"])]
+        #[arg(long, value_parser = ["mneme", "frog", "agenda", "git", "opendata"])]
         layer: Vec<String>,
     },
     /// List one bounded page; pass next_after as --after for another page.

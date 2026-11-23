@@ -291,6 +291,23 @@ publishing a manifest. Repeated exchanges therefore incur read I/O and network
 traffic even when no new objects are written. Byte integrity is not identity
 verification or owner-level validation.
 
+## External layers
+
+Other RAGBAZ components can publish snapshots in rbq's layer format under a
+layer listed in `layer::EXTERNAL_LAYERS`. rbq does not publish these itself
+and leaves them out of `rbq status`, but it verifies, prunes, fscks and
+exchanges them like its own layers. Peers and repositories exchange them only
+when named, e.g. `rbq peer pull --layer opendata` or
+`rbq repository push --layer opendata`.
+
+| Layer | Publisher | Content |
+|---|---|---|
+| `opendata` | [tabenius/opendata](https://github.com/tabenius/opendata) | Dataset snapshots of Swedish open data about legal entities (`tables/*.ndjson`, `meta.json`, optional `opendata.sqlite`) |
+
+Only chunk and snapshot objects are admitted, under the same digest and
+manifest checks as rbq's layers. Registering a layer is a code change here,
+so peers agree on what they accept.
+
 ## Self-built binaries (`rbq binaries`)
 
 Some executables are built from our own sources (or cannot be obtained through

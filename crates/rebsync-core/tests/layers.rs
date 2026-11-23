@@ -401,3 +401,61 @@ fn fsck_finds_damaged_missing_and_unreadable_snapshots() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn external_layers_publish_list_assemble_and_fsck_but_stay_out_of_defaults() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let storage = FsObjectStorage::open(t.path().join("objects"))?;
+    let src = t.path().join("snapshot");
+    fs::create_dir_all(src.join("tables"))?;
+    fs::write(
+        src.join("tables/organisation.ndjson"),
+        "{\"orgnr\":\"5560360793\"}\n".repeat(5000),
+    )?;
+    fs::write(
+        src.join("meta.json"),
+        r#"{"schema":"opendata.snapshot.v1"}"#,
+    )?;
+    let files = vec![
+        "meta.json".to_string(),
+        "tables/organisation.ndjson".to_string(),
+    ];
+    let out = layer::publish_files(
+        &storage,
+        "opendata",
+        "national",
+        65536,
+        &src,
+        &files,
+        serde_json::json!({}),
+        None,
+    )?;
+    let listed = layer::list(&storage, "opendata", Some("national"))?;
+    assert_eq!(listed.len(), 1);
+    let manifest = layer::load(&storage, "opendata", &out.id)?;
+    layer::assemble(&storage, &manifest, &t.path().join("restored"))?;
+    assert_eq!(
+        fs::read(t.path().join("restored/tables/organisation.ndjson"))?,
+        fs::read(src.join("tables/organisation.ndjson"))?
+    );
+    let report = layer::fsck(&storage, &["opendata"])?;
+    assert_eq!((report.snapshots_checked, report.snapshots_ok), (1, 1));
+    // Registered, but neither one of rbq's own layers nor exchanged by default.
+    assert!(layer::is_known("opendata") && !layer::LAYERS.contains(&"opendata"));
+    assert!(!rebsync_core::peer::default_prefixes().contains(&"opendata/".to_string()));
+    assert!(!layer::is_known("messages"));
+    assert!(
+        layer::publish_files(
+            &storage,
+            "messages",
+            "x",
+            65536,
+            &src,
+            &files,
+            serde_json::json!({}),
+            None
+        )
+        .is_err()
+    );
+    Ok(())
+}
