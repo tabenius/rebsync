@@ -43,12 +43,35 @@ pub const LAYER_SCHEMA: &str = "rbq.mneme.snapshot.v1";
 pub const OWNER_SCHEMA: &str = "mneme.snapshot.v1";
 const PREFIX: &str = "mneme/v1";
 const SNAPSHOT_FILE: &str = "mneme-index.sqlite";
+const SIDECAR_SCHEMA: &str = "mneme.outputs-sidecar.v1";
+const SIDECAR_FILE: &str = "mneme-outputs.sqlite";
+const SIDECAR_OWNER_KEY: &str = "tool_output_sidecar";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {
     pub sha256: String,
     pub size: u64,
+}
+
+/// Owner-nested metadata for the optional tool-output sidecar. This is not a
+/// new layer manifest field: it lives only in the opaque owner JSON.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SidecarChunk {
+    pub(crate) sha256: String,
+    pub(crate) bytes: u64,
+    pub(crate) offset: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SidecarRecord {
+    pub(crate) schema: String,
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) bytes: u64,
+    pub(crate) chunks: Vec<SidecarChunk>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +123,81 @@ fn valid_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Parse and strictly validate a sidecar record from owner JSON or an owner
+/// report. A malformed record is never ignored.
+fn sidecar_record(value: &Value) -> Result<SidecarRecord> {
+    let record: SidecarRecord =
+        serde_json::from_value(value.clone()).context("malformed tool-output sidecar record")?;
+    ensure!(
+        record.schema == SIDECAR_SCHEMA,
+        "unsupported tool-output sidecar schema"
+    );
+    ensure!(
+        !record.path.is_empty()
+            && record.path.len() <= 255
+            && !record.path.starts_with('.')
+            && !record.path.contains('/')
+            && !record.path.contains('\\')
+            && record
+                .path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')),
+        "unsafe tool-output sidecar path"
+    );
+    ensure!(
+        valid_sha256(&record.sha256),
+        "invalid tool-output sidecar digest"
+    );
+    ensure!(record.bytes > 0, "invalid tool-output sidecar size");
+    ensure!(
+        !record.chunks.is_empty(),
+        "tool-output sidecar has no chunks"
+    );
+    let mut offset = 0_u64;
+    for (index, chunk) in record.chunks.iter().enumerate() {
+        ensure!(
+            valid_sha256(&chunk.sha256),
+            "invalid tool-output sidecar chunk {index} digest"
+        );
+        ensure!(
+            chunk.bytes > 0 && chunk.bytes <= 64 * 1024 * 1024,
+            "invalid tool-output sidecar chunk {index} size"
+        );
+        ensure!(
+            chunk.offset == offset,
+            "tool-output sidecar chunk {index} has a non-contiguous offset"
+        );
+        offset = offset
+            .checked_add(chunk.bytes)
+            .context("tool-output sidecar chunk offsets overflow")?;
+    }
+    ensure!(
+        offset == record.bytes,
+        "tool-output sidecar chunk sizes do not add up"
+    );
+    Ok(record)
+}
+
+/// The sidecar field is optional; when present it must be a valid record.
+pub(crate) fn sidecar_owner_record(owner: Option<&Value>) -> Result<Option<SidecarRecord>> {
+    let Some(value) = owner.and_then(|owner| owner.get(SIDECAR_OWNER_KEY)) else {
+        return Ok(None);
+    };
+    sidecar_record(value).map(Some)
+}
+
+/// Owner verify/restore commands print the sidecar manifest. They may add an
+/// `available` marker, which is not part of the stored record.
+fn sidecar_manifest(stdout: &[u8]) -> Result<SidecarRecord> {
+    let mut value: Value =
+        serde_json::from_slice(stdout).context("mneme returned non-JSON sidecar report")?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("available");
+        object.remove("reason");
+    }
+    sidecar_record(&value)
 }
 
 fn chunk_key(sha256: &str) -> Result<ObjectKey> {
@@ -181,9 +279,94 @@ fn staging(config: &Config) -> Result<tempfile::TempDir> {
         .tempdir_in(parent)?)
 }
 
+/// Subcommands the owner lists under `snapshot --help` (clap's "Commands:"
+/// section). The help request itself must succeed: an owner that cannot even
+/// describe itself is broken, not merely old.
+fn snapshot_commands(config: &Config) -> Result<Vec<String>> {
+    let mut cmd = mneme(config, None);
+    cmd.args(["snapshot", "--help"]);
+    let stdout = process::checked(&mut cmd, config.mneme.timeout_seconds)
+        .context("mneme snapshot --help failed; cannot detect owner capabilities")?;
+    Ok(listed_commands(&String::from_utf8_lossy(&stdout)))
+}
+
+fn listed_commands(help: &str) -> Vec<String> {
+    help.lines()
+        .skip_while(|line| line.trim_end() != "Commands:")
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Ask the owner for an optional tool-output sidecar. Capability is detected
+/// explicitly: an owner that does not list `create-sidecar` has no sidecar,
+/// while any failure of an owner that does list it is propagated, never
+/// mistaken for "no sidecar".
+fn create_sidecar(
+    config: &Config,
+    dir: &Path,
+    journal: &mut Journal,
+    out: &Path,
+) -> Result<Option<SidecarRecord>> {
+    if !snapshot_commands(config)?
+        .iter()
+        .any(|command| command == "create-sidecar")
+    {
+        journal.event(
+            "mneme-sidecar-unsupported",
+            "mneme",
+            json!({"reason": "owner does not list snapshot create-sidecar"}),
+        )?;
+        return Ok(None);
+    }
+    let mut cmd = mneme(config, None);
+    cmd.args(["snapshot", "create-sidecar", "--out"]).arg(out);
+    let stdout = sync::checked(
+        journal,
+        dir,
+        "mneme-snapshot-create-sidecar",
+        json!([
+            "mneme",
+            "--db",
+            "<configured>",
+            "snapshot",
+            "create-sidecar",
+            "--out",
+            out
+        ]),
+        &mut cmd,
+        config.mneme.timeout_seconds,
+    )?;
+    let report: Value =
+        serde_json::from_slice(&stdout).context("mneme returned non-JSON sidecar report")?;
+    ensure!(
+        report.get("schema").and_then(Value::as_str) == Some(SIDECAR_SCHEMA),
+        "unsupported tool-output sidecar report schema"
+    );
+    match report.get("available").and_then(Value::as_bool) {
+        Some(false) => {
+            ensure!(
+                report.get("reason").and_then(Value::as_str) == Some("not_initialized"),
+                "unexpected tool-output sidecar unavailability reason"
+            );
+            Ok(None)
+        }
+        Some(true) => sidecar_manifest(&stdout).map(Some),
+        None => bail!("tool-output sidecar report did not state availability"),
+    }
+}
+
 /// Ask Mneme for a consistent export into `dir`, then re-hash it here so the
-/// digest is not taken on the exporter's word alone.
-pub fn export(config: &Config, dir: &Path, journal: &mut Journal) -> Result<(PathBuf, Value)> {
+/// digest is not taken on the exporter's word alone. An available tool-output
+/// sidecar is chunked into the same namespace and recorded only in owner JSON.
+pub fn export(
+    config: &Config,
+    storage: &dyn ObjectStorage,
+    dir: &Path,
+    journal: &mut Journal,
+) -> Result<(PathBuf, Value)> {
     let out = dir.join(SNAPSHOT_FILE);
     let mut cmd = mneme(config, None);
     cmd.args(["snapshot", "create", "--out"]).arg(&out);
@@ -210,6 +393,31 @@ pub fn export(config: &Config, dir: &Path, journal: &mut Journal) -> Result<(Pat
             && owner.get("bytes").and_then(Value::as_u64) == Some(bytes),
         "mneme-reported digest/size does not match the exported file"
     );
+    let sidecar_out = dir.join(SIDECAR_FILE);
+    let Some(record) = create_sidecar(config, dir, journal, &sidecar_out)? else {
+        return Ok((out, owner));
+    };
+    let (sidecar_sha256, sidecar_bytes) = hash_file(&sidecar_out)?;
+    ensure!(
+        sidecar_sha256 == record.sha256 && sidecar_bytes == record.bytes,
+        "mneme-reported sidecar digest/size does not match the exported file"
+    );
+    let mut sidecar = File::open(&sidecar_out)?;
+    for (index, chunk) in record.chunks.iter().enumerate() {
+        let mut buffer = vec![0_u8; chunk.bytes as usize];
+        let n = read_full(&mut sidecar, &mut buffer)?;
+        ensure!(n == buffer.len(), "sidecar chunk {index} is short");
+        let (published, _) = put_chunk(storage, &buffer)?;
+        ensure!(
+            published.sha256 == chunk.sha256,
+            "sidecar chunk {index} digest does not match the exported file"
+        );
+    }
+    let mut owner = owner;
+    owner
+        .as_object_mut()
+        .context("mneme owner report is not an object")?
+        .insert(SIDECAR_OWNER_KEY.into(), serde_json::to_value(&record)?);
     Ok((out, owner))
 }
 
@@ -302,7 +510,7 @@ pub fn publish(
 ) -> Result<PublishOutcome> {
     let _lock = crate::layer::lock(config, "mneme")?;
     let stage = staging(config)?;
-    let (path, owner) = export(config, stage.path(), journal)?;
+    let (path, owner) = export(config, storage, stage.path(), journal)?;
     let run_id = journal.run_id.clone();
     let mut outcome = publish_file(config, storage, &path, owner, Some(&run_id))?;
     journal.event(
@@ -311,7 +519,7 @@ pub fn publish(
         json!({"id":outcome.id,"sha256":outcome.sha256,"bytes":outcome.bytes,"chunks":outcome.chunks,"new_chunks":outcome.new_chunks}),
     )?;
     if config.mneme.restic {
-        // The staged directory holds only the verified export plus its manifest.
+        // The staged directory holds only the verified export(s) plus its manifest.
         let manifest = storage.get(&manifest_key(&outcome.id)?)?;
         process::write_private(&stage.path().join("rbq-mneme-manifest.json"), &manifest)?;
         let tag = format!("rbq-mneme:{}:{}", journal.run_id, config.mneme.label);
@@ -380,6 +588,13 @@ pub fn stats(storage: &dyn ObjectStorage) -> Result<LayerStats> {
     for manifest in &manifests {
         for chunk in &manifest.chunks {
             referenced.insert(chunk.sha256.clone(), chunk.size);
+        }
+        // Sidecar chunks share the same object namespace but are not part of
+        // the manifest's top-level `chunks`; they are still referenced.
+        if let Some(record) = sidecar_owner_record(Some(&manifest.owner))? {
+            for chunk in &record.chunks {
+                referenced.insert(chunk.sha256.clone(), chunk.bytes);
+            }
         }
     }
     let mut stored = BTreeMap::new();
@@ -461,6 +676,9 @@ pub fn check_manifest(manifest: &LayerManifest, id: &str) -> Result<()> {
             "invalid chunk address or size"
         );
     }
+    // Old manifests have no sidecar field. A present field is part of the
+    // opaque owner JSON and must be a complete, self-consistent record.
+    sidecar_owner_record(Some(&manifest.owner))?;
     Ok(())
 }
 
@@ -497,6 +715,41 @@ pub fn assemble(storage: &dyn ObjectStorage, manifest: &LayerManifest, out: &Pat
     Ok(())
 }
 
+/// Reassemble the optional sidecar from its owner-nested chunk list, checking
+/// each chunk and the whole-file digest before the owner sees it.
+fn assemble_sidecar(storage: &dyn ObjectStorage, record: &SidecarRecord, out: &Path) -> Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(out)
+        .with_context(|| format!("create {}", out.display()))?;
+    let mut whole = Sha256::new();
+    for (index, chunk) in record.chunks.iter().enumerate() {
+        let data = storage
+            .get(&chunk_key(&chunk.sha256)?)
+            .with_context(|| format!("sidecar chunk {index} missing"))?;
+        ensure!(
+            data.len() as u64 == chunk.bytes
+                && format!("{:x}", Sha256::digest(&data)) == chunk.sha256,
+            "sidecar chunk {index} ({}) is damaged",
+            chunk.sha256
+        );
+        whole.update(&data);
+        file.write_all(&data)?;
+    }
+    file.sync_all()?;
+    ensure!(
+        format!("{:x}", whole.finalize()) == record.sha256,
+        "reassembled sidecar digest does not match the owner record"
+    );
+    Ok(())
+}
+
 /// Reassemble and let Mneme validate the result. Writes nothing persistent.
 pub fn verify(
     config: &Config,
@@ -505,6 +758,7 @@ pub fn verify(
     journal: &mut Journal,
 ) -> Result<Value> {
     let manifest = load(storage, id)?;
+    let sidecar = sidecar_owner_record(Some(&manifest.owner))?;
     let stage = staging(config)?;
     let path = stage.path().join(SNAPSHOT_FILE);
     assemble(storage, &manifest, &path)?;
@@ -528,6 +782,34 @@ pub fn verify(
         config.mneme.timeout_seconds,
     )?;
     let owner = owner_json(&stdout)?;
+    if let Some(record) = sidecar {
+        let sidecar_path = stage.path().join(&record.path);
+        assemble_sidecar(storage, &record, &sidecar_path)?;
+        let mut cmd = mneme(config, None);
+        cmd.args(["snapshot", "verify-sidecar"])
+            .arg(&sidecar_path)
+            .args(["--sha256", &record.sha256]);
+        let stdout = sync::checked(
+            journal,
+            stage.path(),
+            "mneme-snapshot-verify-sidecar",
+            json!([
+                "mneme",
+                "snapshot",
+                "verify-sidecar",
+                sidecar_path,
+                "--sha256",
+                record.sha256
+            ]),
+            &mut cmd,
+            config.mneme.timeout_seconds,
+        )?;
+        let verified = sidecar_manifest(&stdout)?;
+        ensure!(
+            verified.sha256 == record.sha256 && verified.bytes == record.bytes,
+            "owner sidecar verification disagrees with the manifest"
+        );
+    }
     Ok(
         json!({"id":manifest.id,"sha256":manifest.sha256,"bytes":manifest.bytes,"chunks":manifest.chunks.len(),"owner_verification":owner}),
     )
@@ -545,6 +827,7 @@ pub fn restore(
     // the destination. A migration refusal must not leave a restored index.
     verify(config, storage, id, journal)?;
     let manifest = load(storage, id)?;
+    let sidecar = sidecar_owner_record(Some(&manifest.owner))?;
     let stage = staging(config)?;
     let path = stage.path().join(SNAPSHOT_FILE);
     assemble(storage, &manifest, &path)?;
@@ -571,6 +854,37 @@ pub fn restore(
         config.mneme.timeout_seconds,
     )?;
     let owner = owner_json(&stdout)?;
+    if let Some(record) = sidecar {
+        let sidecar_path = stage.path().join(&record.path);
+        assemble_sidecar(storage, &record, &sidecar_path)?;
+        let mut cmd = mneme(config, Some(target));
+        cmd.args(["snapshot", "restore-sidecar", "--from"])
+            .arg(&sidecar_path)
+            .args(["--sha256", &record.sha256]);
+        let stdout = sync::checked(
+            journal,
+            target,
+            "mneme-snapshot-restore-sidecar",
+            json!([
+                "mneme",
+                "--db",
+                target,
+                "snapshot",
+                "restore-sidecar",
+                "--from",
+                sidecar_path,
+                "--sha256",
+                record.sha256
+            ]),
+            &mut cmd,
+            config.mneme.timeout_seconds,
+        )?;
+        let restored = sidecar_manifest(&stdout)?;
+        ensure!(
+            restored.sha256 == record.sha256 && restored.bytes == record.bytes,
+            "owner sidecar restore disagrees with the manifest"
+        );
+    }
     Ok(
         json!({"id":manifest.id,"restored_to":target,"sha256":manifest.sha256,"owner_verification":owner}),
     )
@@ -610,6 +924,81 @@ mod tests {
         assert_eq!(
             chunk_key(&"ab".repeat(32)).unwrap().as_str(),
             format!("mneme/v1/chunks/sha256/ab/{}", "ab".repeat(32))
+        );
+    }
+
+    #[test]
+    fn capability_parser_reads_only_the_commands_section() {
+        let help = "Snapshot operations\n\nUsage: mneme snapshot <COMMAND>\n\nCommands:\n  create          Export\n  create-sidecar  Export outputs\n  help            Print this message\n\nOptions:\n  -h, --help  Print help\n";
+        assert_eq!(listed_commands(help), ["create", "create-sidecar", "help"]);
+        assert!(listed_commands("create-sidecar is mentioned in prose\n").is_empty());
+    }
+
+    fn test_record() -> Value {
+        json!({
+            "schema": SIDECAR_SCHEMA,
+            "path": SIDECAR_FILE,
+            "sha256": "ab".repeat(32),
+            "bytes": 10,
+            "chunks": [
+                {"sha256": "cd".repeat(32), "bytes": 6, "offset": 0},
+                {"sha256": "ef".repeat(32), "bytes": 4, "offset": 6}
+            ]
+        })
+    }
+
+    fn test_manifest(owner: Value) -> LayerManifest {
+        LayerManifest {
+            schema: LAYER_SCHEMA.into(),
+            id: "local/x".into(),
+            label: "local".into(),
+            created_at: Utc::now(),
+            run_id: None,
+            sha256: "12".repeat(32),
+            bytes: 8,
+            chunk_bytes: 8,
+            chunks: vec![Chunk {
+                sha256: "34".repeat(32),
+                size: 8,
+            }],
+            owner,
+        }
+    }
+
+    #[test]
+    fn sidecar_records_fail_closed_and_are_optional() {
+        assert!(sidecar_record(&test_record()).is_ok());
+        assert!(check_manifest(&test_manifest(json!({})), "local/x").is_ok());
+        assert!(check_manifest(&test_manifest(test_record()), "local/x").is_ok());
+
+        let mut bad = test_record();
+        bad["schema"] = json!("mneme.outputs-sidecar.v999");
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["path"] = json!("../escape");
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["bytes"] = json!(11);
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["chunks"][1]["offset"] = json!(7);
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["chunks"][0]["sha256"] = json!("zz".repeat(32));
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["chunks"][0]["bytes"] = json!(0);
+        assert!(sidecar_record(&bad).is_err());
+        let mut bad = test_record();
+        bad["extra"] = json!(true);
+        assert!(sidecar_record(&bad).is_err());
+
+        assert!(
+            check_manifest(
+                &test_manifest(json!({"tool_output_sidecar": null})),
+                "local/x"
+            )
+            .is_err()
         );
     }
 }
