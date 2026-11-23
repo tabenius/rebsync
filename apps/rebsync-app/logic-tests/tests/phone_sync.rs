@@ -108,8 +108,8 @@ fn push_to_phone_then_pull_to_another_machine() {
     );
     assert!(fresh.head(&ObjectKey::parse(&key).unwrap()).is_err());
 
-    // A manifest whose chunks are missing is pulled, checked, then removed so
-    // it is never listed as a restorable snapshot.
+    // A manifest whose chunks are missing is checked before publication so it
+    // is never listed, even transiently, as a restorable snapshot.
     let damaged_chunk = &manifest.files[0].chunks[1].sha256;
     let damaged_path = format!(
         "frog/v1/chunks/sha256/{}/{damaged_chunk}",
@@ -132,13 +132,7 @@ fn push_to_phone_then_pull_to_another_machine() {
             .any(|line| line.contains(manifest_key.as_str())),
         "{report:?}"
     );
-    assert!(
-        report
-            .quarantined
-            .iter()
-            .any(|key| key == manifest_key.as_str()),
-        "{report:?}"
-    );
+    assert!(report.quarantined.is_empty(), "{report:?}");
     assert!(quarantine.head(&manifest_key).is_err());
     assert!(!report.clean());
 

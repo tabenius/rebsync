@@ -418,9 +418,10 @@ pub struct SyncReport {
     pub rejected: Vec<String>,
     /// Pull only: newly received snapshots whose chunks and digests check out.
     pub verified: Vec<String>,
-    /// Pull only: newly received snapshots that are incomplete or damaged.
+    /// Pull only: candidate or existing snapshots that are incomplete or damaged.
     pub verification_failed: Vec<String>,
-    /// Pull only: damaged manifests removed again so they are never listed.
+    /// Legacy report field, retained for compatibility. Invalid candidates are
+    /// now refused before publication rather than removed after publication.
     pub quarantined: Vec<String>,
 }
 
@@ -543,7 +544,41 @@ pub fn push(
         let mut missing = Vec::new();
         for (key, size) in &local {
             match remote.get(key) {
-                Some(remote_size) if remote_size == size => report.already_present += 1,
+                Some(remote_size) if remote_size == size => {
+                    let source = storage.get(&ObjectKey::parse(key)?)?;
+                    if source.len() as u64 != *size || admissible(key, &source).is_err() {
+                        report
+                            .rejected
+                            .push(format!("{key}: local object integrity failure"));
+                        continue;
+                    }
+                    if key.contains("/snapshots/") {
+                        let name = key.split('/').next().unwrap_or_default();
+                        if !layer::check_snapshot_bytes(storage, name, key, &source).ok {
+                            report
+                                .rejected
+                                .push(format!("{key}: local snapshot not recoverable"));
+                            continue;
+                        }
+                        if !layer::check_snapshot_with_read(name, key, &source, |k| {
+                            peer.get(k.as_str())
+                        })
+                        .ok
+                        {
+                            report
+                                .rejected
+                                .push(format!("{key}: peer snapshot not recoverable"));
+                            continue;
+                        }
+                    }
+                    if peer.get(key)? == source {
+                        report.already_present += 1;
+                    } else {
+                        report
+                            .conflicts
+                            .push(format!("{key}: existing peer object differs from source"));
+                    }
+                }
                 Some(remote_size) => report.conflicts.push(format!(
                     "{key}: local {size} bytes, peer {remote_size} bytes"
                 )),
@@ -552,15 +587,44 @@ pub fn push(
         }
         for key in ordered(missing) {
             let bytes = storage.get(&ObjectKey::parse(&key)?)?;
+            if bytes.len() as u64 != local[&key] {
+                report
+                    .rejected
+                    .push(format!("{key}: local body size differs from listing"));
+                continue;
+            }
             if let Err(error) = admissible(&key, &bytes) {
                 report.rejected.push(format!("{key}: {error}"));
                 continue;
+            }
+            if key.contains("/snapshots/") {
+                let name = key.split('/').next().unwrap_or_default();
+                // Check this exact candidate, not a second manifest read.
+                if !layer::check_snapshot_bytes(storage, name, &key, &bytes).ok {
+                    report
+                        .rejected
+                        .push(format!("{key}: local snapshot not recoverable"));
+                    continue;
+                }
+                if !layer::check_snapshot_with_read(name, &key, &bytes, |k| peer.get(k.as_str())).ok
+                {
+                    report
+                        .rejected
+                        .push(format!("{key}: peer snapshot not recoverable"));
+                    continue;
+                }
             }
             if peer.put(&key, &bytes)? {
                 report.transferred += 1;
                 report.transferred_bytes += bytes.len() as u64;
             } else {
-                report.already_present += 1;
+                if peer.get(&key)? == bytes {
+                    report.already_present += 1;
+                } else {
+                    report
+                        .conflicts
+                        .push(format!("{key}: competing peer object differs from source"));
+                }
             }
         }
     }
@@ -580,7 +644,6 @@ pub fn pull(
         prefixes: prefixes.to_vec(),
         ..Default::default()
     };
-    let mut new_manifests = Vec::new();
     for prefix in prefixes {
         let local = local_listing(storage, prefix)?;
         let remote = peer.list(prefix)?;
@@ -595,7 +658,37 @@ pub fn pull(
                 continue;
             }
             match local.get(key) {
-                Some(local_size) if local_size == size => report.already_present += 1,
+                Some(local_size) if local_size == size => {
+                    let existing = storage.get(&ObjectKey::parse(key)?)?;
+                    let incoming = peer.get(key)?;
+                    if existing.len() as u64 != *size
+                        || incoming.len() as u64 != *size
+                        || admissible(key, &existing).is_err()
+                        || admissible(key, &incoming).is_err()
+                    {
+                        report
+                            .rejected
+                            .push(format!("{key}: existing object fails integrity validation"));
+                    } else if existing != incoming {
+                        report
+                            .conflicts
+                            .push(format!("{key}: same-size local and peer objects differ"));
+                    } else if key.contains("/snapshots/")
+                        && !layer::check_snapshot_bytes(
+                            storage,
+                            key.split('/').next().unwrap_or_default(),
+                            key,
+                            &existing,
+                        )
+                        .ok
+                    {
+                        report
+                            .verification_failed
+                            .push(format!("{key}: existing snapshot not recoverable"));
+                    } else {
+                        report.already_present += 1;
+                    }
+                }
                 Some(local_size) => report.conflicts.push(format!(
                     "{key}: local {local_size} bytes, peer {size} bytes"
                 )),
@@ -614,39 +707,39 @@ pub fn pull(
                 report.rejected.push(format!("{key}: {error}"));
                 continue;
             }
-            match storage.put_if_absent(&ObjectKey::parse(&key)?, &bytes)? {
+            let manifest = key.contains("/snapshots/");
+            if manifest {
+                let check = layer::check_snapshot_bytes(
+                    storage,
+                    key.split('/').next().unwrap_or_default(),
+                    &key,
+                    &bytes,
+                );
+                if !check.ok {
+                    report
+                        .verification_failed
+                        .push(format!("{key}: {}", check.error.unwrap_or_default()));
+                    continue;
+                }
+            }
+            let object_key = ObjectKey::parse(&key)?;
+            match storage.put_if_absent(&object_key, &bytes)? {
                 PutOutcome::Created(_) => {
                     report.transferred += 1;
                     report.transferred_bytes += bytes.len() as u64;
-                    if key.contains("/snapshots/") {
-                        new_manifests.push(key.clone());
+                    if manifest {
+                        report.verified.push(key.clone());
                     }
                 }
-                PutOutcome::AlreadyExists(_) => report.already_present += 1,
-            }
-        }
-    }
-    // A pulled snapshot is only as good as its chunks: check each new one.
-    for key in new_manifests {
-        let layer_name = key.split('/').next().unwrap_or_default().to_owned();
-        let check = layer::check_snapshot(storage, &layer_name, &key);
-        if check.ok {
-            report.verified.push(key);
-        } else {
-            let error = check.error.unwrap_or_default();
-            // This manifest was created by this pull and did not exist locally
-            // before. Removing it is not deletion propagation: it keeps a
-            // damaged snapshot from being listed as if it were restorable.
-            match storage.delete(&ObjectKey::parse(&key)?) {
-                Ok(()) => {
-                    report.quarantined.push(key.clone());
-                    report
-                        .verification_failed
-                        .push(format!("{key}: {error} (manifest removed)"));
+                PutOutcome::AlreadyExists(_) => {
+                    if storage.get(&object_key)? == bytes {
+                        report.already_present += 1;
+                    } else {
+                        report
+                            .conflicts
+                            .push(format!("{key}: competing local object differs from peer"));
+                    }
                 }
-                Err(delete_error) => report.verification_failed.push(format!(
-                    "{key}: {error}; could not remove manifest: {delete_error}"
-                )),
             }
         }
     }

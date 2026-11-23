@@ -267,8 +267,15 @@ and `/`; empty segments, traversal, leading/trailing slashes and overlong keys a
 rejected, and symlinks at any key component, including the leaf, are refused.
 Filesystem publication is fsynced. Deletion exists for storage administration
 only: no synchronization policy propagates repository deletions between peers.
-A manifest received from a peer is removed only when its own snapshot check
-fails, so damaged metadata is not advertised as restorable.
+Candidate manifests are checked against stored chunks before publication;
+damaged metadata is never briefly advertised and then deleted by the pull path.
+
+Existing same-sized chunks are SHA-256 verified before reuse, including a lost
+create-only race. Peer push/pull compare actual existing bytes rather than
+trusting inventory sizes. Push checks source and destination chunks before
+publishing a manifest. Repeated exchanges therefore incur read I/O and network
+traffic even when no new objects are written. Byte integrity is not identity
+verification or owner-level validation.
 
 ## Owner schemas and migrations
 
@@ -689,17 +696,17 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   ever deleted.
 - **Chunks travel before manifests,** so an interrupted sync never leaves a
   snapshot whose data is missing. Running it again finishes the job; a repeat
-  sync of an up-to-date phone transfers nothing.
+  sync of an up-to-date phone writes no new objects but reads bytes to verify them.
 - **Pulled data is untrusted:**
   - Each chunk is re-hashed against its address.
   - Manifests must parse.
-  - Only `mneme/`, `frog/` and `agenda/` objects are accepted.
+   - Only canonical supported layer objects are accepted.
   - Rejected objects are listed and never stored.
 
-  Each newly pulled snapshot is then checked chunk by chunk (`verified` /
-  `verification_failed` in the report; failures exit `2`). A newly received
-  manifest that fails this check is removed again (`quarantined`) so a damaged
-  snapshot is never listed as if it were restorable. Owner validation
+  Each candidate snapshot is checked chunk by chunk **before** publication
+  (`verified` / `verification_failed` in the report; failures exit `2`). Invalid
+  manifests are not stored; the legacy `quarantined` report field remains empty.
+  Owner validation
   (SQLite integrity, edition manifests) is still `rbq <layer> verify ID`.
 - **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
   hotspot or USB tethering. Listings page with `after=`, which needs Rebeqah

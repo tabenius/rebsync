@@ -221,15 +221,26 @@ pub fn staging(config: &Config, layer: &str) -> Result<tempfile::TempDir> {
         .tempdir_in(parent)?)
 }
 
-/// Write one chunk unless an identical-size object already exists.
+/// Write one chunk unless the existing bytes verify against its address.
 pub fn put_chunk(storage: &dyn ObjectStorage, prefix: &str, data: &[u8]) -> Result<(Chunk, bool)> {
     let sha256 = format!("{:x}", Sha256::digest(data));
     let key = chunk_key(prefix, &sha256)?;
     let size = data.len() as u64;
-    // Most chunks of a republished snapshot exist already; HEAD avoids
-    // rewriting them. put_if_absent still guards the race.
+    // Inventory sizes are hints, never proof of integrity. Also verify the
+    // winning object when a competing writer creates it after our HEAD.
+    let verify_existing = || -> Result<()> {
+        let actual = storage.get(&key)?;
+        ensure!(
+            actual.len() as u64 == size && format!("{:x}", Sha256::digest(&actual)) == sha256,
+            "{key}: existing chunk digest or size mismatch"
+        );
+        Ok(())
+    };
     match storage.head(&key) {
-        Ok(meta) if meta.size == size => return Ok((Chunk { sha256, size }, false)),
+        Ok(meta) if meta.size == size => {
+            verify_existing()?;
+            return Ok((Chunk { sha256, size }, false));
+        }
         Ok(meta) => {
             return Err(StorageError::Corrupt(format!(
                 "{key}: stored {} bytes, expected {size}",
@@ -250,6 +261,7 @@ pub fn put_chunk(storage: &dyn ObjectStorage, prefix: &str, data: &[u8]) -> Resu
                 ))
                 .into());
             }
+            verify_existing()?;
             false
         }
     };
@@ -866,6 +878,16 @@ pub(crate) fn check_snapshot_bytes(
     key: &str,
     bytes: &[u8],
 ) -> SnapshotCheck {
+    check_snapshot_with_read(layer, key, bytes, |key| Ok(storage.get(key)?))
+}
+
+/// Same candidate validation over a transport reader, without copying policy.
+pub(crate) fn check_snapshot_with_read(
+    layer: &str,
+    key: &str,
+    bytes: &[u8],
+    mut read: impl FnMut(&ObjectKey) -> Result<Vec<u8>>,
+) -> SnapshotCheck {
     let mut check = SnapshotCheck {
         layer: layer.into(),
         key: key.into(),
@@ -881,8 +903,7 @@ pub(crate) fn check_snapshot_bytes(
         for file in &files {
             let mut whole = Sha256::new();
             for (index, chunk) in file.chunks.iter().enumerate() {
-                let data = storage
-                    .get(&chunk_key(&prefix(layer), &chunk.sha256)?)
+                let data = read(&chunk_key(&prefix(layer), &chunk.sha256)?)
                     .with_context(|| format!("{}: chunk {index} missing", file.path))?;
                 ensure!(
                     data.len() as u64 == chunk.size
