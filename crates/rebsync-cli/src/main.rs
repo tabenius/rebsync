@@ -16,8 +16,8 @@ mod ui;
     version,
     styles = ui::styles(),
     about = "Preserve work, safely exchange Git branches, report unresolved risks",
-    long_about = "rbq preserves local work, exchanges Git branches safely, and reports what is still at risk.\n\nBare invocation is always a dry run. --apply executes the plan; --json emits machine-readable results; --verbose adds stderr traces.",
-    after_help = "EXAMPLES:\n  rbq                                  # dry-run inventory and journal\n  rbq src/ragbaz --apply --json         # execute with machine output\n  rbq completions install fish          # install fish completion script\n\nENVIRONMENT:\n  PAGER, RBQ_PAGER, LESS                # pager for long human help/reports\n  NO_COLOR, CLICOLOR, CLICOLOR_FORCE    # standard colour overrides\n  RBQ_COLOR=auto|always|never           # rbq-specific colour override\n  RBQ_THEME=ragbaz|ragbaz-night         # printed or dark-terminal palette\n\nSAFETY:\n  No deletion is propagated and no live binary is replaced."
+    long_about = "rbq preserves local work, exchanges Git branches safely, and reports what is still at risk.\n\nBare invocation is always a dry run. --apply executes the plan; --json emits machine-readable results; --verbose adds stderr traces. Self-built binaries can be published, verified, restored and re-fetched from private R2 through the binaries layer.",
+    after_help = "EXAMPLES:\n  rbq                                  # dry-run inventory and journal\n  rbq src/ragbaz --apply --json         # execute with machine output\n  rbq status --watch                    # read-only overview, refreshed\n  rbq binaries publish /path/to/rbq --tool rbq --version 0.1.0\n  rbq binaries fetch --tool rbq --into /tmp/rbq-restored\n  rbq completions install fish          # install fish completion script\n\nENVIRONMENT:\n  PAGER, RBQ_PAGER, LESS                # pager for long human help/reports\n  NO_COLOR, CLICOLOR, CLICOLOR_FORCE    # standard colour overrides\n  RBQ_COLOR=auto|always|never           # rbq-specific colour override\n  RBQ_THEME=ragbaz|ragbaz-night         # printed or dark-terminal palette\n\nSAFETY:\n  No deletion is propagated and no live binary is replaced."
 )]
 struct Cli {
     /// Rebeqah home; defaults to $HOME. Bare invocation is a dry-run.
@@ -160,6 +160,24 @@ enum Action {
     /// `restic -r rest:https://USER:PASSWORD@HOST:PORT/` can then init, back
     /// up, list, restore and check. Plain HTTP is accepted only on loopback.
     ResticServe(ResticServeArgs),
+    /// Self-built binaries worth preserving: fetch instead of rebuilding.
+    Binaries {
+        #[command(subcommand)]
+        command: BinariesAction,
+    },
+    /// Read-only overview of synced layers, private mirrors, storage and Git remotes.
+    Status {
+        /// Refresh continuously at this interval in seconds; default 2 when omitted.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "2",
+            conflicts_with = "json"
+        )]
+        watch: Option<f64>,
+    },
     /// Serve a read-only instructions and status page (HTTPS on localhost by
     /// default) and announce it via Avahi/mDNS and D-Bus where available.
     Serve {
@@ -519,7 +537,7 @@ enum PeerAction {
     Push {
         #[command(flatten)]
         target: PeerTargetArgs,
-        /// Restrict to these layers (mneme, frog, agenda); default all.
+        /// Restrict to these layers (mneme, frog, agenda, git, hypomnema, binaries).
         #[arg(long = "layer")]
         layers: Vec<String>,
     },
@@ -612,6 +630,67 @@ enum MnemeAction {
     },
 }
 #[derive(Subcommand)]
+enum BinariesAction {
+    /// Publish local executables with provenance; mirrors to private R2 when configured.
+    Publish {
+        /// Local executable. Repeat for several tools in one snapshot.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Tool name, e.g. rbq. One per path, in the same order.
+        #[arg(long, required = true)]
+        tool: Vec<String>,
+        /// Version or source revision. One per path, in the same order.
+        #[arg(long, required = true)]
+        version: Vec<String>,
+        /// Compilation target, e.g. x86_64-unknown-linux-gnu.
+        #[arg(long)]
+        target: Option<String>,
+        /// Source checkout or crate that produced the binaries.
+        #[arg(long)]
+        source: Option<String>,
+        /// Exact rebuild command recorded for peers.
+        #[arg(long)]
+        build_command: Option<String>,
+        /// Where a peer should install the binary.
+        #[arg(long)]
+        install_path: Option<PathBuf>,
+        /// Human note; never a secret.
+        #[arg(long)]
+        note: Option<String>,
+        /// Label for this snapshot; defaults to [binaries].label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List published binary snapshots, oldest first.
+    List {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Read-only storage accounting.
+    Stats,
+    /// Retention: drop old snapshots and unreferenced chunks (dry-run by default).
+    Prune(PruneArgs),
+    /// Reassemble and verify every digest in a snapshot.
+    Verify { id: String },
+    /// Restore a tool from a snapshot to a new path; never overwrites.
+    Restore {
+        id: String,
+        #[arg(long, required = true)]
+        tool: String,
+        #[arg(long, required = true)]
+        into: PathBuf,
+    },
+    /// Re-fetch a tool, restoring objects from private R2 when needed.
+    Fetch {
+        #[arg(long, required = true)]
+        tool: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, required = true)]
+        into: PathBuf,
+    },
+}
+#[derive(Subcommand)]
 enum ConfigAction {
     Explain,
 }
@@ -623,7 +702,7 @@ enum StorageAction {
     Check,
     /// Check every layer snapshot: chunk and whole-file digests (read-only).
     Fsck {
-        /// Restrict to these layers (mneme, frog, agenda); default all.
+        /// Restrict to these layers (mneme, frog, agenda, git, hypomnema, binaries).
         #[arg(long = "layer")]
         layers: Vec<String>,
     },
@@ -896,6 +975,129 @@ fn hypomnema_action(config: &rebsync_core::Config, action: HypomnemaAction) -> R
 #[cfg(not(feature = "storage"))]
 fn hypomnema_action(_: &rebsync_core::Config, _: HypomnemaAction) -> Result<i32> {
     bail!("rbq was built without the storage feature")
+}
+
+#[cfg(feature = "storage")]
+fn binaries_action(
+    config: &rebsync_core::Config,
+    action: BinariesAction,
+    json: bool,
+) -> Result<i32> {
+    use rebsync_core::binaries::BinarySpec;
+    use rebsync_core::{FsObjectStorage, binaries, journal::Journal, layer as layers};
+    use serde_json::json;
+
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    let value = match action {
+        BinariesAction::List { label } => {
+            json!({"snapshots": binaries::list(&storage, label.as_deref())?})
+        }
+        BinariesAction::Stats => {
+            let stats = layers::stats(&storage, binaries::LAYER)?;
+            let value = serde_json::to_value(&stats)?;
+            if stats.missing_chunks > 0 {
+                eprintln!(
+                    "{} missing chunks; restore objects from private R2 with 'rbq binaries fetch'",
+                    stats.missing_chunks
+                );
+                return Ok(2);
+            }
+            value
+        }
+        BinariesAction::Prune(args) => return prune_layer(config, binaries::LAYER, args),
+        BinariesAction::Publish {
+            paths,
+            tool,
+            version,
+            target,
+            source,
+            build_command,
+            install_path,
+            note,
+            label,
+        } => {
+            anyhow::ensure!(
+                paths.len() == tool.len() && paths.len() == version.len(),
+                "--tool and --version must be supplied once per path"
+            );
+            let mut config = config.clone();
+            if let Some(label) = label {
+                binaries::validate_name(&label)?;
+                config.binaries.label = label;
+            }
+            let specs: Vec<BinarySpec> = paths
+                .into_iter()
+                .zip(tool)
+                .zip(version)
+                .map(|((path, tool), version)| BinarySpec {
+                    tool,
+                    version,
+                    path,
+                    target: target.clone(),
+                    source: source.clone(),
+                    build_command: build_command.clone(),
+                    install_path: install_path.clone(),
+                    note: note.clone(),
+                })
+                .collect();
+            if config.binaries.restic
+                && config.binaries.repository.is_none()
+                && config.backup.repository.is_none()
+            {
+                bail!("binaries.restic requires binaries.repository or backup.repository");
+            }
+            let mut journal = Journal::open(&config.rbq_home)?;
+            serde_json::to_value(binaries::publish(&config, &storage, &specs, &mut journal)?)?
+        }
+        BinariesAction::Verify { id } => {
+            let mut journal = Journal::open(&config.rbq_home)?;
+            binaries::verify(config, &storage, &id, &mut journal)?
+        }
+        BinariesAction::Restore { id, tool, into } => {
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let into = if into.is_absolute() {
+                into
+            } else {
+                std::env::current_dir()?.join(into)
+            };
+            binaries::restore(config, &storage, &id, &tool, &into, &mut journal)?
+        }
+        BinariesAction::Fetch {
+            tool,
+            version,
+            into,
+        } => {
+            let mut journal = Journal::open(&config.rbq_home)?;
+            let into = if into.is_absolute() {
+                into
+            } else {
+                std::env::current_dir()?.join(into)
+            };
+            binaries::fetch(
+                config,
+                &storage,
+                &tool,
+                version.as_deref(),
+                &into,
+                &mut journal,
+            )?
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        ui::print_binary_report(&value);
+    }
+    Ok(0)
+}
+
+#[cfg(not(feature = "storage"))]
+fn binaries_action(
+    _config: &rebsync_core::Config,
+    _action: BinariesAction,
+    _json: bool,
+) -> Result<i32> {
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
 #[cfg(feature = "storage")]
@@ -1218,7 +1420,7 @@ fn layer_prefixes(layers: &[String]) -> Result<Vec<String>> {
                 Ok(format!("{l}/"))
             } else {
                 bail!(
-                    "unknown layer {l}; use mneme, frog, agenda, git or hypomnema (explicit opt-in)"
+                    "unknown layer {l}; use mneme, frog, agenda or git, or the explicit opt-ins hypomnema and binaries"
                 )
             }
         })
@@ -1474,6 +1676,62 @@ fn install_completions(args: &InstallCompletionsArgs, json: bool) -> Result<i32>
     Ok(0)
 }
 
+#[cfg(feature = "storage")]
+fn status_action(
+    config: &rebsync_core::Config,
+    watch: Option<f64>,
+    json: bool,
+    verbose: u8,
+) -> Result<i32> {
+    use rebsync_core::{FsObjectStorage, status};
+
+    if let Some(seconds) = watch {
+        anyhow::ensure!(
+            seconds.is_finite() && (0.25..=3600.0).contains(&seconds),
+            "--watch interval must be a finite number between 0.25 and 3600 seconds"
+        );
+    }
+    let storage = FsObjectStorage::open(&config.storage.root)?;
+    loop {
+        let value = status::collect(config, &storage, verbose)?;
+        let code = if value["overall"]["state"].as_str() == Some("attention")
+            || value["overall"]["pending_bytes"].as_u64().unwrap_or(0) > 0
+        {
+            2
+        } else {
+            0
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else if watch.is_some() {
+            print!(
+                "{}{}",
+                ui::clear_screen(),
+                ui::render_status(&value, verbose)
+            );
+            io::stdout().flush()?;
+        } else {
+            ui::print_status(&value, verbose);
+        }
+        match watch {
+            None => return Ok(code),
+            Some(seconds) => {
+                std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "storage"))]
+fn status_action(
+    _config: &rebsync_core::Config,
+    _watch: Option<f64>,
+    _json: bool,
+    _verbose: u8,
+) -> Result<i32> {
+    bail!("rbq was built without the storage feature; rebuild with --features storage")
+}
+
 fn main() {
     match entry() {
         Ok(code) => std::process::exit(code),
@@ -1595,7 +1853,8 @@ fn entry() -> Result<i32> {
     ui::trace(
         2,
         format!(
-            "layers: mneme={} frog={} agenda={} git={}",
+            "layers: binaries={} mneme={} frog={} agenda={} git={}",
+            config.config.binaries.enabled,
             config.config.mneme.enabled,
             config.config.frog.enabled,
             config.config.agenda.enabled,
@@ -1656,6 +1915,12 @@ fn entry() -> Result<i32> {
         Some(Action::Peer { command }) => return peer_action(&config.config, command, cli.json),
         Some(Action::Drive { command }) => return drive_action(&config.config, command, cli.json),
         Some(Action::Git { command }) => return git_action(&config.config, command, cli.json),
+        Some(Action::Binaries { command }) => {
+            return binaries_action(&config.config, command, cli.json);
+        }
+        Some(Action::Status { watch }) => {
+            return status_action(&config.config, watch, cli.json, cli.verbose);
+        }
         Some(Action::ResticServe(args)) => return restic_serve(&config.config, &args),
         Some(Action::Serve {
             port,

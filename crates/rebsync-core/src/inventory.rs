@@ -32,7 +32,7 @@ pub struct Repository {
     pub remotes: Vec<Remote>,
     pub warnings: Vec<String>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct Inventory {
     pub repositories: Vec<Repository>,
     pub errors: Vec<String>,

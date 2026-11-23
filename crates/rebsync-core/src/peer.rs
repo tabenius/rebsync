@@ -747,14 +747,19 @@ pub fn pull(
     Ok(report)
 }
 
-/// Default peer exchange excludes explicitly sensitive evacuation handoffs.
-/// The hypomnema layer remains available via `--layer hypomnema`, but must never
-/// silently follow the default multi-layer peer transfer policy.
+/// Layers a peer exchange includes only when named with `--layer`.
+///
+/// Hypomnema holds sensitive evacuation handoffs. Binaries are executables
+/// whose provenance is only the publisher's claim: pulling them by default
+/// would let any paired peer offer the "newest" tool to `rbq binaries fetch`.
+pub const OPT_IN_LAYERS: &[&str] = &["hypomnema", "binaries"];
+
+/// Default peer exchange excludes the explicit opt-in layers.
 pub fn default_prefixes() -> Vec<String> {
     layer::LAYERS
         .iter()
         .copied()
-        .filter(|layer| *layer != "hypomnema")
+        .filter(|layer| !OPT_IN_LAYERS.contains(layer))
         .map(|layer| format!("{layer}/"))
         .collect()
 }
@@ -769,6 +774,7 @@ mod tests {
         assert_eq!(defaults, vec!["mneme/", "frog/", "agenda/", "git/"]);
         assert!(!defaults.contains(&"hypomnema/".to_owned()));
         assert!(layer::LAYERS.contains(&"hypomnema"));
+        assert!(!default_prefixes().contains(&"binaries/".to_string()));
     }
 
     #[cfg(feature = "peer-http")]
