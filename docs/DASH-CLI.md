@@ -14,6 +14,12 @@ Store the token in a regular, current-user-owned file with mode `0600` or `0400`
 Symlinks, sockets/devices and group/world-readable token files are refused.
 Do not put bearer tokens in command arguments, URLs or shell history.
 
+The repository contract accepts two token kinds: `rbm_` MCP credentials and
+`rbs_` sync credentials. A sync credential comes from passkey-approved device
+pairing in Dash; it is scoped (describe/list/read/append), bound to one
+repository, and revocable on its own, and it carries no MCP or artifact access.
+Its endpoint is `/api/rbq/<key_id>` for the credential's own key ID.
+
 Repository operations use `https://dash.ragbaz.cc/api/rbq/ID`; artifact operations
 use `https://dash.ragbaz.cc/mcp/ID`. The ID is the credential ID, not the stable
 repository UUID. Rotation changes the URL/token, not the account repository.

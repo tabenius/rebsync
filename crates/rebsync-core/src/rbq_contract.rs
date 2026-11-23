@@ -15,11 +15,15 @@ pub const MAX_OBJECT_BYTES: usize = 262144;
 pub const LIST_LIMIT_MAX: usize = 100;
 pub const LIST_LIMIT_DEFAULT: usize = 20;
 
-/// `rbm_` followed by 64 lowercase hex digits, as Dash issues them.
+/// `rbm_` (MCP credential) or `rbs_` (paired sync credential) followed by 64
+/// lowercase hex digits, as Dash issues them.
 pub fn valid_token(token: &str) -> bool {
-    token.strip_prefix("rbm_").is_some_and(|hex| {
-        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
+    ["rbm_", "rbs_"]
+        .iter()
+        .find_map(|prefix| token.strip_prefix(prefix))
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 /// A lowercase hyphenated UUID, the repository endpoint identifier.

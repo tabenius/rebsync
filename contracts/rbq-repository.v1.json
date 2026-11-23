@@ -13,7 +13,11 @@
   "authentication": {
     "header": "Authorization",
     "scheme": "Bearer",
-    "token_pattern": "^rbm_[0-9a-f]{64}$"
+    "token_pattern": "^rb[ms]_[0-9a-f]{64}$",
+    "token_kinds": {
+      "rbm_": "MCP credential issued from Dash's MCP access panel",
+      "rbs_": "Dedicated sync credential issued by passkey-approved device pairing; scoped and independently revocable"
+    }
   },
   "routes": {
     "describe": { "method": "GET", "path": "" },
@@ -62,8 +66,8 @@
       "invalid": ["/", "/a", "a//", "a//b", "../", "a/../", "a?", "a b"]
     },
     "tokens": {
-      "valid": ["rbm_0000000000000000000000000000000000000000000000000000000000000000", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
-      "invalid": ["", "rbm_", "rbm_0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde", "rbk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+      "valid": ["rbm_0000000000000000000000000000000000000000000000000000000000000000", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "rbs_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+      "invalid": ["", "rbm_", "rbm_0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", "rbm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde", "rbk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "rbs_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF", "rbsx0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
     },
     "endpoint_ids": {
       "valid": ["00000000-0000-0000-0000-000000000000", "0f8e6d4c-1234-4abc-9def-0123456789ab"],
