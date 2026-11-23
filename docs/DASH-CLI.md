@@ -92,6 +92,33 @@ command, point `--storage-root` at
 
 ## Read-only artifact navigation
 
+Arrival events are a durable stream, independent of Web Push delivery:
+The `arrivals` and `watch` commands require CLI 0.1.3 or newer; 0.1.2 contains
+repository exchange and the earlier artifact navigation commands only.
+
+```sh
+rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" arrivals --after 0
+rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" watch --after "$LAST_CURSOR"
+rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" watch --notify
+```
+
+`watch` emits one JSON line per bounded page and retains its cursor in memory;
+persist the emitted `next_after` yourself and pass it back on restart. It does
+not mark events read. `--batches 1` bounds a smoke test; zero watches until
+interrupted. Polling is at least five seconds apart when idle. Transport errors
+exit rather than pretending the stream is empty. `--notify` is explicit opt-in
+to a fixed `notify-send` command with generic text only; it never sends private
+subjects, gift contents, URLs or approval actions to the desktop. Missing desktop
+notification support is reported in JSON without losing the arrival page.
+Backfill pages coalesce desktop alerts to at most one attempt per polling
+interval rather than opening a notification for each historical page.
+
+Dash PWA Web Push and Tauri native notifications are delivery surfaces for the
+same inbox, not alternative gift identities or authorization systems. Arrival
+does not establish ownership, verify a signature, accept a gift or approve an
+invitation. These commands need the corresponding deployed arrival MCP tool;
+older Dash deployments refuse it explicitly.
+
 ```sh
 rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" sources
 rbq artifacts --endpoint "$MCP_ENDPOINT" --token-file "$TOKEN_FILE" list --limit 20

@@ -186,3 +186,38 @@ fn rejects_invalid_endpoints_refs_and_insecure_token_files_before_connecting() {
         assert!(Artifacts::from_token_file(&endpoint, &socket).is_err());
     }
 }
+
+#[test]
+fn arrivals_preserve_cursor_and_source_boundaries_without_acknowledging_actions() {
+    fixture(
+        |input| {
+            assert_eq!(input["params"]["name"], "artifacts_list_arrivals");
+            assert_eq!(input["params"]["arguments"], json!({"after":4,"limit":10}));
+            json!({"jsonrpc":"2.0","id":input["id"],"result":{"structuredContent":{
+                "schema":"ragbaz.arrivals.v1","events":[{"seq":7,"id":"gift-one","kind":"gift.arrived","ref":{"source_id":"phone","id":"same-name"}}],
+                "next_after":7,"has_more":false
+            }}})
+        },
+        |mut client| {
+            let page = client.arrivals(4, 10).unwrap();
+            assert_eq!(page["next_after"], 7);
+            assert_eq!(page["events"][0]["ref"]["source_id"], "phone");
+            assert_eq!(page["trusted"], false);
+        },
+    );
+}
+
+#[test]
+fn arrivals_refuse_nonadvancing_or_fabricated_continuation_cursors() {
+    for page in [
+        json!({"schema":"ragbaz.arrivals.v1","events":[],"next_after":999,"has_more":false}),
+        json!({"schema":"ragbaz.arrivals.v1","events":[],"next_after":0,"has_more":true}),
+        json!({"schema":"ragbaz.arrivals.v1","events":[{"seq":0,"ref":{"source_id":"a","id":"b"}}],"next_after":0,"has_more":false}),
+        json!({"schema":"ragbaz.arrivals.v1","events":[{"seq":1,"ref":{"source_id":"","id":"b"}}],"next_after":1,"has_more":false}),
+    ] {
+        fixture(
+            move |input| json!({"jsonrpc":"2.0","id":input["id"],"result":{"structuredContent":page}}),
+            |mut client| assert!(client.arrivals(0, 10).is_err()),
+        );
+    }
+}

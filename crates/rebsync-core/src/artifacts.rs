@@ -9,6 +9,7 @@ use std::path::Path;
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
 const PROTOCOL: &str = "2025-03-26";
 const TOOLS: &[&str] = &[
+    "artifacts_list_arrivals",
     "artifacts_list_sources",
     "artifacts_list",
     "artifacts_get",
@@ -160,6 +161,48 @@ impl Artifacts {
 
     pub fn sources(&mut self) -> Result<Value> {
         self.call("artifacts_list_sources", json!({}))
+    }
+
+    /// Durable, account-private arrival stream. This never marks events read,
+    /// accepts a gift or invokes a HITL decision/signing tool.
+    pub fn arrivals(&mut self, after: u64, limit: usize) -> Result<Value> {
+        ensure!(
+            after <= 9_007_199_254_740_991 && (1..=50).contains(&limit),
+            "arrival cursor must be a safe nonnegative integer; limit must be 1..50"
+        );
+        let value = self.call(
+            "artifacts_list_arrivals",
+            json!({"after":after,"limit":limit}),
+        )?;
+        ensure!(
+            value["schema"] == "ragbaz.arrivals.v1",
+            "unsupported arrival stream schema"
+        );
+        let events = value["events"]
+            .as_array()
+            .context("arrival stream omitted events")?;
+        ensure!(
+            events.len() <= limit && value["has_more"].is_boolean(),
+            "invalid arrival page"
+        );
+        let mut previous = after;
+        for event in events {
+            let seq = event["seq"].as_u64().context("arrival omitted sequence")?;
+            ensure!(
+                seq > previous && seq <= 9_007_199_254_740_991,
+                "arrival sequences must advance within safe bounds"
+            );
+            let reference: SourceRef = serde_json::from_value(event["ref"].clone())
+                .context("arrival omitted source-scoped reference")?;
+            reference.validate()?;
+            previous = seq;
+        }
+        ensure!(
+            value["next_after"].as_u64() == Some(previous)
+                && (!events.is_empty() || value["has_more"] == false),
+            "invalid arrival continuation cursor"
+        );
+        Ok(value)
     }
 
     pub fn list(

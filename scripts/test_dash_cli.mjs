@@ -92,6 +92,13 @@ test('Linux CLI → private Dash MCP/HTTP → real SQLite and R2', { skip: !sour
   const push = ['push', '--store', local, '--source-id', 'laptop-uuid', '--source-name', 'Laptop', '--layer', 'frog']
   assert.equal((await run('repository', ...push)).transferred, 2)
   assert.equal((await run('repository', ...push)).transferred, 0)
+  const arrivals = await run('artifacts', 'arrivals')
+  assert.equal(arrivals.events.length, 1)
+  assert.equal(arrivals.events[0].kind, 'sync.artifact.arrived')
+  assert.equal(arrivals.events[0].ref.source_id, 'laptop-uuid')
+  const watched = await run('artifacts', 'watch', '--batches', '1')
+  assert.equal(watched.next_after, arrivals.next_after)
+  assert.equal(watched.desktop_notification, undefined) // Opt-in only; no visible test notifications.
   assert.equal((await run('repository', 'sources')).sources[0].name, 'Laptop')
   const destination = join(directory, 'destination')
   const pull = ['pull', '--store', destination, '--source-id', 'laptop-uuid', '--layer', 'frog']
