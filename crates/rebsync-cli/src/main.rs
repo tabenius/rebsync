@@ -1,8 +1,12 @@
 use anyhow::{Result, bail};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use rebsync_core::{ConfigOverrides, RunOptions, load_config};
-use std::path::PathBuf;
+use std::{
+    io::{self, ErrorKind as IoErrorKind, Write},
+    path::PathBuf,
+};
 mod artifacts_cli;
+mod completions;
 mod repository_cli;
 mod ui;
 
@@ -11,7 +15,9 @@ mod ui;
     name = "rbq",
     version,
     styles = ui::styles(),
-    about = "Preserve work, safely exchange Git branches, report unresolved risks"
+    about = "Preserve work, safely exchange Git branches, report unresolved risks",
+    long_about = "rbq preserves local work, exchanges Git branches safely, and reports what is still at risk.\n\nBare invocation is always a dry run. --apply executes the plan; --json emits machine-readable results; --verbose adds stderr traces.",
+    after_help = "EXAMPLES:\n  rbq                                  # dry-run inventory and journal\n  rbq src/ragbaz --apply --json         # execute with machine output\n  rbq completions install fish          # install fish completion script\n\nENVIRONMENT:\n  PAGER, RBQ_PAGER, LESS                # pager for long human help/reports\n  NO_COLOR, CLICOLOR, CLICOLOR_FORCE    # standard colour overrides\n  RBQ_COLOR=auto|always|never           # rbq-specific colour override\n  RBQ_THEME=ragbaz|ragbaz-night         # printed or dark-terminal palette\n\nSAFETY:\n  No deletion is propagated and no live binary is replaced."
 )]
 struct Cli {
     /// Rebeqah home; defaults to $HOME. Bare invocation is a dry-run.
@@ -28,6 +34,9 @@ struct Cli {
     /// Terminal styling; JSON and completion scripts always remain uncolored.
     #[arg(long, global = true, value_enum, default_value = "auto")]
     color: ui::ColorMode,
+    /// Add stderr traces; repeat for more detail.
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
     #[command(subcommand)]
     command: Option<Action>,
 }
@@ -64,17 +73,43 @@ struct Common {
     #[arg(long, global = true)]
     mneme_db: Option<PathBuf>,
 }
+#[derive(Args)]
+struct InstallCompletionsArgs {
+    /// Shell to install: bash, fish, or all.
+    #[arg(value_enum)]
+    shell: completions::InstallShell,
+    /// Show the installation plan without writing files.
+    #[arg(long)]
+    dry_run: bool,
+    /// Replace an existing completion script with different content.
+    #[arg(long)]
+    force: bool,
+    /// Install in system locations instead of XDG user locations.
+    #[arg(long)]
+    system: bool,
+}
+#[derive(Subcommand)]
+enum CompletionAction {
+    /// Write completion scripts and print the shell restart ritual.
+    Install(InstallCompletionsArgs),
+}
 #[derive(Subcommand)]
 enum Action {
     /// Navigate authorized Dash artifacts using read-only private MCP tools (JSON).
     Artifacts(artifacts_cli::ArtifactArgs),
     /// Access your private Dash-hosted RBQ repository (JSON output, no local sync).
     Repository(repository_cli::RepositoryArgs),
-    /// Generate a shell completion script on stdout, without reading configuration.
+    /// Generate a shell completion script on stdout, or install it for bash/fish.
     Completions {
+        /// Shell whose script should be printed (bash, fish, zsh, elvish, powershell).
         #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        shell: Option<clap_complete::Shell>,
+        #[command(subcommand)]
+        install: Option<CompletionAction>,
     },
+    /// Install bash/fish completions in the user or system location.
+    #[command(alias = "completion-install")]
+    InstallCompletions(InstallCompletionsArgs),
     /// Read-only phone diagnostics and printable Linux/Chromebook connection guides.
     Phone {
         #[command(subcommand)]
@@ -1401,6 +1436,44 @@ fn storage_check(_config: &rebsync_core::Config, _json: bool) -> Result<i32> {
     bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
+fn print_install_reports(reports: &[completions::Report], json: bool) -> Result<()> {
+    if json {
+        let value = serde_json::json!({
+            "schema": "rbq.completions.install.v1",
+            "installed": reports.iter().map(|report| serde_json::json!({
+                "shell": report.shell,
+                "path": report.path,
+                "action": report.action,
+                "next": report.next,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    println!("{}", ui::heading("RBQ / COMPLETIONS"));
+    for report in reports {
+        println!(
+            "  {} {} → {}",
+            ui::good(report.shell),
+            ui::dim(report.action),
+            ui::dim(&report.path.display().to_string())
+        );
+        println!("    {}", ui::dim(&report.next));
+    }
+    Ok(())
+}
+
+fn install_completions(args: &InstallCompletionsArgs, json: bool) -> Result<i32> {
+    let reports = completions::install(completions::Options {
+        shell: args.shell,
+        dry_run: args.dry_run,
+        force: args.force,
+        system: args.system,
+    })?;
+    print_install_reports(&reports, json)?;
+    Ok(0)
+}
+
 fn main() {
     match entry() {
         Ok(code) => std::process::exit(code),
@@ -1408,37 +1481,80 @@ fn main() {
             if let Some(migration) =
                 error.downcast_ref::<rebsync_core::migration::MigrationBlocked>()
             {
-                if std::env::args().any(|arg| arg == "--json") {
+                if ui::json_mode() {
                     println!(
                         "{}",
                         serde_json::json!({"status": "blocked", "migration": migration})
                     );
                 } else {
-                    eprintln!("rbq: {error:#}");
+                    ui::print_error(&format!("{error:#}"));
                 }
                 std::process::exit(2);
             }
-            eprintln!("rbq: {error:#}");
+            ui::print_error(&format!("{error:#}"));
             std::process::exit(1);
         }
     }
 }
 fn entry() -> Result<i32> {
-    let cli = Cli::parse();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    ui::prepare(&raw);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => match error.kind() {
+            ErrorKind::DisplayHelp => {
+                ui::print_help(&error.render().to_string());
+                return Ok(0);
+            }
+            ErrorKind::DisplayVersion => {
+                ui::print_version();
+                return Ok(0);
+            }
+            _ => {
+                if ui::json_mode() {
+                    ui::print_error(&error.render().to_string());
+                    return Ok(2);
+                }
+                error.exit();
+            }
+        },
+    };
     ui::configure(
         cli.color,
         cli.json
             || matches!(
                 cli.command,
-                Some(Action::Completions { .. } | Action::Repository(_) | Action::Artifacts(_))
+                Some(
+                    Action::Completions { .. }
+                        | Action::InstallCompletions(_)
+                        | Action::Repository(_)
+                        | Action::Artifacts(_)
+                )
             ),
+        cli.json,
+        cli.verbose,
     );
-    if let Some(Action::Completions { shell }) = &cli.command {
+    if let Some(Action::Completions { shell, install }) = &cli.command {
+        if let Some(CompletionAction::Install(args)) = install {
+            return install_completions(args, cli.json);
+        }
         if cli.json {
             bail!("completions emits shell code; omit --json");
         }
-        clap_complete::generate(*shell, &mut Cli::command(), "rbq", &mut std::io::stdout());
+        let Some(shell) = shell else {
+            bail!("rbq completions needs a shell, or use 'rbq completions install bash|fish'");
+        };
+        let mut script = Vec::new();
+        clap_complete::generate(*shell, &mut Cli::command(), "rbq", &mut script);
+        match io::stdout().write_all(&script) {
+            Ok(()) => {}
+            Err(error) if error.kind() == IoErrorKind::BrokenPipe => return Ok(0),
+            Err(error) => return Err(error.into()),
+        }
         return Ok(0);
+    }
+    if let Some(Action::InstallCompletions(args)) = &cli.command {
+        return install_completions(args, cli.json);
     }
     // Diagnostics/guides are independent of backup config and must not create
     // state directories, journals or object stores just to inspect a phone.
@@ -1467,9 +1583,31 @@ fn entry() -> Result<i32> {
         storage_root: cli.common.storage_root,
         mneme_db: cli.common.mneme_db,
     })?;
+    ui::trace(
+        1,
+        format!(
+            "home={} config files={} storage={}",
+            config.config.rbq_home.display(),
+            config.files.len(),
+            config.config.storage.root.display()
+        ),
+    );
+    ui::trace(
+        2,
+        format!(
+            "layers: mneme={} frog={} agenda={} git={}",
+            config.config.mneme.enabled,
+            config.config.frog.enabled,
+            config.config.agenda.enabled,
+            config.config.git_layer.enabled
+        ),
+    );
     match cli.command {
         Some(Action::Completions { .. }) => {
             unreachable!("completions return before config loading")
+        }
+        Some(Action::InstallCompletions(_)) => {
+            unreachable!("completion installation returns before config loading")
         }
         Some(Action::Phone { .. }) => unreachable!("phone actions return before config loading"),
         Some(Action::Repository(_)) => {

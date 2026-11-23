@@ -571,8 +571,22 @@ rbq --color always peer status         # force styling
 rbq --color never peer status          # plain text
 rbq completions bash > ~/.local/share/bash-completion/completions/rbq
 rbq completions fish > ~/.config/fish/completions/rbq.fish
+rbq completions install fish             # XDG user path + restart ritual
+rbq completions install bash --dry-run   # show the plan without writing
+rbq install-completions all --force      # replace installed scripts
+rbq -v peer status                       # stderr traces; -vv for more
 rbq peer push --retries 5 --timeout-seconds 90
 ```
+
+Installed scripts are written through a temporary file and renamed into place,
+so a symlink at the destination is replaced rather than followed. Empty or
+relative `XDG_DATA_HOME`/`XDG_CONFIG_HOME` values are ignored, as the XDG spec
+requires. Long human help uses `$RBQ_PAGER`, then `$PAGER`, then `less -FRX`
+when attached to a terminal; the pager is run without a shell.
+`RBQ_THEME=ragbaz` selects the printed (day) palette and `RBQ_THEME=ragbaz-night`
+the dark-terminal colors. JSON and completion streams are always uncolored,
+even with `--color always`; with `--json`, help, version and errors are JSON too.
+Release builds strip debug symbols.
 
 Peer commands retry only transient DNS/connection failures, timeouts and
 `408/502/503/504` responses, with bounded exponential backoff and small jitter.
