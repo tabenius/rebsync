@@ -192,7 +192,21 @@ restic --cacert ~/.rebeqah/rbq/tls-restic/localhost.crt.pem -r rest:https://rbq:
 For account-private Dash storage, source-preserving **push/pull**, and read-only
 private artifact/Pieces/Frog/provenance navigation, see [the Linux Dash CLI
 guide](docs/DASH-CLI.md). These commands are separate from bare `rbq`'s backup
-plan and do not imply a production Dash rollout or a gift signature verifier.
+plan and do not imply a production Dash rollout.
+
+### Signed gifts
+
+`rbq gift verify FILE [--recipient-key KEY]` checks a gift envelope signed in
+the `ed25519-jcs-v1` format (a detached Ed25519 signature over RFC 8785
+canonical JSON; specified in ragbaz-common `docs/GIFT-SIGNATURE.md`). It prints
+JSON and exits `0` when valid, `2` with a stable reason (`malformed`,
+`unsupported_format`, `invalid_key`, `not_yet_valid`, `expired`,
+`not_a_recipient`, `bad_signature`) otherwise. Verification is strict and
+agrees with the JavaScript verifier on the shared vectors vendored in
+`contracts/vendor/`. A valid signature says only that the holder of the sender
+key signed exactly this envelope for the listed recipients within its validity
+window: it is not the sender's identity or authority, and not acceptance. rbq
+holds no gift signing key, and there is no gift layer or delivery yet.
 
 ### Private Dash repository access
 
