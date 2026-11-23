@@ -3,6 +3,7 @@ pub use chrono;
 pub mod agenda;
 #[cfg(feature = "peer-http")]
 pub mod artifacts;
+pub mod binaries;
 pub mod config;
 pub mod credentials;
 #[cfg(feature = "storage-object-store")]
@@ -28,6 +29,7 @@ pub mod repository_sync;
 pub mod restic_rest;
 #[cfg(feature = "serve")]
 pub mod serve;
+pub mod status;
 pub mod storage;
 pub mod sync;
 #[cfg(feature = "peer-transport")]

@@ -186,6 +186,9 @@ fn paint_rgb(text: &str, color: RgbColor) -> String {
     }
 }
 
+pub fn ochre(text: &str) -> String {
+    paint_rgb(text, palette().0)
+}
 pub fn blue(text: &str) -> String {
     paint_rgb(text, palette().1)
 }
@@ -365,6 +368,290 @@ fn split_command(value: &str) -> Vec<String> {
     parts
 }
 
+/// Short reports print directly; long ones go through the user's pager.
+pub fn print_maybe_paged(text: &str) {
+    if text.lines().count() > 24 {
+        print_paged(text);
+    } else {
+        print!("{text}");
+    }
+}
+
+/// Clear between `--watch` frames without polluting redirected output.
+pub fn clear_screen() -> &'static str {
+    if io::stdout().is_terminal() {
+        "\x1b[2J\x1b[H"
+    } else {
+        "\n--- rbq status ---\n"
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn progress_bar(percent: f64, width: usize) -> String {
+    let filled = ((percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    format!(
+        "{}{}",
+        ochre(&"█".repeat(filled)),
+        dim(&"░".repeat(width.saturating_sub(filled)))
+    )
+}
+
+fn padded(text: &str, width: usize) -> String {
+    format!("{:<width$}", sanitize(text))
+}
+
+fn state_text(state: &str) -> String {
+    match state {
+        "synced" => good(state),
+        "attention" | "incomplete" | "unavailable" | "mirror-pending" | "out-of-sync" => {
+            warning(state)
+        }
+        "empty" | "local-only" | "unshared" | "unknown" => ochre(state),
+        "disabled" => dim(state),
+        _ => sanitize(state),
+    }
+}
+
+/// Stable, coloured status table. The layout is intentionally deterministic so
+/// it reads well both once through a pager and under `watch`/`--watch`.
+pub fn render_status(value: &serde_json::Value, detail: u8) -> String {
+    let overall = &value["overall"];
+    let state = overall["state"].as_str().unwrap_or("unknown");
+    let pending = overall["pending_bytes"].as_u64().unwrap_or(0);
+    let progress = overall["progress"].as_f64().unwrap_or(100.0);
+    let mut lines = Vec::new();
+
+    lines.push(format!(
+        "{}  {}",
+        heading("RBQ / STATUS"),
+        state_text(state)
+    ));
+    lines.push(format!(
+        "  {} {:>5.1}%   {} {}   {} {}",
+        progress_bar(progress, 20),
+        progress,
+        dim("occupied"),
+        human_bytes(overall["occupied_bytes"].as_u64().unwrap_or(0)),
+        dim("pending"),
+        human_bytes(pending)
+    ));
+    lines.push(format!(
+        "  {} {}  ·  {} {}  ·  {} {}",
+        dim("logical"),
+        human_bytes(overall["logical_bytes"].as_u64().unwrap_or(0)),
+        dim("synced"),
+        overall["synced"],
+        dim("attention"),
+        overall["attention"]
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "  {} {} {} {} {} {} {}",
+        padded("LAYER", 11),
+        padded("STATE", 15),
+        padded("MIRROR", 15),
+        padded("SNAPSHOTS", 9),
+        padded("STORED", 11),
+        padded("PENDING", 11),
+        "PROGRESS"
+    ));
+
+    if let Some(layers) = value["layers"].as_array() {
+        for layer in layers {
+            let stats = &layer["stats"];
+            let snapshots = stats["snapshots"].as_u64().map(|n| n.to_string());
+            let stored = stats["stored_bytes"]
+                .as_u64()
+                .map(human_bytes)
+                .unwrap_or_else(|| "-".into());
+            let missing = stats["missing_bytes"]
+                .as_u64()
+                .map(human_bytes)
+                .unwrap_or_else(|| "-".into());
+            let layer_progress = layer["progress"].as_f64().unwrap_or(100.0);
+            let name = layer["layer"].as_str().unwrap_or("?");
+            let state = layer["state"].as_str().unwrap_or("unknown");
+            let mirror = layer["mirror"].as_str().unwrap_or("not-configured");
+            lines.push(format!(
+                "  {} {} {} {} {} {} {} {:.0}%",
+                ochre(&padded(name, 11)),
+                state_text(&padded(state, 15)),
+                blue(&padded(mirror, 15)),
+                padded(snapshots.as_deref().unwrap_or("-"), 9),
+                padded(&stored, 11),
+                padded(&missing, 11),
+                progress_bar(layer_progress, 10),
+                layer_progress
+            ));
+            if detail >= 1 {
+                if let Some(reason) = layer["reason"].as_str()
+                    && !reason.is_empty()
+                {
+                    lines.push(format!("      {}", dim(reason)));
+                }
+                if let Some(latest) = stats["latest"].as_str() {
+                    lines.push(format!("      {} {}", dim("latest"), latest));
+                }
+            }
+            if detail >= 2 {
+                if let Some(evidence) = layer["mirror_evidence"].as_object() {
+                    lines.push(format!(
+                        "      {} {} · {}",
+                        dim("mirror evidence"),
+                        evidence["at"].as_str().unwrap_or("?"),
+                        evidence["run_id"].as_str().unwrap_or("?")
+                    ));
+                }
+                if let Some(orphans) = stats["orphan_chunks"].as_u64()
+                    && orphans > 0
+                {
+                    lines.push(format!(
+                        "      {} {} chunks · {} reclaimable",
+                        dim("orphans"),
+                        orphans,
+                        human_bytes(stats["orphan_bytes"].as_u64().unwrap_or(0))
+                    ));
+                }
+            }
+        }
+    }
+
+    let repositories = value["repositories"].as_array().map_or(0, Vec::len);
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}  {} {}",
+        heading("REPOSITORIES"),
+        repositories,
+        dim("synced"),
+        value["repositories"].as_array().map_or(0, |items| items
+            .iter()
+            .filter(|repo| repo["state"].as_str() == Some("synced"))
+            .count())
+    ));
+    if let Some(items) = value["repositories"].as_array() {
+        for repo in items.iter().take(if detail >= 1 { usize::MAX } else { 8 }) {
+            let path = repo["path"].as_str().unwrap_or("?");
+            let branch = repo["branch"].as_str().unwrap_or("-");
+            let ahead = repo["ahead"]
+                .as_u64()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let behind = repo["behind"]
+                .as_u64()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let state = repo["state"].as_str().unwrap_or("unknown");
+            lines.push(format!(
+                "  {} {} {} {} {} {}",
+                blue(&padded(path, 42)),
+                ochre(&padded(branch, 16)),
+                padded(&format!("{ahead}↑"), 6),
+                padded(&format!("{behind}↓"), 6),
+                state_text(state),
+                repo["reason"].as_str().map(dim).unwrap_or_default()
+            ));
+            if detail >= 1 {
+                for item in repo["warnings"].as_array().into_iter().flatten() {
+                    if let Some(text) = item.as_str() {
+                        lines.push(format!("      {} {}", warning("!"), dim(text)));
+                    }
+                }
+            }
+        }
+        if items.len() > 8 && detail == 0 {
+            lines.push(format!(
+                "  {}",
+                dim(&format!("… {} more with -v", items.len() - 8))
+            ));
+        }
+    }
+
+    if let Some(issues) = value["issues"].as_array() {
+        for issue in issues.iter().filter_map(|item| item.as_str()) {
+            lines.push(format!("  {} {}", warning("!"), warning(issue)));
+        }
+    }
+    if detail >= 1 {
+        lines.push(String::new());
+        lines.push(dim(&format!(
+            "generated {} · {}",
+            value["generated_at"].as_str().unwrap_or("?"),
+            value["note"].as_str().unwrap_or("")
+        )));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+pub fn print_status(value: &serde_json::Value, detail: u8) {
+    print_maybe_paged(&render_status(value, detail));
+}
+
+/// Compact human view of a binaries-layer result. JSON callers bypass this.
+pub fn print_binary_report(value: &serde_json::Value) {
+    let mut lines = Vec::new();
+    if let Some(snapshots) = value["snapshots"].as_array() {
+        lines.push(heading("RBQ / BINARIES"));
+        for snapshot in snapshots {
+            lines.push(format!(
+                "  {} {} · {} bytes",
+                ochre(snapshot["id"].as_str().unwrap_or("?")),
+                dim(snapshot["created_at"].as_str().unwrap_or("")),
+                snapshot["bytes"]
+            ));
+            if let Some(tools) = snapshot["tools"].as_array() {
+                for tool in tools {
+                    lines.push(format!(
+                        "    {} {} {}",
+                        good(tool["tool"].as_str().unwrap_or("?")),
+                        dim(tool["version"].as_str().unwrap_or("")),
+                        dim(&tool["sha256"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(12)
+                            .collect::<String>())
+                    ));
+                }
+            }
+        }
+    } else if let Some(id) = value["id"].as_str() {
+        lines.push(format!("{}  {}", heading("RBQ / BINARIES"), ochre(id)));
+        if let Some(tool) = value["tool"].as_str() {
+            lines.push(format!(
+                "  {} {}",
+                good(tool),
+                dim(value["version"].as_str().unwrap_or(""))
+            ));
+        }
+        if let Some(path) = value["restored_to"].as_str() {
+            lines.push(format!("  restored to {path}"));
+        }
+        if let Some(bytes) = value["bytes"].as_u64() {
+            lines.push(format!("  {bytes} bytes"));
+        }
+        if let Some(note) = value["note"].as_str() {
+            lines.push(format!("  {}", dim(note)));
+        }
+    } else {
+        lines.push(serde_json::to_string_pretty(value).unwrap_or_default());
+    }
+    print_maybe_paged(&format!("{}\n", lines.join("\n")));
+}
+
 #[cfg(feature = "peer")]
 pub fn peer_report(value: &serde_json::Value, code: i32) {
     println!(
@@ -450,5 +737,45 @@ mod tests {
         assert!(banner.contains("\x1b[38;2;217;160;74m"));
         assert!(banner.contains("\x1b[38;2;143;184;212m"));
         COLOR.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn status_bytes_are_human_readable() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn status_render_includes_space_and_layer_states() {
+        let value = json!({
+            "schema": "rbq.status.v1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "overall": {
+                "state": "attention",
+                "synced": 1,
+                "attention": 1,
+                "occupied_bytes": 1536,
+                "pending_bytes": 512,
+                "logical_bytes": 2048,
+                "progress": 75.0
+            },
+            "layers": [{
+                "layer": "binaries", "state": "incomplete", "mirror": "verified",
+                "progress": 50.0,
+                "stats": {"snapshots": 1, "stored_bytes": 1024, "missing_bytes": 512,
+                    "latest": "2026-01-01T00:00:00Z", "orphan_chunks": 0}
+            }],
+            "repositories": [],
+            "issues": [],
+            "note": "test"
+        });
+        let text = render_status(&value, 2);
+        assert!(text.contains("RBQ / STATUS"));
+        assert!(text.contains("1.5 KiB"));
+        assert!(text.contains("512 B"));
+        assert!(text.contains("incomplete"));
+        assert!(text.contains("binaries"));
     }
 }

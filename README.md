@@ -277,6 +277,56 @@ publishing a manifest. Repeated exchanges therefore incur read I/O and network
 traffic even when no new objects are written. Byte integrity is not identity
 verification or owner-level validation.
 
+## Self-built binaries (`rbq binaries`)
+
+Some executables are built from our own sources (or cannot be obtained through
+cargo-binstall) and are worth re-fetching instead of rebuilding. The binaries
+layer stores each executable with provenance — tool, version, target, source,
+build command, install path and SHA-256 — as content-addressed chunks and an
+immutable manifest under `binaries/v1/…`. Rebuilding remains possible; the
+manifest records how.
+
+With `binaries.restic = true`, only the `binaries/v1` objects are mirrored
+through the encrypted restic repository, tagged `rbq-binaries` (plus a
+run/label tag). Other layers never enter that repository. `binaries.repository`
+/ `binaries.password_file` may point at a repository separate from `[backup]`;
+either may be omitted to fall back to `[backup]` (and only then do
+`backup.cacert`/`backup.rest_password_file` apply). The repository is passed to
+restic through the environment, never the command line. Private bucket names,
+artifact names, manifests and tool inventories are never published to public
+catalogs or the release registry.
+
+```bash
+rbq binaries publish /path/to/rbq --tool rbq --version 0.1.0 \
+  --target x86_64-unknown-linux-gnu --source src/ragbaz/rebsync \
+  --build-command 'cargo build --release -p rebsync-cli' \
+  --install-path /usr/local/bin/rbq
+rbq binaries list
+rbq binaries stats --json
+rbq binaries verify ID
+rbq binaries restore ID --tool rbq --into /tmp/rbq-restored
+rbq binaries fetch --tool rbq --into /tmp/rbq-restored
+rbq binaries fetch --tool rbq --version 0.1.0 --into /tmp/rbq-restored
+rbq binaries prune --keep-last 2 --apply
+```
+
+`fetch` finds the newest matching snapshot, restores missing objects from the
+private mirror when needed, and reassembles the tool. Objects restored from the
+mirror are untrusted until checked: a chunk is imported only if its bytes hash
+to the digest in its key, and anything else but a manifest is refused.
+`restore` and `fetch` check the tool's digest before writing, write through a
+private temporary file, and link it into place only if the destination does
+not exist, so a failed check never leaves an executable behind and no live
+binary is replaced.
+
+A manifest's provenance is the publisher's claim, not a signature. Peer
+exchange therefore never includes the binaries layer by default: name it with
+`--layer binaries` only for peers you would run executables from.
+`[binaries].specs` can list tools published during `--apply`; explicit
+`rbq binaries publish` works with an empty list. Restic snapshots of the same
+data are removed only by deliberate `restic forget` / `restic prune`, never by
+`rbq binaries prune`.
+
 ## Owner schemas and migrations
 
 Frog, Mneme and Daily Agenda own their data formats and migration logic.
@@ -560,6 +610,32 @@ rbq agenda prune --label local --keep-last 30 --apply
   pull from it afterwards. Restic snapshots of the same data are untouched;
   remove those with `restic forget --prune`.
 
+## Status (`rbq status`)
+
+`rbq status` is a read-only snapshot across all object layers, private mirror
+evidence and discovered Git repositories. It shows occupied bytes, bytes still
+to transfer, progress bars, per-layer state/mirror/storage, and ahead/behind
+counts against each branch's upstream. `-v` adds reasons and freshness; `-vv`
+adds mirror journal evidence and orphan-chunk accounting. `--json` emits the
+same snapshot as `rbq.status.v1`.
+
+```bash
+rbq status
+rbq status -v
+rbq status -vv
+rbq status --watch              # refresh every 2 seconds
+rbq status --watch=5
+rbq status --json
+```
+
+Observers take the same shared per-layer lock that publishers hold
+exclusively, so a running publish or prune cannot produce a half-written
+report. Status never creates state directories, lock files or journals, and
+never prints repository URLs or tokens. `rbq serve` shows the layer part only:
+it neither walks nor lists local Git repositories. `--watch` is human-only; use
+plain `rbq status --json` from scripts. Exit code `2` means attention is needed
+or bytes are still pending.
+
 ## Terminal interface and shell completions
 
 `rbq` uses color when attached to a terminal and honors `NO_COLOR`/`TERM=dumb`.
@@ -575,6 +651,7 @@ rbq completions install fish             # XDG user path + restart ritual
 rbq completions install bash --dry-run   # show the plan without writing
 rbq install-completions all --force      # replace installed scripts
 rbq -v peer status                       # stderr traces; -vv for more
+rbq --json status                        # machine-readable status
 rbq peer push --retries 5 --timeout-seconds 90
 ```
 
