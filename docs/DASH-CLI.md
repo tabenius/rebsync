@@ -172,7 +172,8 @@ rotation. It does not access production accounts or prove live rollout.
 
 CLI repository and navigation support does not deploy Dash. Production use
 needs the corresponding audited Dash migration/resources and artifact MCP
-rollout. A signed gift layer, HITL response authorization and subscribed
-email/Telegram/Discord delivery still need an owner-reviewed wire protocol,
-verification/identity bindings and services. They are not silently added to
+rollout. The gift signature format is decided (`ed25519-jcs-v1`, checked by
+`rbq gift verify`), but a gift layer, HITL response authorization and
+subscribed email/Telegram/Discord delivery still need verified key/identity
+bindings and services. They are not silently added to
 the peer registry or advertised as implemented by these commands.

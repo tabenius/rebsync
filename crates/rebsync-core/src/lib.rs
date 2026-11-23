@@ -9,6 +9,7 @@ pub mod credentials;
 #[cfg(feature = "storage-object-store")]
 pub mod drive;
 pub mod frog;
+pub mod gift;
 pub mod gitlayer;
 pub mod inventory;
 pub mod journal;

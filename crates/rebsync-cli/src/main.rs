@@ -89,6 +89,17 @@ struct InstallCompletionsArgs {
     system: bool,
 }
 #[derive(Subcommand)]
+enum GiftAction {
+    /// Verify an ed25519-jcs-v1 gift envelope (read-only; no key, no acceptance).
+    Verify {
+        /// Gift envelope JSON file; `-` reads standard input.
+        path: PathBuf,
+        /// Your ed25519 public key (base64url); the gift must list it.
+        #[arg(long)]
+        recipient_key: Option<String>,
+    },
+}
+#[derive(Subcommand)]
 enum CompletionAction {
     /// Write completion scripts and print the shell restart ritual.
     Install(InstallCompletionsArgs),
@@ -106,6 +117,11 @@ enum Action {
         shell: Option<clap_complete::Shell>,
         #[command(subcommand)]
         install: Option<CompletionAction>,
+    },
+    /// Check signed gifts without reading configuration.
+    Gift {
+        #[command(subcommand)]
+        command: GiftAction,
     },
     /// Install bash/fish completions in the user or system location.
     #[command(alias = "completion-install")]
@@ -1732,6 +1748,48 @@ fn status_action(
     bail!("rbq was built without the storage feature; rebuild with --features storage")
 }
 
+/// Verify a gift envelope. Always prints JSON; exit 0 when valid, 2 when
+/// refused. A valid signature is not identity, authority or acceptance.
+fn gift_action(action: &GiftAction) -> Result<i32> {
+    use std::io::Read;
+    let GiftAction::Verify {
+        path,
+        recipient_key,
+    } = action;
+    let limit = rebsync_core::gift::MAX_CANONICAL_BYTES as u64 * 2;
+    let reader: Box<dyn Read> = if path.as_os_str() == "-" {
+        Box::new(io::stdin())
+    } else {
+        Box::new(std::fs::File::open(path)?)
+    };
+    let bytes = rebsync_core::wire::read_bounded(reader, limit)?
+        .ok_or_else(|| anyhow::anyhow!("gift file exceeds {limit} bytes"))?;
+    let envelope: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let recipient = recipient_key
+        .as_ref()
+        .map(|value| serde_json::json!({"format": rebsync_core::gift::KEY_FORMAT, "value": value}));
+    let now = rebsync_core::chrono::Utc::now().timestamp();
+    let outcome = rebsync_core::gift::verify(&envelope, now, recipient.as_ref());
+    let value = match outcome {
+        Ok(()) => serde_json::json!({
+            "schema": "rbq.gift.verify.v1",
+            "valid": true,
+            "format": rebsync_core::gift::FORMAT,
+            "id": envelope["id"],
+            "sender_public_key": envelope["sender_public_key"],
+            "expires_at": envelope["expires_at"],
+            "note": "Signature only: not the sender's identity or authority, and not acceptance.",
+        }),
+        Err(refusal) => serde_json::json!({
+            "schema": "rbq.gift.verify.v1",
+            "valid": false,
+            "reason": refusal.code(),
+        }),
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(if outcome.is_ok() { 0 } else { 2 })
+}
+
 fn main() {
     match entry() {
         Ok(code) => std::process::exit(code),
@@ -1784,6 +1842,7 @@ fn entry() -> Result<i32> {
                 cli.command,
                 Some(
                     Action::Completions { .. }
+                        | Action::Gift { .. }
                         | Action::InstallCompletions(_)
                         | Action::Repository(_)
                         | Action::Artifacts(_)
@@ -1810,6 +1869,9 @@ fn entry() -> Result<i32> {
             Err(error) => return Err(error.into()),
         }
         return Ok(0);
+    }
+    if let Some(Action::Gift { command }) = &cli.command {
+        return gift_action(command);
     }
     if let Some(Action::InstallCompletions(args)) = &cli.command {
         return install_completions(args, cli.json);
@@ -1865,6 +1927,7 @@ fn entry() -> Result<i32> {
         Some(Action::Completions { .. }) => {
             unreachable!("completions return before config loading")
         }
+        Some(Action::Gift { .. }) => unreachable!("gift checks return before config loading"),
         Some(Action::InstallCompletions(_)) => {
             unreachable!("completion installation returns before config loading")
         }

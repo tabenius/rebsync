@@ -1,0 +1,718 @@
+{
+  "schema": "ragbaz.gift-signature.vectors.v1",
+  "format": "ed25519-jcs-v1",
+  "note": "Keys are the public RFC 8032 section 7.1 test keys. Never use them for real gifts. Regenerate with scripts/gift-signature-vectors.mjs.",
+  "canonical": [
+    {
+      "name": "member order by UTF-16 code units",
+      "input": {
+        "b": 1,
+        "a": 2,
+        "€": 3,
+        "😀": 4,
+        "ä": 5
+      },
+      "expect": "{\"a\":2,\"b\":1,\"ä\":5,\"€\":3,\"😀\":4}"
+    },
+    {
+      "name": "string escapes",
+      "input": {
+        "s": "\"\\\b\f\n\r\t\u0001\u001f/ <>"
+      },
+      "expect": "{\"s\":\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f/ <>\"}"
+    },
+    {
+      "name": "nested arrays keep order",
+      "input": [
+        3,
+        [
+          2,
+          1
+        ],
+        {
+          "z": null,
+          "y": true,
+          "x": false
+        }
+      ],
+      "expect": "[3,[2,1],{\"x\":false,\"y\":true,\"z\":null}]"
+    },
+    {
+      "name": "integers and negative zero",
+      "input": {
+        "n": [
+          0,
+          0,
+          -1,
+          9007199254740991
+        ]
+      },
+      "expect": "{\"n\":[0,0,-1,9007199254740991]}"
+    }
+  ],
+  "rejected_canonical": [
+    {
+      "name": "fraction",
+      "input_json": "{\"n\":1.5}"
+    },
+    {
+      "name": "unsafe integer",
+      "input_json": "{\"n\":9007199254740993}"
+    },
+    {
+      "name": "exponent",
+      "input_json": "{\"n\":1e400}"
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid text gift",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "recipient": {
+        "format": "ed25519",
+        "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+      },
+      "expect": "ok",
+      "now": 1795000000
+    },
+    {
+      "name": "valid reference gift with invitation and delivery policy",
+      "gift": {
+        "id": "gift-02",
+        "subject": "Review requested",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "ref": {
+            "source_id": "laptop",
+            "id": "pieces/manuscript-7"
+          },
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "invitation": {
+          "kind": "decision",
+          "context_ref": "hold:baz0/42",
+          "choices": [
+            "approve",
+            "deny"
+          ]
+        },
+        "delivery_policy": {
+          "allowed_transports": [
+            "rbq",
+            "app"
+          ],
+          "email_content": "notification_only"
+        },
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "_SL_O3cHNTEGlYWZqziu6HYNbqA4L8VuEKAc9iIU2td3X9HZn2rgKH5T4xAhQZ5rlldWH87Nit2KyaI0PAnjAQ"
+        }
+      },
+      "recipient": {
+        "format": "ed25519",
+        "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+      },
+      "expect": "ok",
+      "now": 1795000000
+    },
+    {
+      "name": "valid without a recipient check",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "ok",
+      "now": 1795000000
+    },
+    {
+      "name": "member order does not matter",
+      "gift": {
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        },
+        "expires_at": "2026-12-18T09:00:00Z",
+        "issued_at": "2026-11-18T09:00:00Z",
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "subject": "Räksmörgås — a first gift ✓",
+        "id": "gift-01"
+      },
+      "recipient": {
+        "format": "ed25519",
+        "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+      },
+      "expect": "ok",
+      "now": 1795000000
+    },
+    {
+      "name": "tampered subject",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Something else",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "tampered recipient list",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          },
+          {
+            "format": "ed25519",
+            "value": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "tampered expiry",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-19T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "tampered invitation choice",
+      "gift": {
+        "id": "gift-02",
+        "subject": "Review requested",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "ref": {
+            "source_id": "laptop",
+            "id": "pieces/manuscript-7"
+          },
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "invitation": {
+          "kind": "decision",
+          "context_ref": "hold:baz0/42",
+          "choices": [
+            "approve"
+          ]
+        },
+        "delivery_policy": {
+          "allowed_transports": [
+            "rbq",
+            "app"
+          ],
+          "email_content": "notification_only"
+        },
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "_SL_O3cHNTEGlYWZqziu6HYNbqA4L8VuEKAc9iIU2td3X9HZn2rgKH5T4xAhQZ5rlldWH87Nit2KyaI0PAnjAQ"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "signature by another key",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "not a listed recipient",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "recipient": {
+        "format": "ed25519",
+        "value": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU"
+      },
+      "expect": "not_a_recipient",
+      "now": 1795000000
+    },
+    {
+      "name": "expired",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "now": 1797584400,
+      "expect": "expired"
+    },
+    {
+      "name": "not yet valid",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "now": 1794990000,
+      "expect": "not_yet_valid"
+    },
+    {
+      "name": "unsupported signature format",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v2",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "unsupported_format",
+      "now": 1795000000
+    },
+    {
+      "name": "non-canonical S (S + L)",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9KwIR1gayrBuV9KxcvTARAxH9GdI-5byQPVZvo-d_HRpEA"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "base64url alias with padding bits set",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAB"
+        }
+      },
+      "expect": "bad_signature",
+      "now": 1795000000
+    },
+    {
+      "name": "small-order sender key",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "invalid_key",
+      "now": 1795000000
+    },
+    {
+      "name": "unknown member added after signing",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        },
+        "note": "x"
+      },
+      "expect": "malformed",
+      "now": 1795000000
+    },
+    {
+      "name": "missing expires_at",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "malformed",
+      "now": 1795000000
+    },
+    {
+      "name": "duplicate recipient",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          },
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "malformed",
+      "now": 1795000000
+    },
+    {
+      "name": "impossible date",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-02-30T09:00:00Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "malformed",
+      "now": 1795000000
+    },
+    {
+      "name": "fractional seconds are not the canonical time form",
+      "gift": {
+        "id": "gift-01",
+        "subject": "Räksmörgås — a first gift ✓",
+        "sender_public_key": {
+          "format": "ed25519",
+          "value": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        },
+        "recipient_public_keys": [
+          {
+            "format": "ed25519",
+            "value": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+          }
+        ],
+        "artifact": {
+          "text": "Line one\nLine two\t\"quoted\"\u0001 and ☃"
+        },
+        "issued_at": "2026-11-18T09:00:00.000Z",
+        "expires_at": "2026-12-18T09:00:00Z",
+        "signature": {
+          "format": "ed25519-jcs-v1",
+          "value": "0DQ5WQIJE18u-WI0O0f2CBvOQ7MJ4AsCDytUkRgr9Kwbc2K9r01c__sUe1HiSi0y9GdI-5byQPVZvo-d_HRpAA"
+        }
+      },
+      "expect": "malformed",
+      "now": 1795000000
+    }
+  ]
+}

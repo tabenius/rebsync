@@ -186,6 +186,8 @@ fn paint_rgb(text: &str, color: RgbColor) -> String {
     }
 }
 
+// Used by the storage-only binaries report.
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn ochre(text: &str) -> String {
     paint_rgb(text, palette().0)
 }
@@ -369,6 +371,7 @@ fn split_command(value: &str) -> Vec<String> {
 }
 
 /// Short reports print directly; long ones go through the user's pager.
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn print_maybe_paged(text: &str) {
     if text.lines().count() > 24 {
         print_paged(text);
@@ -378,6 +381,7 @@ pub fn print_maybe_paged(text: &str) {
 }
 
 /// Clear between `--watch` frames without polluting redirected output.
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn clear_screen() -> &'static str {
     if io::stdout().is_terminal() {
         "\x1b[2J\x1b[H"
@@ -386,6 +390,7 @@ pub fn clear_screen() -> &'static str {
     }
 }
 
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -401,6 +406,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 fn progress_bar(percent: f64, width: usize) -> String {
     let filled = ((percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     format!(
@@ -410,10 +416,12 @@ fn progress_bar(percent: f64, width: usize) -> String {
     )
 }
 
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 fn padded(text: &str, width: usize) -> String {
     format!("{:<width$}", sanitize(text))
 }
 
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 fn state_text(state: &str) -> String {
     match state {
         "synced" => good(state),
@@ -428,6 +436,7 @@ fn state_text(state: &str) -> String {
 
 /// Stable, coloured status table. The layout is intentionally deterministic so
 /// it reads well both once through a pager and under `watch`/`--watch`.
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn render_status(value: &serde_json::Value, detail: u8) -> String {
     let overall = &value["overall"];
     let state = overall["state"].as_str().unwrap_or("unknown");
@@ -596,11 +605,13 @@ pub fn render_status(value: &serde_json::Value, detail: u8) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn print_status(value: &serde_json::Value, detail: u8) {
     print_maybe_paged(&render_status(value, detail));
 }
 
 /// Compact human view of a binaries-layer result. JSON callers bypass this.
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
 pub fn print_binary_report(value: &serde_json::Value) {
     let mut lines = Vec::new();
     if let Some(snapshots) = value["snapshots"].as_array() {
