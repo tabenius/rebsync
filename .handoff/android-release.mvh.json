@@ -1,0 +1,13 @@
+{
+  "project": "rebsync",
+  "worktree": "rebsync",
+  "goal": "Release the Rebeqah Android APK (com.tabenius.rebeqah) through the release functions",
+  "state": "verified 2026-11-18: release-android.sh build, check-signer, collect and inventory pass end to end with a throwaway pinned key; v0.2.3's own verifier rejects any build-tools 37 APK (fixed in #8). claim: the local rebekah-release.jks is the old 3a111387 key (owner's keytool output), not the b093a277 pin; no GitHub release exists for v0.2.3.",
+  "open_files": ["scripts/release-android.sh", "scripts/prepare_android_release.py", ".github/workflows/rebeqah-android.yml", "release/android-signing.json"],
+  "decisions": ["Do not release v0.2.3 from its tag; release the next version from main after #8 (owner to confirm)", "Release logic lives in scripts/release-android.sh; CI is a thin wrapper", "The pin changes only in a reviewed, owner-approved commit"],
+  "blockers": ["Which keystore holds b093a277 is unknown", "GitHub Actions quota exhausted"],
+  "next_action": "Find the keystore that holds the pinned Rebeqah certificate b093a277 (see \"The local keystore\"), then merge #8 and release the next version from main.",
+  "verify": ["scripts/release-android.sh doctor", "python3 -m unittest discover -s scripts -p test_android_release.py"],
+  "refs": ["https://github.com/tabenius/rebsync/pull/8", "https://github.com/tabenius/rebsync/pull/7", "git:tabenius/rebsync@c50fc15", "author:claude"],
+  "last_verified_at": 0
+}
