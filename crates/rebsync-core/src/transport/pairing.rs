@@ -737,19 +737,21 @@ mod tests {
         .unwrap();
         assert_eq!(server.scopes(client.identity().peer_id()), None);
         assert!(server.list().is_empty());
-        // An expired record no longer counts.
+        // An expired record no longer counts. Three whole seconds of life, so a
+        // slow machine crossing second boundaries cannot expire it before the
+        // checks; the sleep then outlasts it.
         let expired = server
             .add(
                 &client_card,
                 Role::Client,
                 None,
-                Some(now() + 1),
+                Some(now() + 3),
                 None,
                 None,
             )
             .unwrap();
         assert!(expired.verify().is_ok());
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        std::thread::sleep(std::time::Duration::from_millis(3100));
         assert_eq!(server.scopes(client.identity().peer_id()), None);
         // A device cannot pair with itself, nor take a record as a card.
         let own = card(server.identity(), None, vec![]).unwrap();
