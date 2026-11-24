@@ -1,0 +1,37 @@
+# Serve this user's rbq object store to paired devices over QUIC.
+#
+# Install as a user unit:
+#   install -Dm644 rbq-peer.service ~/.config/systemd/user/rbq-peer.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rbq-peer
+#   loginctl enable-linger "$USER"     # keep it running without a login
+#
+# Pair devices without prompts (see docs/HEADLESS.md):
+#   rbq peer pair invite --name "$(hostname)"   # one-time string, 10 minutes
+#   rbq peer pair add laptop.card --as client    # or exchange signed cards
+[Unit]
+Description=rbq peer server (rbq-peer/1 over QUIC, paired devices)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# All configuration by environment; override with `systemctl --user edit`.
+Environment=RBQ_LISTEN=quic://0.0.0.0:8788
+# Uncomment to also accept a shared token (needed for tcp:// and unix://):
+# Environment=RBQ_TOKEN_FILE=%h/.config/rbq/peer-token
+ExecStart=%h/.local/bin/rbq peer serve
+# rbq stops its servers cleanly on SIGTERM (QUIC peers get a close frame).
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+# Hardening that does not get in rbq's way (it writes only under $HOME).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h
+UMask=0077
+
+[Install]
+WantedBy=default.target

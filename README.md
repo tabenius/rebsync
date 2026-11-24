@@ -903,6 +903,11 @@ rbq peer selftest
   `rbq peer pair remove PEER` revokes. A card proves its holder has the key,
   not who the holder is, so exchange cards like SSH host keys. Tokens still
   work for unpaired clients and for TCP and Unix sockets.
+- **Headless.** Nothing in `rbq peer` prompts. `RBQ_LISTEN`,
+  `RBQ_TOKEN_FILE`, `RBQ_QUIC_IDENTITY` and `RBQ_PEER` configure it, `serve`
+  stops cleanly on SIGTERM, and [docs/HEADLESS.md](docs/HEADLESS.md) covers
+  systemd ([unit](examples/systemd/rbq-peer.service)) and provisioning
+  pairings without anyone at the keyboard.
 - **Tailscale and NetBird.** `rbq peer networks` shows whether this host is
   on either overlay (its interfaces; Tailscale's `fd7a:115c:a1e0::/48`; and,
   when installed, `tailscale status --json` / `netbird status --json` for the

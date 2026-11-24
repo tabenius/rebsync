@@ -533,8 +533,9 @@ struct PeerTargetArgs {
     /// rbq+quic://HOST:PORT?peer=ID&token=… / tcp:// / unix:// for `rbq peer serve`;
     /// defaults to $RBQ_PEER so the token stays out of shell history.
     connection: Option<String>,
-    /// File holding the token, when the connection has none.
-    #[arg(long)]
+    /// File holding the token, when the connection has none. Paired QUIC
+    /// devices need none.
+    #[arg(long, env = "RBQ_TOKEN_FILE")]
     token_file: Option<PathBuf>,
     /// Additional HTTP attempts on transient connection/502/503/504/408 failures.
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=6))]
@@ -685,18 +686,23 @@ enum PairAction {
 }
 #[derive(Args)]
 struct ServeArgs {
-    /// Listen address; repeat for several. quic://HOST:PORT (encrypted,
-    /// recommended beyond this host), tcp://HOST:PORT (plaintext),
-    /// unix:///path or unix-dgram:///path.
-    #[arg(long = "listen", required = true)]
+    /// Listen address; repeat for several (or comma-separate in
+    /// $RBQ_LISTEN). quic://HOST:PORT (encrypted, recommended beyond this
+    /// host), tcp://HOST:PORT (plaintext), unix:///path or unix-dgram:///path.
+    #[arg(
+        long = "listen",
+        required = true,
+        env = "RBQ_LISTEN",
+        value_delimiter = ','
+    )]
     listen: Vec<String>,
     /// Directory holding the QUIC server identity (created on first use,
     /// owner-only). Default: quic-identity/ under rbq's state directory.
-    #[arg(long)]
+    #[arg(long, env = "RBQ_QUIC_IDENTITY")]
     quic_identity: Option<PathBuf>,
     /// File holding the shared token; must not be group- or world-readable.
     /// Optional for QUIC: paired devices (rbq peer pair) need no token.
-    #[arg(long)]
+    #[arg(long, env = "RBQ_TOKEN_FILE")]
     token_file: Option<PathBuf>,
     /// Remove an existing socket path. A live server is never replaced.
     #[arg(long)]
@@ -1603,19 +1609,30 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         Ok((connection, token))
     };
     // This device's key (created on first use) and the pairings it signed.
-    let identity = |dir: Option<&PathBuf>| -> Result<Arc<transport::quic::Identity>> {
-        let dir = match dir {
-            Some(dir) => dir.clone(),
+    // One rule for every command: --quic-identity, then $RBQ_QUIC_IDENTITY,
+    // then the default. A non-default identity keeps its pairings next to it,
+    // so a key and the records it signed always travel together.
+    let custom_identity = |explicit: Option<&PathBuf>| -> Option<PathBuf> {
+        explicit
+            .cloned()
+            .or_else(|| std::env::var_os("RBQ_QUIC_IDENTITY").map(PathBuf::from))
+            .filter(|dir| !dir.as_os_str().is_empty())
+    };
+    let identity = |explicit: Option<&PathBuf>| -> Result<Arc<transport::quic::Identity>> {
+        let dir = match custom_identity(explicit) {
+            Some(dir) => dir,
             None => transport::quic::default_identity_dir(config)?,
         };
         Ok(Arc::new(transport::quic::Identity::load_or_create(&dir)?))
     };
-    let trust = |identity: Arc<transport::quic::Identity>| {
-        transport::pairing::TrustStore::open(
-            &transport::pairing::default_trust_dir(config)?,
-            identity,
-        )
+    let trust_for = |explicit: Option<&PathBuf>, identity: Arc<transport::quic::Identity>| {
+        let dir = match custom_identity(explicit) {
+            Some(dir) => dir.join("paired"),
+            None => transport::pairing::default_trust_dir(config)?,
+        };
+        transport::pairing::TrustStore::open(&dir, identity)
     };
+    let trust = |identity: Arc<transport::quic::Identity>| trust_for(None, identity);
     let remote = |args: &PeerTargetArgs| -> Result<Box<dyn peer::PeerApi>> {
         let (connection, token) = connection(args)?;
         let trimmed = connection.trim();
@@ -1730,7 +1747,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 "tcp:// and unix:// listeners need --token-file; only quic:// can rely on pairing"
             );
             let device = identity(args.quic_identity.as_ref())?;
-            let store = Arc::new(trust(device.clone())?);
+            let store = Arc::new(trust_for(args.quic_identity.as_ref(), device.clone())?);
             let clients = store
                 .list()
                 .iter()
@@ -1816,6 +1833,21 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                              machine's address as the client reaches it.",
                 }))?
             );
+            // Run until a supervisor (systemd, a container runtime) or the
+            // user asks to stop, then shut down cleanly: QUIC peers get a
+            // close frame instead of an idle timeout, sockets are removed.
+            #[cfg(unix)]
+            {
+                use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+                let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP])?;
+                let signal = signals.forever().next().unwrap_or(SIGTERM);
+                for server in servers {
+                    server.stop();
+                }
+                eprintln!("{}", serde_json::json!({"stopped": true, "signal": signal}));
+                return Ok(0);
+            }
+            #[cfg(not(unix))]
             loop {
                 std::thread::park();
             }

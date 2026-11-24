@@ -25,5 +25,9 @@ rebsync-core = { path = "../rebsync-core", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
+
+[target.'cfg(unix)'.dependencies]
+# Clean shutdown of `rbq peer serve` under systemd and other supervisors.
+signal-hook = "0.3"
