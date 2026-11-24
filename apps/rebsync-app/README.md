@@ -17,21 +17,22 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   - The endpoint offers read, list and create-if-absent. It has no overwrite
     and no delete.
   - Every network interface gets a URL, a QR code and a copyable connection
-    string: `rbq+http://ADDRESS:PORT/v1?token=…`. Interfaces are Wi-Fi,
+    string: `rbq+https://ADDRESS:PORT/v1?peer=ID&token=…`, served over HTTPS
+    with the phone's own key, which `peer=` pins (no CA; `curl` users get a
+    `--pinnedpubkey` command). Interfaces are Wi-Fi,
     hotspot, USB tethering, Ethernet and VPN; mobile data is listed last.
   - Requests need `Authorization: Bearer TOKEN`, or `?token=` in the URL. The
     token is 192 bits from the system RNG, compared in constant time and
     rotatable from the app.
-  - **Encrypted sharing (QUIC).** Alongside HTTP, the same object store is
+  - **Encrypted sharing (QUIC).** Alongside HTTPS, the same object store is
     served as `rbq-peer/1` over QUIC on the same port number (UDP). Each
     interface also gets `rbq+quic://ADDRESS:PORT?peer=ID&token=…`, and the QR
     code carries it. `peer=` is this phone's key fingerprint, which the client
     pins: a device presenting another key is refused, and the token never
     crosses the network in clear. The key lives in the app's private storage
     (`quic-identity/`), so the fingerprint survives restarts and token
-    rotation. Use `rbq peer status|push|pull` with that string; plain HTTP
-    remains for older clients. If QUIC cannot start, the app says why and
-    keeps HTTP running. **Pair a device** shows a one-time code (QR and
+    rotation. Use `rbq peer status|push|pull` with either string. If QUIC
+    cannot start, the app says why and keeps HTTPS running. **Pair a device** shows a one-time code (QR and
     string, 10 minutes, optionally read-only); `rbq peer pair join` on the
     other device redeems it, and from then on that device connects with its
     key alone, no token. Paired devices are listed with Remove (revocation).
@@ -70,9 +71,9 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
 - **Uninstall deletes the data.** Android deletes the app's folders when
   Rebeqah is uninstalled, including on SD cards and USB drives. Keep another
   copy of anything that matters.
-- **The connection is not encrypted.** Sharing uses plain HTTP, so anyone on
-  the same network can read the token. Use networks you control, a hotspot or
-  USB tethering.
+- **Check the key on first use.** Both HTTPS and QUIC are encrypted and pinned
+  to the phone's key, but the pin is only as good as the channel you copied it
+  over: scan the QR code or compare the fingerprint the app shows.
 - **Removable media has fewer guarantees.** FAT and exFAT have no hard links
   and no Unix permissions, so the core falls back to check-then-rename. That is
   safe with one writer, and Rebeqah is the only writer. The app shows a warning

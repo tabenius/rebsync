@@ -52,11 +52,13 @@ struct Connection {
     kind: String,
     address: String,
     url: String,
-    /// Plaintext `rbq-peer/0` over HTTP, for older clients.
+    /// `rbq-peer/0` over HTTPS, pinned to the phone's key.
     pairing: String,
     /// Encrypted `rbq-peer/1` over QUIC, pinned to this phone's key. The QR
     /// code carries this one when it exists.
     quic_pairing: Option<String>,
+    /// A curl command that checks the phone's key (`--pinnedpubkey`).
+    curl: String,
     qr_svg: String,
 }
 
@@ -146,19 +148,23 @@ fn hosts() -> Vec<(String, &'static str, String)> {
     list
 }
 
-fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
+fn connections(port: u16, token: &str, pin: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
     hosts()
         .into_iter()
         .map(|(interface, kind, host)| {
-            let url = format!("http://{host}:{port}");
-            let pairing = format!("rbq+{url}/v1?token={token}");
-            let quic_pairing =
-                quic.map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
+            let url = format!("https://{host}:{port}");
+            let pairing = format!("rbq+{url}/v1?peer={pin}&token={token}");
+            let quic_pairing = quic
+                .map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
             Connection {
                 kind: kind.into(),
                 interface,
                 address: host,
                 qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
+                curl: format!(
+                    "curl -k --pinnedpubkey '{}' -H 'Authorization: Bearer TOKEN' {url}/v1/status",
+                    quic_share::curl_pin(pin)
+                ),
                 url,
                 pairing,
                 quic_pairing,
@@ -225,9 +231,14 @@ fn pair_invite(app: State<'_, App>, read_only: bool) -> Result<Invitation, Strin
 
 /// Devices this phone has paired with (signed records it holds).
 #[tauri::command]
-fn paired_devices(app: State<'_, App>) -> Result<Vec<rebsync_core::transport::pairing::Paired>, String> {
+fn paired_devices(
+    app: State<'_, App>,
+) -> Result<Vec<rebsync_core::transport::pairing::Paired>, String> {
     let quic = app.quic.lock().map_err(|_| "share lock")?;
-    Ok(quic.as_ref().map(|share| share.trust.list()).unwrap_or_default())
+    Ok(quic
+        .as_ref()
+        .map(|share| share.trust.list())
+        .unwrap_or_default())
 }
 
 /// Revoke a pairing; the device needs a new invitation or the token.
@@ -282,7 +293,7 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         && let Some(error) = app.quic_error.lock().ok().and_then(|e| e.clone())
     {
         warnings.push(format!(
-            "Encrypted sharing (QUIC) could not start, so only plain HTTP is offered: {error}"
+            "Encrypted sharing over QUIC could not start, so only HTTPS is offered: {error}"
         ));
     }
     if !caps.atomic_create_if_absent {
@@ -314,6 +325,11 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
                 connections(
                     port,
                     &settings.token,
+                    &rebsync_core::transport::quic::Identity::load_or_create(
+                        &app.internal.join("quic-identity"),
+                    )
+                    .map(|identity| identity.peer_id().to_owned())
+                    .unwrap_or_default(),
                     quic.as_ref().map(|(port, id)| (*port, id.as_str())),
                 )
             })
@@ -345,12 +361,18 @@ fn start_peer(app: &App, settings: &Settings) -> Result<u16, String> {
     if let Some(peer) = slot.as_ref() {
         return Ok(peer.port);
     }
+    // One key for both servers: HTTPS and QUIC clients pin the same id.
+    let identity = rebsync_core::transport::quic::Identity::load_or_create(
+        &app.internal.join("quic-identity"),
+    )
+    .map_err(|e| format!("{e:#}"))?;
     let peer = Peer::start(
         settings.port,
         settings.token.clone(),
         app.storage.clone(),
         app.clients.clone(),
         app.writes_paused.clone(),
+        &identity,
     )?;
     let port = peer.port;
     *slot = Some(peer);

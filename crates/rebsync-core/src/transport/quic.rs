@@ -188,6 +188,16 @@ impl Identity {
         PrivateKeyDer::Pkcs8(self.key.clone_key())
     }
 
+    /// The certificate as PEM, for TLS servers that take PEM (HTTPS).
+    pub fn certificate_pem(&self) -> String {
+        pem("CERTIFICATE", &self.certificate)
+    }
+
+    /// The private key as PKCS#8 PEM. Keep it owner-only.
+    pub fn private_key_pem(&self) -> String {
+        pem("PRIVATE KEY", self.key.secret_pkcs8_der())
+    }
+
     /// Sign `message` with this identity's key. Returns the TLS 1.3
     /// signature scheme's name and the signature; [`verify_signature`]
     /// checks it against the certificate.
@@ -205,6 +215,34 @@ impl Identity {
             .map_err(|error| anyhow::anyhow!("sign: {error}"))?;
         Ok((format!("{:?}", signer.scheme()), signature))
     }
+}
+
+fn pem(label: &str, der: &[u8]) -> String {
+    use base64::Engine;
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut text = format!("-----BEGIN {label}-----\n");
+    for line in body.as_bytes().chunks(64) {
+        text.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        text.push('\n');
+    }
+    text.push_str(&format!("-----END {label}-----\n"));
+    text
+}
+
+/// A TLS 1.3 client configuration that accepts exactly the server key whose
+/// peer id is `pin`, with no CA and no hostname check: the pin is the trust
+/// decision. Used for QUIC and for HTTPS to Rebeqah.
+pub fn pinned_tls_client(pin: &str) -> Result<rustls::ClientConfig> {
+    validate_peer_id(pin)?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServer {
+            expected: pin.to_ascii_lowercase(),
+            seen: Mutex::new(None),
+            algorithms: provider().signature_verification_algorithms,
+        }))
+        .with_no_client_auth())
 }
 
 /// Check that `signature` over `message` was made with the key in

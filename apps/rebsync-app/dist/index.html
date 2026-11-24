@@ -202,7 +202,7 @@ function renderOverview(o) {
   $("#share-off").hidden = o.sharing;
   $("#token").textContent = revealed ?? `${o.token_hint}`;
   // The QR code and the first button carry the encrypted QUIC string when it
-  // exists; plain HTTP stays available for older clients.
+  // exists; HTTPS (pinned to the same key) is offered beside it.
   const quic = o.quic_peer_id != null;
   $("#quic-id").hidden = !quic;
   $("#quic-id").innerHTML = quic
@@ -210,20 +210,21 @@ function renderOverview(o) {
        — check it matches <code>peer=</code> on the other device.`
     : "";
   $("#share-note").textContent = quic
-    ? "Use the encrypted (QUIC) connection string: clients pin this phone's key and the token never crosses the network in clear. "
-      + "Plain HTTP is for older clients only: anyone on the same network can see its token. Mobile-data addresses are usually unreachable."
-    : "Plain HTTP on the local network: anyone on the same network can see the token. "
-      + "Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.";
+    ? "Both strings are encrypted and pin this phone's key (peer=), so the token never crosses the network in clear "
+      + "and no other device can pose as this phone. QUIC resumes better on flaky links; HTTPS works through more firewalls. "
+      + "Mobile-data addresses are usually unreachable."
+    : "HTTPS pinned to this phone's key (peer=): the token never crosses the network in clear. "
+      + "Mobile-data addresses are usually unreachable.";
   const conns = o.connections.map((c) => `
     <div class="conn">
       <div>
         <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span>
-          ${c.quic_pairing ? '<span class="tag ok">encrypted</span>' : '<span class="tag warn">plain HTTP</span>'}</div>
+          <span class="tag ok">encrypted</span></div>
         <div style="margin:6px 0"><code>${esc(c.url)}</code></div>
         <div class="row small">
           ${c.quic_pairing ? `<button data-copy="${esc(c.quic_pairing)}" data-what="Encrypted connection string">Copy encrypted connection string</button>` : ""}
-          <button data-copy="${esc(c.pairing)}" data-what="HTTP connection string">${c.quic_pairing ? "Copy HTTP (older clients)" : "Copy connection string"}</button>
-          <button data-copy="curl -H 'Authorization: Bearer TOKEN' ${esc(c.url)}/v1/status" data-what="curl example">curl</button>
+          <button data-copy="${esc(c.pairing)}" data-what="HTTPS connection string">${c.quic_pairing ? "Copy HTTPS string" : "Copy connection string"}</button>
+          <button data-copy="${esc(c.curl)}" data-what="curl example">curl</button>
         </div>
       </div>
       <div class="qr" title="${c.quic_pairing ? "Scan to pair (encrypted)" : "Scan to pair"}">${c.qr_svg}</div>
@@ -238,7 +239,7 @@ function renderOverview(o) {
         ${c.authorized ? '<span class="tag ok">paired</span>' : '<span class="tag warn">not paired</span>'}
         ${(c.transports || []).map((t) => t === "quic"
           ? '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">QUIC</span>'
-          : '<span class="tag warn" title="Plaintext on the network">HTTP</span>').join("")}
+          : '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">HTTPS</span>').join("")}
         ${c.rejected ? `<span class="tag bad">${c.rejected} rejected</span>` : ""}</span>
         <span class="muted small">${ago(c.last_seen_ms)}</span></div>
       <div class="muted small">${c.requests} requests · ↓${bytes(c.bytes_in)} ↑${bytes(c.bytes_out)} · <span class="mono">${esc(c.last_request)}</span></div>

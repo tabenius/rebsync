@@ -2,13 +2,14 @@
 //!
 //! Experimental `rbq-peer/0` protocol: list, read and create-if-absent.
 //! There is no delete and no overwrite, matching the core's rule that
-//! synchronization never propagates deletions. Plain HTTP on the local
-//! network: anyone on the same network can observe the token, so share only
-//! on networks you trust (Wi-Fi you control, USB tethering, a hotspot).
+//! synchronization never propagates deletions. Served over HTTPS only, with
+//! the phone's own key (the same one QUIC uses): a client pins it from the
+//! connection string (`peer=`), so the token is never sent in clear and no
+//! other device can pose as this phone.
 
 use rebsync_core::{ObjectKey, ObjectStorage, PutOutcome, StorageError};
-use sha2::{Digest, Sha256};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -132,7 +133,9 @@ impl Clients {
             if rejected {
                 client.rejected += 1;
                 client.recent_failures.push(now);
-                client.recent_failures.retain(|t| now.saturating_sub(*t) < 60_000);
+                client
+                    .recent_failures
+                    .retain(|t| now.saturating_sub(*t) < 60_000);
             } else if authorized {
                 client.authorized = true;
             }
@@ -148,7 +151,11 @@ impl rebsync_core::transport::Observer for Clients {
             record.transport,
             record.peer,
             None,
-            format!("{} {}", record.transport.to_ascii_uppercase(), record.request),
+            format!(
+                "{} {}",
+                record.transport.to_ascii_uppercase(),
+                record.request
+            ),
             record.authorized,
             record.rejected,
             record.bytes_in,
@@ -169,15 +176,21 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// Serve over HTTPS as `identity` (the phone's long-term key).
     pub fn start(
         port: u16,
         token: String,
         storage: SharedStorage,
         clients: Arc<Clients>,
         writes_paused: Arc<AtomicBool>,
+        identity: &rebsync_core::transport::quic::Identity,
     ) -> Result<Self, String> {
-        let server = Server::http(("0.0.0.0", port))
-            .or_else(|_| Server::http(("0.0.0.0", 0)))
+        let tls = || tiny_http::SslConfig {
+            certificate: identity.certificate_pem().into_bytes(),
+            private_key: identity.private_key_pem().into_bytes(),
+        };
+        let server = Server::https(("0.0.0.0", port), tls())
+            .or_else(|_| Server::https(("0.0.0.0", 0), tls()))
             .map_err(|e| format!("cannot listen: {e}"))?;
         let port = server
             .server_addr()
@@ -271,7 +284,9 @@ fn decode(value: &str) -> Option<String> {
     while i < bytes.len() {
         match bytes[i] {
             b'%' => {
-                if i + 2 >= bytes.len() { return None; }
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
                 out.push(u8::from_str_radix(hex, 16).ok()?);
                 i += 3;
@@ -368,7 +383,9 @@ fn handle(
     }
     let store = match storage.try_read() {
         Ok(guard) => guard.clone(),
-        Err(std::sync::TryLockError::WouldBlock) => return respond(request, 503, error("storage busy; retry later"), true, true),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return respond(request, 503, error("storage busy; retry later"), true, true);
+        }
         Err(_) => return respond(request, 500, error("storage lock poisoned"), true, true),
     };
 
@@ -439,7 +456,13 @@ fn handle(
                 Err(e) => return respond(request, 400, error(&e.to_string()), true, true),
             };
             if rebsync_core::peer::validate_peer_key(key.as_str()).is_err() {
-                return respond(request, 400, error("not a canonical layer object"), true, true);
+                return respond(
+                    request,
+                    400,
+                    error("not a canonical layer object"),
+                    true,
+                    true,
+                );
             }
             let hashed = store.head(&key).and_then(|meta| {
                 let mut hasher = Sha256::new();
@@ -472,7 +495,13 @@ fn handle(
                 Err(e) => return respond(request, 400, error(&e.to_string()), true, true),
             };
             if rebsync_core::peer::validate_peer_key(key.as_str()).is_err() {
-                return respond(request, 400, error("not a canonical layer object"), true, true);
+                return respond(
+                    request,
+                    400,
+                    error("not a canonical layer object"),
+                    true,
+                    true,
+                );
             }
             match method {
                 Method::Get => match store.get(&key) {
@@ -524,16 +553,36 @@ fn handle(
                         return respond(request, 400, error("could not read body"), true, true);
                     }
                     if rebsync_core::peer::validate_received_object(key.as_str(), &body).is_err() {
-                        return respond(request, 400, error("invalid layer object or digest"), true, true);
+                        return respond(
+                            request,
+                            400,
+                            error("invalid layer object or digest"),
+                            true,
+                            true,
+                        );
                     }
                     // Synchronize with moves: a writer holds this guard through
                     // publication, and the mover takes the exclusive lock before copying.
                     let active = match storage.try_read() {
                         Ok(guard) => guard,
-                        Err(_) => return respond(request, 503, error("storage busy; retry later"), true, true),
+                        Err(_) => {
+                            return respond(
+                                request,
+                                503,
+                                error("storage busy; retry later"),
+                                true,
+                                true,
+                            );
+                        }
                     };
                     if writes_paused.load(Ordering::SeqCst) {
-                        return respond(request, 503, error("data is being moved; retry later"), true, true);
+                        return respond(
+                            request,
+                            503,
+                            error("data is being moved; retry later"),
+                            true,
+                            true,
+                        );
                     }
                     let outcome = active.put_if_absent(&key, &body);
                     let incoming = Sha256::digest(&body);
@@ -548,8 +597,18 @@ fn handle(
                             true,
                         ),
                         Ok(PutOutcome::AlreadyExists(meta)) => {
-                            if meta.size != incoming_len || !active.get(&key).is_ok_and(|bytes| Sha256::digest(&bytes) == incoming) {
-                                return respond(request, 409, error("existing object differs; never overwritten"), true, true);
+                            if meta.size != incoming_len
+                                || !active
+                                    .get(&key)
+                                    .is_ok_and(|bytes| Sha256::digest(&bytes) == incoming)
+                            {
+                                return respond(
+                                    request,
+                                    409,
+                                    error("existing object differs; never overwritten"),
+                                    true,
+                                    true,
+                                );
                             }
                             let body = serde_json::json!({"status": "exists", "size": meta.size});
                             respond(

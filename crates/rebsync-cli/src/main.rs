@@ -529,7 +529,7 @@ enum GitAction {
 }
 #[derive(Args)]
 struct PeerTargetArgs {
-    /// Connection string: from the app (rbq+http://HOST:PORT/v1?token=…), or
+    /// Connection string: from the app (rbq+https://HOST:PORT/v1?peer=ID&token=…), or
     /// rbq+quic://HOST:PORT?peer=ID&token=… / tcp:// / unix:// for `rbq peer serve`;
     /// defaults to $RBQ_PEER so the token stays out of shell history.
     connection: Option<String>,

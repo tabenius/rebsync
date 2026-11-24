@@ -124,25 +124,51 @@ enum PeerCopy {
 #[cfg(feature = "peer-http")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
-    /// `http://host:port`, without a trailing slash.
+    /// `https://host:port` (or `http://` for an old app), no trailing slash.
     pub base: String,
     pub token: String,
+    /// For HTTPS: the peer id of the server's key, which is pinned.
+    pub pin: Option<String>,
 }
 
-/// Parse `rbq+http://host:port/v1?token=T` (as shown by the app) or a
+/// Parse `rbq+https://host:port/v1?peer=ID&token=T` (as shown by the app),
+/// `rbq+http://...` from an old app, or a
 /// plain `http://host:port` plus a separately supplied token.
 #[cfg(feature = "peer-http")]
 pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<Target> {
     let raw = connection.trim();
     let raw = raw.strip_prefix("rbq+").unwrap_or(raw);
-    ensure!(
-        raw.starts_with("http://"),
-        "peer connections are http://HOST:PORT (rbq-peer/0 has no TLS yet)"
-    );
+    let scheme = if raw.starts_with("https://") {
+        "https://"
+    } else if raw.starts_with("http://") {
+        "http://"
+    } else {
+        bail!("peer connections are https://HOST:PORT (or http:// for an old app)");
+    };
     let (location, query) = raw.split_once('?').unwrap_or((raw, ""));
     let location = location.trim_end_matches('/');
     let location = location.strip_suffix("/v1").unwrap_or(location);
-    let host = &location["http://".len()..];
+    let host = &location[scheme.len()..];
+    // HTTPS to a phone is pinned to its key (the same id as its QUIC pin);
+    // there is no CA to ask.
+    let pin = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("peer="))
+        .map(str::to_ascii_lowercase);
+    #[cfg(not(feature = "peer-quic"))]
+    ensure!(
+        scheme == "http://",
+        "https:// peers are pinned with rbq's QUIC/TLS support, which this build lacks"
+    );
+    if scheme == "https://" {
+        let pin = pin.as_deref().context(
+            "https connections must pin the phone's key: add &peer=<id shown by the app>",
+        )?;
+        ensure!(
+            pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()),
+            "a peer id is 64 hexadecimal characters"
+        );
+    }
     ensure!(
         !host.is_empty() && !host.contains('/') && !host.contains('@'),
         "peer address must be HOST:PORT"
@@ -162,6 +188,7 @@ pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<Target>
     Ok(Target {
         base: location.to_owned(),
         token,
+        pin: if scheme == "https://" { pin } else { None },
     })
 }
 
@@ -271,7 +298,7 @@ fn encode(value: &str) -> String {
 #[cfg(feature = "peer-http")]
 impl Peer {
     pub fn connect(target: Target) -> Self {
-        let agent = crate::wire::http::agent(Duration::from_secs(10), Duration::from_secs(300));
+        let agent = Self::agent(&target, Duration::from_secs(10), Duration::from_secs(300));
         Self {
             agent,
             target,
@@ -317,8 +344,31 @@ impl Peer {
 
     /// Bound explicit diagnostic probes without reducing bulk-transfer timeouts.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.agent = crate::wire::http::agent(timeout, timeout);
+        self.agent = Self::agent(&self.target, timeout, timeout);
         self
+    }
+
+    /// No redirects, bounded timeouts and, for HTTPS, TLS pinned to the
+    /// phone's key (never the system CAs: there is no CA for a phone).
+    fn agent(target: &Target, connect: Duration, total: Duration) -> ureq::Agent {
+        #[cfg(feature = "peer-quic")]
+        if let Some(pin) = &target.pin {
+            use crate::transport::quic::pinned_tls_client;
+            // parse_connection validates pins; a malformed one built by hand
+            // becomes a pin no key hashes to, so the connection fails closed.
+            let tls = pinned_tls_client(pin)
+                .or_else(|_| pinned_tls_client(&"0".repeat(64)))
+                .expect("a well-formed pin");
+            return ureq::AgentBuilder::new()
+                .timeout_connect(connect)
+                .timeout(total)
+                .redirects(0)
+                .tls_config(std::sync::Arc::new(tls))
+                .build();
+        }
+        #[cfg(not(feature = "peer-quic"))]
+        let _ = target;
+        crate::wire::http::agent(connect, total)
     }
 
     fn url(&self, path: &str) -> String {

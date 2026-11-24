@@ -729,8 +729,8 @@ that a device is trusted. Requested probes that are incomplete exit `2`.
   of the same underlying filesystem; do not sum them as independent disks.
 - **TCP/IP:** use Rebeqah's displayed reachable IP/port on trusted Wi-Fi, a
   hotspot, USB tethering or another explicitly established link. To check only
-  that endpoint: `rbq phone diagnose --peer http://PHONE_IP:PORT --token-file
-  /private/peer-token`. HTTP peer JSON is size-bounded, error bodies are
+  that endpoint: `rbq phone diagnose --peer 'https://PHONE_IP:PORT?peer=ID'
+  --token-file /private/peer-token`. Peer JSON is size-bounded, error bodies are
   suppressed and connection tokens are not included in diagnostic output.
 - **Bluetooth:** print the host pairing/PAN guide. If ChromeOS and Android offer
   Bluetooth tethering/PAN, an established IP link can carry the existing peer
@@ -795,7 +795,7 @@ rbq drive pull stick                                # verifies received snapshot
 card. Pass it through `RBQ_PEER` so the token stays out of shell history:
 
 ```bash
-export RBQ_PEER='rbq+http://192.168.1.42:8787/v1?token=…'
+export RBQ_PEER='rbq+https://192.168.1.42:8787/v1?peer=ID&token=…'
 rbq peer status                  # what the phone holds, per layer
 rbq peer push                    # this machine → phone
 rbq peer pull --layer frog       # phone → this machine, Frog only
@@ -806,7 +806,8 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   ever deleted.
 - **Chunks travel before manifests,** so an interrupted sync never leaves a
   snapshot whose data is missing. Running it again finishes the job; a repeat
-  sync of an up-to-date phone writes no new objects but reads bytes to verify them.
+  sync of an up-to-date phone writes nothing and verifies the phone's copies
+  by their hashes (`--distrust-peer` downloads them instead).
 - **Pulled data is untrusted:**
   - Each chunk is re-hashed against its address.
   - Manifests must parse.
@@ -818,9 +819,13 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   manifests are not stored; the legacy `quarantined` report field remains empty.
   Owner validation
   (SQLite integrity, edition manifests) is still `rbq <layer> verify ID`.
-- **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
-  hotspot or USB tethering. Listings page with `after=`, which needs Rebeqah
-  0.2.4 or later; Rebekah installs use an incompatible protocol and are refused.
+- **HTTPS pinned to the phone's key.** Rebeqah serves `rbq-peer/0` over HTTPS
+  with the same key as its QUIC sharing; the connection string's `peer=` pins
+  it, so the token never crosses the network in clear and no other device can
+  pose as the phone. There is no CA: an `https://` string without `peer=` is
+  refused. `http://` still works for old app versions. Listings page with
+  `after=`, which needs Rebeqah 0.2.4 or later; Rebekah installs use an
+  incompatible protocol and are refused.
 
 ### Local transports (`rbq-peer/1`)
 

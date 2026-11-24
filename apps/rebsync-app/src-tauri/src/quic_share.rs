@@ -116,24 +116,21 @@ impl QuicShare {
         let trust =
             Arc::new(TrustStore::open(trust_dir, identity.clone()).map_err(|e| format!("{e:#}"))?);
         // QUIC clients appear in the same Connected clients list as HTTP ones.
-        let service = transport::Service::new(
-            Arc::new(FollowStorage(storage)),
-            token,
-            writes_paused,
-        )
-        .with_observer(clients)
-        // Paired devices connect with their key alone; invitations pair new
-        // ones on first contact.
-        .with_trust(trust.clone())
-        .with_pairing(trust.clone())
-        // Large uploads are staged on disk in parts and resume after a
-        // dropped connection (phones change networks often).
-        .with_staging(Arc::new(
-            transport::staging::Staging::open(
-                &trust_dir.parent().unwrap_or(trust_dir).join("staging"),
-            )
-            .map_err(|e| format!("{e:#}"))?,
-        ));
+        let service =
+            transport::Service::new(Arc::new(FollowStorage(storage)), token, writes_paused)
+                .with_observer(clients)
+                // Paired devices connect with their key alone; invitations pair new
+                // ones on first contact.
+                .with_trust(trust.clone())
+                .with_pairing(trust.clone())
+                // Large uploads are staged on disk in parts and resume after a
+                // dropped connection (phones change networks often).
+                .with_staging(Arc::new(
+                    transport::staging::Staging::open(
+                        &trust_dir.parent().unwrap_or(trust_dir).join("staging"),
+                    )
+                    .map_err(|e| format!("{e:#}"))?,
+                ));
         let server = transport::Server::bind_quic("0.0.0.0", port, service.clone(), &identity)
             .or_else(|_| transport::Server::bind_quic("0.0.0.0", 0, service, &identity))
             .map_err(|e| format!("{e:#}"))?;
@@ -163,4 +160,27 @@ pub fn pairing(host: &str, port: u16, peer_id: &str, token: &str) -> String {
 /// device's key on first use and then stops working.
 pub fn invitation(host: &str, port: u16, peer_id: &str, secret: &str) -> String {
     format!("rbq+quic://{host}:{port}?peer={peer_id}&pair={secret}")
+}
+
+/// curl's `--pinnedpubkey sha256//...` form of a peer id (base64 of the
+/// SHA-256 of the key, where the peer id is its hex).
+pub fn curl_pin(peer_id: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = (0..peer_id.len() / 2)
+        .filter_map(|i| u8::from_str_radix(peer_id.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect();
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    format!("sha256//{out}")
 }
