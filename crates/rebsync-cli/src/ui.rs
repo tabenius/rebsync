@@ -706,10 +706,69 @@ fn networks_report(value: &serde_json::Value) {
     println!("  {}", value["note"].as_str().unwrap_or_default());
 }
 
+/// `rbq peer pair list|remove` in human form.
+#[cfg(feature = "peer")]
+fn pairings_report(value: &serde_json::Value) {
+    println!("{}", heading("RBQ / PAIRED DEVICES"));
+    if let Some(removed) = value["removed"].as_u64() {
+        println!(
+            "  removed {removed} pairing(s) with {}",
+            value["peer"].as_str().unwrap_or_default()
+        );
+        return;
+    }
+    println!(
+        "  this device  {}",
+        value["device"].as_str().unwrap_or_default()
+    );
+    let paired = value["paired"].as_array().cloned().unwrap_or_default();
+    if paired.is_empty() {
+        println!(
+            "  No pairings. Exchange cards: rbq peer id > card.json, then rbq peer pair add CARD --as client|server"
+        );
+    }
+    for entry in &paired {
+        let access = match (
+            entry["scopes"]["read"].as_bool(),
+            entry["scopes"]["write"].as_bool(),
+        ) {
+            (Some(true), Some(true)) => "read/write".to_owned(),
+            (Some(true), _) => "read-only".to_owned(),
+            _ => entry["addresses"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default(),
+        };
+        println!(
+            "  {:<7} {:<16} {}…  {}{}",
+            entry["role"].as_str().unwrap_or_default(),
+            entry["name"].as_str().unwrap_or("(unnamed)"),
+            entry["peer"]
+                .as_str()
+                .unwrap_or_default()
+                .get(..16)
+                .unwrap_or_default(),
+            access,
+            entry["expires_at"]
+                .as_u64()
+                .map(|t| format!("  expires at unix {t}"))
+                .unwrap_or_default()
+        );
+    }
+}
+
 #[cfg(feature = "peer")]
 pub fn peer_report(value: &serde_json::Value, code: i32) {
     if value["kind"] == "networks" {
         return networks_report(value);
+    }
+    if value["kind"] == "pairings" {
+        return pairings_report(value);
     }
     println!(
         "{}  {}",

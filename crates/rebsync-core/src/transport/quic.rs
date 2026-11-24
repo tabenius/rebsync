@@ -25,13 +25,14 @@
 use super::{
     AUTH_DEADLINE, IO_TIMEOUT, Link, ListingPage, MAX_CONNECTIONS, MAX_CONTROL, MAX_LIST,
     MAX_OBJECT, MAX_REQUEST, PROTOCOL, Request, RequestEnvelope, Response, ResponseEnvelope,
-    Server, Service, Status, Target, error_response,
+    Scopes, Server, Service, Status, Target, error_response,
 };
 use anyhow::{Context, Result, bail, ensure};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use std::{
     fs,
     io::Write,
@@ -176,6 +177,50 @@ impl Identity {
     fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(self.key.clone_key())
     }
+
+    /// Sign `message` with this identity's key. Returns the TLS 1.3
+    /// signature scheme's name and the signature; [`verify_signature`]
+    /// checks it against the certificate.
+    pub fn sign(&self, message: &[u8]) -> Result<(String, Vec<u8>)> {
+        let key = rustls::crypto::ring::sign::any_supported_type(&self.key())
+            .map_err(|error| anyhow::anyhow!("unusable identity key: {error}"))?;
+        let schemes = provider()
+            .signature_verification_algorithms
+            .supported_schemes();
+        let signer = key
+            .choose_scheme(&schemes)
+            .context("identity key supports no TLS 1.3 signature scheme")?;
+        let signature = signer
+            .sign(message)
+            .map_err(|error| anyhow::anyhow!("sign: {error}"))?;
+        Ok((format!("{:?}", signer.scheme()), signature))
+    }
+}
+
+/// Check that `signature` over `message` was made with the key in
+/// `certificate_der`, using the named TLS 1.3 signature scheme.
+pub fn verify_signature(
+    certificate_der: &[u8],
+    scheme: &str,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let algorithms = provider().signature_verification_algorithms;
+    let (_, candidates) = algorithms
+        .mapping
+        .iter()
+        .find(|(known, _)| format!("{known:?}") == scheme)
+        .with_context(|| format!("unsupported signature scheme {scheme:?}"))?;
+    let certificate = CertificateDer::from(certificate_der);
+    let parsed = webpki::EndEntityCert::try_from(&certificate)
+        .map_err(|error| anyhow::anyhow!("unreadable certificate: {error}"))?;
+    ensure!(
+        candidates.iter().any(|algorithm| parsed
+            .verify_signature(*algorithm, message, signature)
+            .is_ok()),
+        "signature does not verify"
+    );
+    Ok(())
 }
 
 /// Create a file that must not exist yet; private files are 0600 from the
@@ -213,10 +258,77 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
 fn tls_server(identity: &Identity) -> Result<rustls::ServerConfig> {
     let mut tls = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_no_client_auth()
+        .with_client_cert_verifier(Arc::new(ClientKeys {
+            algorithms: provider().signature_verification_algorithms,
+        }))
         .with_single_cert(vec![identity.certificate.clone()], identity.key())?;
     tls.alpn_protocols = alpn();
     Ok(tls)
+}
+
+/// Asks clients for a certificate without requiring one. Any self-signed key
+/// is accepted at the TLS layer, and its handshake signature is checked, so
+/// the key a client presents is proven; whether that key is *trusted* is
+/// decided per request against the server's signed pairings. Clients without
+/// a key fall back to the token.
+#[derive(Debug)]
+struct ClientKeys {
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ClientCertVerifier for ClientKeys {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        peer_id_of_certificate(end_entity).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// The peer id proven by the far side's certificate, if it presented one.
+fn proven_peer(conn: &quinn::Connection) -> Option<String> {
+    let certificates = conn
+        .peer_identity()?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .ok()?;
+    peer_id_of_certificate(certificates.first()?).ok()
 }
 
 /// Accepts exactly the pinned server key, and checks the handshake signature,
@@ -328,6 +440,18 @@ pub struct QuicLink {
 
 impl QuicLink {
     pub fn connect(host: &str, port: u16, peer: &str, token: String) -> Result<Self> {
+        Self::connect_as(host, port, peer, token, None)
+    }
+
+    /// Connect presenting `identity`'s key. A server that has paired with
+    /// that key serves it without a token (`token` may then be empty).
+    pub fn connect_as(
+        host: &str,
+        port: u16,
+        peer: &str,
+        token: String,
+        identity: Option<&Identity>,
+    ) -> Result<Self> {
         validate_peer_id(peer)?;
         let addresses: Vec<SocketAddr> = (host, port)
             .to_socket_addrs()
@@ -345,11 +469,16 @@ impl QuicLink {
             seen: Mutex::new(None),
             algorithms: provider().signature_verification_algorithms,
         });
-        let mut tls = rustls::ClientConfig::builder_with_provider(provider())
+        let builder = rustls::ClientConfig::builder_with_provider(provider())
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .dangerous()
-            .with_custom_certificate_verifier(verifier.clone())
-            .with_no_client_auth();
+            .with_custom_certificate_verifier(verifier.clone());
+        let mut tls = match identity {
+            Some(identity) => {
+                builder.with_client_auth_cert(vec![identity.certificate.clone()], identity.key())?
+            }
+            None => builder.with_no_client_auth(),
+        };
         tls.alpn_protocols = alpn();
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
         let mut config = quinn::ClientConfig::new(Arc::new(crypto));
@@ -629,6 +758,7 @@ async fn serve(endpoint: quinn::Endpoint, service: Service, stop: Arc<AtomicBool
 /// [`AUTH_DEADLINE`] of the handshake, and one bad token ends it.
 async fn serve_connection(conn: quinn::Connection, service: Service, peer: Arc<str>) {
     let authenticated = Arc::new(AtomicBool::new(false));
+    let key: Option<Arc<str>> = proven_peer(&conn).map(Arc::from);
     {
         let (conn, authenticated) = (conn.clone(), authenticated.clone());
         tokio::spawn(async move {
@@ -639,30 +769,33 @@ async fn serve_connection(conn: quinn::Connection, service: Service, peer: Arc<s
         });
     }
     while let Ok((send, recv)) = conn.accept_bi().await {
-        let (conn, service, authenticated, peer) = (
+        let (conn, service, authenticated, peer, key) = (
             conn.clone(),
             service.clone(),
             authenticated.clone(),
             peer.clone(),
+            key.clone(),
         );
         tokio::spawn(async move {
-            match serve_stream(send, recv, service, &authenticated, &peer).await {
+            match serve_stream(send, recv, service, &authenticated, &peer, key.as_deref()).await {
                 Ok(true) => {}
-                Ok(false) => conn.close(quinn::VarInt::from_u32(2), b"invalid token"),
+                Ok(false) => conn.close(quinn::VarInt::from_u32(2), b"not authorised"),
                 Err(_) => {}
             }
         });
     }
 }
 
-/// One request. `Ok(false)` means the token was wrong and the connection
-/// should end.
+/// One request. `Ok(false)` means the caller is not authorised (wrong token
+/// and no trusted key) and the connection should end. `key` is the peer id
+/// the client's certificate proved, if it presented one.
 async fn serve_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     service: Service,
     authenticated: &AtomicBool,
     peer: &str,
+    key: Option<&str>,
 ) -> Result<bool> {
     let deadline = if authenticated.load(Ordering::SeqCst) {
         IO_TIMEOUT
@@ -696,8 +829,18 @@ async fn serve_stream(
         .await?;
         return Ok(true);
     }
-    if !service.authorize(&envelope.token) {
-        let sent = respond(&mut send, error_response(401, "invalid token"), None)
+    let scopes = if service.authorize(&envelope.token) {
+        Some(Scopes::ALL)
+    } else {
+        key.and_then(|key| service.trusted(key))
+    };
+    let Some(scopes) = scopes else {
+        let message = if key.is_some() {
+            "invalid token, and this device's key is not paired"
+        } else {
+            "invalid token"
+        };
+        let sent = respond(&mut send, error_response(401, message), None)
             .await
             .unwrap_or(0);
         service.observe(
@@ -710,8 +853,26 @@ async fn serve_stream(
             sent,
         );
         return Ok(false);
-    }
+    };
     authenticated.store(true, Ordering::SeqCst);
+    if !scopes.allows(&envelope.request) {
+        let sent = respond(
+            &mut send,
+            error_response(403, "this pairing does not allow that request"),
+            None,
+        )
+        .await?;
+        service.observe(
+            peer,
+            "quic",
+            Some(&envelope.request),
+            true,
+            false,
+            frame.len() as u64,
+            sent,
+        );
+        return Ok(true);
+    }
     let body = match &envelope.request {
         Request::Put { size, .. } => {
             if *size > MAX_OBJECT {
@@ -989,6 +1150,82 @@ mod tests {
         // A peer the observer turns away cannot even complete a handshake.
         recorder.banned.lock().unwrap().push("127.0.0.1".into());
         assert!(QuicLink::connect("127.0.0.1", port, identity.peer_id(), token()).is_err());
+        assert!(server.shutdown(), "the QUIC server thread must not panic");
+    }
+
+    #[test]
+    fn paired_keys_need_no_token_and_are_held_to_their_scopes() {
+        use super::super::pairing::{Role, TrustStore, card};
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let server_identity = Arc::new(Identity::generate().unwrap());
+        let trust = Arc::new(
+            TrustStore::open(&root.path().join("paired"), server_identity.clone()).unwrap(),
+        );
+        let reader = Identity::generate().unwrap();
+        let writer = Identity::generate().unwrap();
+        let stranger = Identity::generate().unwrap();
+        let read_only = Scopes {
+            read: true,
+            write: false,
+        };
+        trust
+            .add(
+                &card(&reader, None, vec![]).unwrap(),
+                Role::Client,
+                Some(read_only),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        trust
+            .add(
+                &card(&writer, None, vec![]).unwrap(),
+                Role::Client,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        // No token at all: only paired keys get in.
+        let service = Service::without_token(Arc::new(storage), Arc::new(AtomicBool::new(false)))
+            .with_trust(trust.clone());
+        let server = Server::bind_quic("127.0.0.1", 0, service, &server_identity).unwrap();
+        let (port, pin) = (port(&server), server_identity.peer_id().to_owned());
+        let digest = crate::wire::sha256_hex(b"hello");
+        let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+
+        let mut write =
+            QuicLink::connect_as("127.0.0.1", port, &pin, String::new(), Some(&writer)).unwrap();
+        assert!(write.put(&key, b"hello").unwrap());
+        let mut read =
+            QuicLink::connect_as("127.0.0.1", port, &pin, String::new(), Some(&reader)).unwrap();
+        assert_eq!(read.get(&key).unwrap(), b"hello");
+        let error = read
+            .put(&key.replace(&digest[..2], "zz"), b"x")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("403"), "{error:#}");
+        assert!(
+            read.status().is_ok(),
+            "a refused write does not end the link"
+        );
+
+        // An unpaired key, and no key at all, are refused.
+        let mut unknown =
+            QuicLink::connect_as("127.0.0.1", port, &pin, String::new(), Some(&stranger)).unwrap();
+        let error = unknown.status().unwrap_err();
+        assert!(format!("{error:#}").contains("not paired"), "{error:#}");
+        let mut anonymous = QuicLink::connect("127.0.0.1", port, &pin, String::new()).unwrap();
+        assert!(anonymous.status().is_err());
+
+        // Revoking the pairing takes effect on the next connection.
+        trust.remove(writer.peer_id()).unwrap();
+        let mut revoked =
+            QuicLink::connect_as("127.0.0.1", port, &pin, String::new(), Some(&writer)).unwrap();
+        assert!(revoked.status().is_err());
+        drop((write, read, unknown, anonymous, revoked));
         assert!(server.shutdown(), "the QUIC server thread must not panic");
     }
 

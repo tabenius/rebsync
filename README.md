@@ -862,6 +862,30 @@ rbq peer selftest
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.
+- **Pair devices instead of sharing a token.** Every device has one key
+  (the QUIC identity). Pairing means each side signs a record about the
+  other's key, ahead of time and without prompts:
+
+  ```bash
+  # On each device: print its card (key, name, addresses), self-signed.
+  rbq peer id --name phone --address quic://100.88.0.7:8788 > phone.card
+  rbq peer id --name laptop > laptop.card
+  # Carry the cards over a channel you trust, then on the server:
+  rbq peer pair add laptop.card --as client            # or --read-only, --expires-days 90
+  # and on the client:
+  rbq peer pair add phone.card --as server
+  # From then on the key authenticates; no token is needed or sent.
+  rbq peer serve --listen quic://0.0.0.0:8788          # --token-file is optional now
+  rbq peer push paired:phone
+  ```
+
+  A server records which client keys may read (and write), optionally until
+  a date; a client records a server's pin and addresses, so `paired:NAME`
+  resolves both. A record only counts if this device's own key signed it and
+  it has not expired; anything else in the directory is ignored, and
+  `rbq peer pair remove PEER` revokes. A card proves its holder has the key,
+  not who the holder is, so exchange cards like SSH host keys. Tokens still
+  work for unpaired clients and for TCP and Unix sockets.
 - **Tailscale and NetBird.** `rbq peer networks` shows whether this host is
   on either overlay (its interfaces; Tailscale's `fd7a:115c:a1e0::/48`; and,
   when installed, `tailscale status --json` / `netbird status --json` for the

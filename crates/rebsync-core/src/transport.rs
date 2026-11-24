@@ -48,6 +48,8 @@ use std::{
 pub const PROTOCOL: &str = "rbq-peer/1";
 
 #[cfg(feature = "peer-quic")]
+pub mod pairing;
+#[cfg(feature = "peer-quic")]
 pub mod quic;
 /// Metadata frames (a request/response envelope) are bounded independently
 /// from object bodies. A 10 000-key listing with long keys needs a few MiB.
@@ -235,6 +237,14 @@ fn unix_path(rest: &str, datagram: bool) -> Result<Target> {
 /// Parse `rbq+tcp://HOST:PORT?token=T`, `unix:///path?token=T` or
 /// `unix-dgram:///path?token=T`, with the token optionally supplied separately.
 pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<(Target, String)> {
+    let (target, token) = parse_target(connection, token)?;
+    let token = token.context("no token: pass --token-file or include ?token=...")?;
+    Ok((target, token))
+}
+
+/// Like [`parse_connection`], but the token is optional: a QUIC connection
+/// from a paired device authenticates with its key instead.
+pub fn parse_target(connection: &str, token: Option<&str>) -> Result<(Target, Option<String>)> {
     let raw = connection.trim();
     let raw = raw.strip_prefix("rbq+").unwrap_or(raw);
     let (location, query) = raw.split_once('?').unwrap_or((raw, ""));
@@ -242,11 +252,10 @@ pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<(Target
         .split('&')
         .find_map(|pair| pair.strip_prefix("token="))
         .map(str::to_owned);
-    let token = token
-        .map(str::to_owned)
-        .or(from_query)
-        .context("no token: pass --token-file or include ?token=...")?;
-    validate_token(&token)?;
+    let token = token.map(str::to_owned).or(from_query);
+    if let Some(token) = &token {
+        validate_token(token)?;
+    }
     #[allow(unused_mut)]
     let mut target = Target::parse(location)?;
     #[cfg(feature = "peer-quic")]
@@ -439,10 +448,41 @@ pub trait Observer: Send + Sync {
 
 /// A token-protected view of one object store. Cloneable so each connection and
 /// datagram worker can hold it.
+/// What a caller may do. A valid token grants both; a pairing grants what
+/// its signed record says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scopes {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl Scopes {
+    pub const ALL: Self = Self {
+        read: true,
+        write: true,
+    };
+
+    pub fn allows(self, request: &Request) -> bool {
+        match request {
+            Request::Put { .. } => self.write,
+            Request::Status | Request::List { .. } | Request::Get { .. } => self.read,
+        }
+    }
+}
+
+/// Decides which proven peer keys may use a [`Service`] without a token,
+/// e.g. the device's store of signed pairings.
+pub trait PeerTrust: Send + Sync {
+    /// Scopes granted to the peer whose key hashes to `peer_id`, if any.
+    fn scopes(&self, peer_id: &str) -> Option<Scopes>;
+}
+
 #[derive(Clone)]
 pub struct Service {
     storage: Arc<dyn ObjectStorage>,
-    token: Arc<String>,
+    /// `None`: no token is accepted; only trusted peer keys get in.
+    token: Option<Arc<String>>,
+    trust: Option<Arc<dyn PeerTrust>>,
     writes_paused: Arc<AtomicBool>,
     listing: Arc<Mutex<Option<CachedListing>>>,
     observer: Option<Arc<dyn Observer>>,
@@ -471,11 +511,32 @@ impl Service {
     ) -> Self {
         Self {
             storage,
-            token: Arc::new(token),
+            token: Some(Arc::new(token)),
+            trust: None,
             writes_paused,
             listing: Arc::default(),
             observer: None,
         }
+    }
+
+    /// A service no token can open: only peers trusted through
+    /// [`Service::with_trust`] (paired keys over QUIC) are served.
+    pub fn without_token(storage: Arc<dyn ObjectStorage>, writes_paused: Arc<AtomicBool>) -> Self {
+        Self {
+            token: None,
+            ..Self::new(storage, String::new(), writes_paused)
+        }
+    }
+
+    /// Let peers whose keys `trust` vouches for in without a token (QUIC).
+    pub fn with_trust(mut self, trust: Arc<dyn PeerTrust>) -> Self {
+        self.trust = Some(trust);
+        self
+    }
+
+    /// Scopes a proven peer key is granted, if any.
+    pub fn trusted(&self, peer_id: &str) -> Option<Scopes> {
+        self.trust.as_ref().and_then(|trust| trust.scopes(peer_id))
     }
 
     /// Report every answered request to `observer` (QUIC, TCP and Unix
@@ -548,7 +609,9 @@ impl Service {
     }
 
     pub fn authorize(&self, presented: &str) -> bool {
-        same(presented, &self.token)
+        self.token
+            .as_ref()
+            .is_some_and(|token| !presented.is_empty() && same(presented, token))
     }
 
     fn status(&self) -> Status {
@@ -684,6 +747,36 @@ pub struct ListingPage {
 /// Connect to a target with the transport its scheme names.
 pub fn connect(target: &Target, token: String) -> Result<Box<dyn Link>> {
     validate_token(&token)?;
+    connect_link(target, token)
+}
+
+/// Connect over QUIC presenting this device's key. A server that has paired
+/// with the key serves it without a token, so `token` may be `None`.
+#[cfg(feature = "peer-quic")]
+pub fn connect_paired(
+    target: &Target,
+    token: Option<String>,
+    identity: &quic::Identity,
+) -> Result<Box<dyn Link>> {
+    if let Some(token) = &token {
+        validate_token(token)?;
+    }
+    let Target::Quic { host, port, peer } = target else {
+        bail!("paired connections use quic://; other transports need a token");
+    };
+    let peer = peer
+        .as_deref()
+        .context("a quic connection needs the server's peer id (&peer=...)")?;
+    Ok(Box::new(quic::QuicLink::connect_as(
+        host,
+        *port,
+        peer,
+        token.unwrap_or_default(),
+        Some(identity),
+    )?))
+}
+
+fn connect_link(target: &Target, token: String) -> Result<Box<dyn Link>> {
     match target {
         Target::Tcp { host, port } => Ok(Box::new(StreamLink::tcp(host, *port, token)?)),
         #[cfg(feature = "peer-quic")]
@@ -1252,12 +1345,26 @@ pub struct TransportPeer {
 
 impl TransportPeer {
     pub fn connect(target: &Target, token: String) -> Result<Self> {
-        let link = connect(target, token)?;
+        Ok(Self::from_link(connect(target, token)?))
+    }
+
+    /// Like [`connect`], presenting this device's key over QUIC; see
+    /// [`connect_paired`].
+    #[cfg(feature = "peer-quic")]
+    pub fn connect_paired(
+        target: &Target,
+        token: Option<String>,
+        identity: &quic::Identity,
+    ) -> Result<Self> {
+        Ok(Self::from_link(connect_paired(target, token, identity)?))
+    }
+
+    fn from_link(link: Box<dyn Link>) -> Self {
         let description = link.describe();
-        Ok(Self {
+        Self {
             link: Mutex::new(link),
             description,
-        })
+        }
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Box<dyn Link>>> {
