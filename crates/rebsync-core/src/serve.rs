@@ -66,6 +66,8 @@ pub struct Running {
     pub fingerprint: Option<String>,
     pub announcements: Vec<Announcement>,
     server: std::sync::Arc<tiny_http::Server>,
+    /// Host names (lowercase) a request may address; see [`host_allowed`].
+    names: Vec<String>,
     avahi: Option<Child>,
     mdns: Option<mdns_sd::ServiceDaemon>,
 }
@@ -74,14 +76,14 @@ impl Running {
     /// Serve until the process ends.
     pub fn wait(self, config: &Config, storage: &dyn ObjectStorage) {
         for request in self.server.incoming_requests() {
-            handle(request, config, storage, self.tls);
+            handle(request, config, storage, self.tls, &self.names);
         }
     }
 
     /// Handle at most one request (tests).
     pub fn serve_one(&self, config: &Config, storage: &dyn ObjectStorage) -> Result<()> {
         let request = self.server.recv()?;
-        handle(request, config, storage, self.tls);
+        handle(request, config, storage, self.tls, &self.names);
         Ok(())
     }
 }
@@ -384,6 +386,7 @@ pub fn start(config: &Config, options: &ServeOptions) -> Result<Running> {
     } else {
         (Vec::new(), None, None)
     };
+    let name = hostname().to_ascii_lowercase();
     Ok(Running {
         url,
         port,
@@ -391,6 +394,7 @@ pub fn start(config: &Config, options: &ServeOptions) -> Result<Running> {
         fingerprint,
         announcements,
         server: std::sync::Arc::new(server),
+        names: vec!["localhost".into(), format!("{name}.local"), name],
         avahi,
         mdns,
     })
@@ -550,10 +554,48 @@ rbq git fetch ID --repo ~/src/project --as laptop-a   # → refs/remotes/rbq-lap
     )
 }
 
-fn handle(request: tiny_http::Request, config: &Config, storage: &dyn ObjectStorage, tls: bool) {
+/// Whether a request's `Host` header may reach this server. IP literals
+/// are allowed (LAN clients address a `0.0.0.0` bind by IP, and DNS
+/// rebinding needs a name); names must be `localhost` or this machine's own.
+/// Anything else is a page on another site that pointed its domain here,
+/// trying to read the status (paths, layer state) through the user's browser.
+fn host_allowed(host: Option<&str>, names: &[String]) -> bool {
+    let Some(host) = host.map(str::trim) else {
+        // HTTP/1.0 without Host: not a browser on a rebound name.
+        return true;
+    };
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split_once(']').map(|(ip, _)| ip).unwrap_or(rest)
+    } else {
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map(|(name, _)| name)
+            .unwrap_or(host)
+    };
+    let bare = bare.trim_end_matches('.').to_ascii_lowercase();
+    bare.parse::<IpAddr>().is_ok() || names.iter().any(|name| *name == bare)
+}
+
+fn handle(
+    request: tiny_http::Request,
+    config: &Config,
+    storage: &dyn ObjectStorage,
+    tls: bool,
+    names: &[String],
+) {
     let header = |name: &str, value: &str| {
         tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header")
     };
+    let host = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Host"))
+        .map(|h| h.value.as_str().to_owned());
+    if !host_allowed(host.as_deref(), names) {
+        let _ = request
+            .respond(tiny_http::Response::from_string("misdirected request").with_status_code(421));
+        return;
+    }
     let path = request.url().split('?').next().unwrap_or("/").to_owned();
     let mut response = match (request.method(), path.as_str()) {
         (tiny_http::Method::Get, "/") => {
@@ -643,6 +685,37 @@ mod tests {
         let issued = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let der = pem_body(issued.cert.pem().as_bytes()).unwrap();
         assert_eq!(der, issued.cert.der().to_vec());
+    }
+
+    #[test]
+    fn only_ip_literals_and_own_names_may_address_the_server() {
+        let names = vec![
+            "localhost".to_owned(),
+            "box.local".to_owned(),
+            "box".to_owned(),
+        ];
+        for ok in [
+            None,
+            Some("127.0.0.1:8790"),
+            Some("192.168.1.9"),
+            Some("[::1]:8790"),
+            Some("[fe80::1]"),
+            Some("localhost:8790"),
+            Some("LOCALHOST"),
+            Some("box.local:8790"),
+            Some("box.local."),
+            Some("box"),
+        ] {
+            assert!(host_allowed(ok, &names), "{ok:?}");
+        }
+        for bad in [
+            Some("evil.example"),
+            Some("evil.example:8790"),
+            Some("localhost.evil.example"),
+            Some(""),
+        ] {
+            assert!(!host_allowed(bad, &names), "{bad:?}");
+        }
     }
 
     #[test]
