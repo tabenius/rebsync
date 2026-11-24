@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/rebsync-core", "crates/rebsync-cli"]
-exclude = ["apps/rebsync-app/src-tauri", "apps/rebsync-app/logic-tests"]
+exclude = ["apps/rebsync-app/src-tauri", "apps/rebsync-app/logic-tests", "vendor/tiny_http"]
 resolver = "2"
 
 [workspace.package]
@@ -19,3 +19,8 @@ tempfile = "3"
 # Release binaries are archived for re-fetch; debug symbols dominate their size.
 # Keep them out of the published artifact (measured ~117M -> ~18M stripped).
 strip = "symbols"
+
+# tiny_http 0.12.0 with its rustls backend ported to rustls 0.23; upstream has
+# no release off rustls 0.20 (see vendor/tiny_http/README.md).
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }
