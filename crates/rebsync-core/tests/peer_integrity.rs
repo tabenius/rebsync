@@ -209,3 +209,60 @@ fn corrupt_existing_chunk_and_competing_create_are_rejected_without_overwrite() 
     assert_eq!(race.get(&key)?, vec![0; original.len()]);
     Ok(())
 }
+
+/// A carrier that counts the objects read from it.
+struct Counting<'a>(Carrier<'a>, std::cell::Cell<usize>);
+impl PeerApi for Counting<'_> {
+    fn base(&self) -> &str {
+        self.0.base()
+    }
+    fn status(&self) -> Result<Value> {
+        self.0.status()
+    }
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.1.set(self.1.get() + 1);
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        self.0.put(key, bytes)
+    }
+}
+
+#[test]
+fn a_push_with_nothing_to_send_reads_each_peer_object_once() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let producer = FsObjectStorage::open(t.path().join("producer"))?;
+    let carrier = FsObjectStorage::open(t.path().join("carrier"))?;
+    // Two snapshots that share their chunk, so the chunk is reachable both
+    // as an object and through each manifest.
+    let dir = t.path().join("export");
+    let first = publish(&producer, &dir)?;
+    fs::write(dir.join("sample.txt"), b"immutable portable bytes")?;
+    let second = layer::publish_files(
+        &producer,
+        "agenda",
+        "again",
+        4096,
+        &dir,
+        &["sample.txt".into()],
+        json!({"fixture": "again"}),
+        None,
+    )?;
+    assert_ne!(first.id, second.id);
+    let selection = ["agenda/".into()];
+    let mut journal = Journal::open(t.path())?;
+    assert!(peer::push(&producer, &Carrier(&carrier), &selection, &mut journal)?.clean());
+
+    let objects = carrier.list_prefix("agenda/", 0)?.len();
+    let counting = Counting(Carrier(&carrier), std::cell::Cell::new(0));
+    let report = peer::push(&producer, &counting, &selection, &mut journal)?;
+    assert!(report.clean());
+    assert_eq!(report.transferred, 0);
+    assert_eq!(report.already_present, objects);
+    // Every object is still verified against the peer, but none twice.
+    assert_eq!(counting.1.get(), objects);
+    Ok(())
+}

@@ -516,6 +516,50 @@ fn ordered(keys: Vec<String>) -> Vec<String> {
     chunks
 }
 
+/// Peer reads during one push, so each peer chunk crosses the network at most
+/// once per run. Push checks an existing chunk byte-for-byte and then every
+/// snapshot that references it; on a slow link (a phone, a mesh relay) those
+/// repeated downloads dominated a sync that had nothing to transfer.
+///
+/// A chunk enters the set only after the peer's copy matched its SHA-256
+/// address and our own intact copy; later reads of it are served from local
+/// storage, which is then byte-identical. Manifests are always re-read.
+struct VerifiedReads<'a> {
+    storage: &'a dyn ObjectStorage,
+    peer: &'a dyn PeerApi,
+    verified: std::collections::HashSet<String>,
+}
+
+impl<'a> VerifiedReads<'a> {
+    fn new(storage: &'a dyn ObjectStorage, peer: &'a dyn PeerApi) -> Self {
+        Self {
+            storage,
+            peer,
+            verified: std::collections::HashSet::new(),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Result<Vec<u8>> {
+        let chunk = key.contains("/chunks/sha256/");
+        if chunk && self.verified.contains(key) {
+            if let Ok(bytes) = self.storage.get(&ObjectKey::parse(key)?) {
+                return Ok(bytes);
+            }
+        }
+        let bytes = self.peer.get(key)?;
+        if chunk
+            && admissible(key, &bytes).is_ok()
+            && self
+                .storage
+                .get(&ObjectKey::parse(key)?)
+                .is_ok_and(|local| local == bytes)
+        {
+            self.verified.insert(key.to_owned());
+        }
+        Ok(bytes)
+    }
+}
+
 fn local_listing(storage: &dyn ObjectStorage, prefix: &str) -> Result<BTreeMap<String, u64>> {
     Ok(storage
         .list_prefix(prefix, 0)?
@@ -531,6 +575,7 @@ pub fn push(
     journal: &mut Journal,
 ) -> Result<SyncReport> {
     peer.status()?;
+    let mut reads = VerifiedReads::new(storage, peer);
     let mut report = SyncReport {
         direction: "push".into(),
         prefixes: prefixes.to_vec(),
@@ -561,7 +606,7 @@ pub fn push(
                             continue;
                         }
                         if !layer::check_snapshot_with_read(name, key, &source, |k| {
-                            peer.get(k.as_str())
+                            reads.get(k.as_str())
                         })
                         .ok
                         {
@@ -571,7 +616,7 @@ pub fn push(
                             continue;
                         }
                     }
-                    if peer.get(key)? == source {
+                    if reads.get(key)? == source {
                         report.already_present += 1;
                     } else {
                         report
@@ -606,7 +651,8 @@ pub fn push(
                         .push(format!("{key}: local snapshot not recoverable"));
                     continue;
                 }
-                if !layer::check_snapshot_with_read(name, &key, &bytes, |k| peer.get(k.as_str())).ok
+                if !layer::check_snapshot_with_read(name, &key, &bytes, |k| reads.get(k.as_str()))
+                    .ok
                 {
                     report
                         .rejected
