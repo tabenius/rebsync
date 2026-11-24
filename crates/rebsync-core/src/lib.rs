@@ -6,6 +6,8 @@ pub mod artifacts;
 pub mod binaries;
 pub mod config;
 pub mod credentials;
+#[cfg(feature = "peer-http")]
+pub mod dash_pairing;
 #[cfg(feature = "storage-object-store")]
 pub mod drive;
 pub mod frog;

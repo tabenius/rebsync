@@ -28,6 +28,47 @@ plain HTTP is allowed only on loopback for tests. Redirects are never followed.
 Server error bodies are suppressed. Transfers and MCP responses have size/time
 bounds. Artifact data is returned with `trusted: false` and is never executed.
 
+## Pairing this device (passkey-approved)
+
+Instead of copying a token into a file, a device can ask Dash for its own
+credential and have a person approve it with a passkey in Dash:
+
+```sh
+export RBQ_CREDENTIAL_STORE="$HOME/.config/rbq/credentials"   # chosen explicitly; no default
+rbq dash pair --label laptop                # prints the matching code and approval URL, then waits
+rbq dash credentials                        # metadata only: key id, endpoint, scopes, expiry
+rbq repository --credential KEY_ID describe
+rbq repository --credential KEY_ID push --store "$HOME/.rbq/objects" --source-id laptop --source-name Laptop
+```
+
+- **Approval.** Open the printed URL in Dash, check that Dash shows the same
+  matching code as the device, and approve with your passkey. An email session
+  alone cannot approve. The device computes the code itself and refuses a Dash
+  whose code or approval URL disagrees.
+- **What is requested.** `--scope describe|list|read|append` (repeatable;
+  default all four) and `--days 1..90` (default 30). Dash cannot widen them.
+  Each `rbq repository` command needs one: `describe`; `list` for `list` and
+  `sources`; `read` for `read` and `pull`; `append` for `append` and `push`.
+  The stored grant is checked before the token is read, and Dash checks again.
+- **Waiting.** `rbq dash pair` waits up to `--timeout` seconds (default 600; the
+  request lasts 10 minutes). `--no-wait` only starts it; finish with
+  `rbq dash wait PAIRING_ID`. `rbq dash pending` lists unfinished pairings.
+- **Lost responses.** A credential is issued once. If the claim's response is
+  lost, or the credential cannot be stored, `rbq` cancels the pairing, which
+  revokes the credential at Dash; pair again. If even that fails, run
+  `rbq dash cancel PAIRING_ID` later.
+- **Storage.** `$RBQ_CREDENTIAL_STORE` is a `0700` directory of `0600` files,
+  one per credential, created atomically and never overwritten; symlinks and
+  files open to others are refused. **This is not encryption at rest**: anyone
+  who can read the directory as you can use the credentials. Pending pairings
+  (with their claim nonces) are kept in `pending/` the same way.
+- **Stopping.** `rbq dash disable KEY_ID` stops this device from using it;
+  revoke it in Dash too, which works everywhere at once.
+- Output is JSON on stdout. No command prints a token or nonce.
+
+The credential's endpoint is `/api/rbq/KEY_ID`; it reaches only your account
+repository, never MCP or artifacts.
+
 ## Immutable object operations
 
 ```sh

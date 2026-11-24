@@ -7,6 +7,7 @@ use std::{
 };
 mod artifacts_cli;
 mod completions;
+mod dash_cli;
 mod repository_cli;
 mod ui;
 
@@ -110,6 +111,8 @@ enum Action {
     Artifacts(artifacts_cli::ArtifactArgs),
     /// Access your private Dash-hosted RBQ repository (JSON output, no local sync).
     Repository(repository_cli::RepositoryArgs),
+    /// Pair this device with Dash (passkey-approved) and manage its credentials.
+    Dash(dash_cli::DashArgs),
     /// Generate a shell completion script on stdout, or install it for bash/fish.
     Completions {
         /// Shell whose script should be printed (bash, fish, zsh, elvish, powershell).
@@ -2393,6 +2396,7 @@ fn entry() -> Result<i32> {
                         | Action::Gift { .. }
                         | Action::InstallCompletions(_)
                         | Action::Repository(_)
+                        | Action::Dash(_)
                         | Action::Artifacts(_)
                 )
             ),
@@ -2434,6 +2438,9 @@ fn entry() -> Result<i32> {
     }
     if let Some(Action::Artifacts(args)) = &cli.command {
         return artifacts_cli::run(args);
+    }
+    if let Some(Action::Dash(args)) = &cli.command {
+        return dash_cli::run(args);
     }
     let config = load_config(ConfigOverrides {
         rbq_home: cli.home,
@@ -2484,6 +2491,7 @@ fn entry() -> Result<i32> {
             unreachable!("repository actions return before config loading")
         }
         Some(Action::Artifacts(_)) => unreachable!("artifact actions return before config loading"),
+        Some(Action::Dash(_)) => unreachable!("dash actions return before config loading"),
         Some(Action::Config { .. }) => {
             let mut value = serde_json::to_value(&config)?;
             // Repository URLs can contain inline credentials; don't expose them in explain output.

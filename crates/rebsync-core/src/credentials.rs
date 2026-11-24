@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod files;
+
 /// Trusted native adapters may expose bytes only for an authorized operation.
 /// Intentionally neither Clone nor Serialize; Debug never reveals contents.
 /// This type does not promise locked memory or zeroization.
