@@ -824,34 +824,47 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
 
 ### Local transports (`rbq-peer/1`)
 
-For same-host or relayed links, `rbq peer` can also speak a frame protocol
-over TCP, Unix stream sockets and Unix datagram sockets. The sync rules, layer
-filtering and verification are identical; only the wire changes.
+`rbq peer` can also speak a frame protocol over QUIC, TCP, Unix stream
+sockets and Unix datagram sockets. The sync rules, layer filtering and
+verification are identical; only the wire changes.
 
 ```bash
-# Serve this object store to another local process.
+# Serve this object store over the network, encrypted. The output includes
+# quic_peer_id: the hash of this server's key, which clients must pin.
+rbq peer serve --listen quic://0.0.0.0:8788 --token-file ~/.rbq/token
+
+# Or to another local process.
 rbq peer serve --listen unix:///run/user/1000/rbq.sock --token-file ~/.rbq/token
 rbq peer serve --listen tcp://127.0.0.1:8787 --token-file ~/.rbq/token
 
-# Point status/push/pull at a local transport.
-export RBQ_PEER='rbq+tcp://127.0.0.1:8787?token=…'
+# Point status/push/pull at a transport.
+export RBQ_PEER='rbq+quic://192.168.1.42:8788?peer=<quic_peer_id>&token=…'
 rbq peer status
 
-# Exercise TCP, Unix stream and Unix datagram loopback end to end.
+# Exercise QUIC, TCP, Unix stream and Unix datagram loopback end to end.
 rbq peer selftest
 ```
 
 - **Authentication is one shared token.** It is compared in constant time and
   must be 1–256 ASCII letters or digits. `--token-file` refuses a group- or
   world-readable file; Unix sockets are created owner-only.
-- **Encryption is the transport's job.** TCP is not encrypted. `serve` warns
-  when a listen address is reachable beyond this host. Put a tunnel or a
-  loopback-only bridge in front of a public path; rbq does not speak TLS.
+- **Use QUIC beyond this host.** QUIC runs TLS 1.3 to a server whose key the
+  client pins (`peer=`, the SHA-256 of the server's public key): a server
+  with any other key is refused, and the token never crosses the network in
+  clear. There is no CA and no hostname check; the pin is the trust decision,
+  so copy it from `rbq peer serve` over a channel you trust. The server keeps
+  its key owner-only under rbq's state directory (`quic-identity/`, or
+  `--quic-identity DIR`); deleting it creates a new identity and every client
+  must re-pin. QUIC also retransmits and controls congestion, which a lossy
+  relay or mesh link needs.
+- **TCP is not encrypted.** `serve` warns when a TCP listen address is
+  reachable beyond this host (including `0.0.0.0`); prefer `quic://`.
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.
-- **No mesh integration.** A relay must expose one of these sockets; rbq
-  does not talk to OSHI or other mesh APIs directly.
+- **No mesh integration.** A relay must carry one of these transports (QUIC
+  over any IP path, including mesh overlays, or a local socket); rbq does not
+  talk to OSHI or other mesh APIs directly.
 
 ## Android compile check
 

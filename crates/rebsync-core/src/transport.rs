@@ -46,6 +46,9 @@ use std::{
 };
 
 pub const PROTOCOL: &str = "rbq-peer/1";
+
+#[cfg(feature = "peer-quic")]
+pub mod quic;
 /// Metadata frames (a request/response envelope) are bounded independently
 /// from object bodies. A 10 000-key listing with long keys needs a few MiB.
 const MAX_CONTROL: usize = 8 * 1024 * 1024;
@@ -93,6 +96,15 @@ pub enum Target {
         host: String,
         port: u16,
     },
+    /// `quic://HOST:PORT`: TLS 1.3 over UDP. A client must pin the server's
+    /// key (`peer`, the hex SHA-256 of its public key, printed by
+    /// `rbq peer serve`); a listener leaves it empty.
+    #[cfg(feature = "peer-quic")]
+    Quic {
+        host: String,
+        port: u16,
+        peer: Option<String>,
+    },
     #[cfg(unix)]
     Unix {
         path: PathBuf,
@@ -112,23 +124,16 @@ impl Target {
             .with_context(|| format!("connection target must be SCHEME://..., got {raw:?}"))?;
         match scheme {
             "tcp" => {
-                let authority = rest.trim_end_matches('/');
-                ensure!(!authority.is_empty(), "tcp target needs HOST:PORT");
-                ensure!(
-                    !authority.contains('/') && !authority.contains('@'),
-                    "tcp target must be HOST:PORT"
-                );
-                let (host, port) = authority
-                    .rsplit_once(':')
-                    .context("tcp target must be HOST:PORT")?;
-                ensure!(!host.is_empty(), "tcp host is empty");
-                let port: u16 = port.parse().context("invalid tcp port")?;
-                Ok(Self::Tcp {
-                    host: host
-                        .trim_start_matches('[')
-                        .trim_end_matches(']')
-                        .to_owned(),
+                let (host, port) = host_port(scheme, rest)?;
+                Ok(Self::Tcp { host, port })
+            }
+            #[cfg(feature = "peer-quic")]
+            "quic" => {
+                let (host, port) = host_port(scheme, rest)?;
+                Ok(Self::Quic {
+                    host,
                     port,
+                    peer: None,
                 })
             }
             "unix" => unix_path(rest, false),
@@ -136,19 +141,22 @@ impl Target {
             "http" | "https" => {
                 bail!("{scheme} targets use rbq-peer/0; keep using them with the HTTP peer client")
             }
-            other => bail!("unsupported transport {other:?}; use tcp, unix or unix-dgram"),
+            other => bail!("unsupported transport {other:?}; use tcp, quic, unix or unix-dgram"),
         }
     }
 
     pub fn describe(&self) -> String {
-        match self {
-            Self::Tcp { host, port } => {
-                if host.contains(':') {
-                    format!("tcp://[{host}]:{port}")
-                } else {
-                    format!("tcp://{host}:{port}")
-                }
+        let authority = |host: &str, port: u16| {
+            if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
             }
+        };
+        match self {
+            Self::Tcp { host, port } => format!("tcp://{}", authority(host, *port)),
+            #[cfg(feature = "peer-quic")]
+            Self::Quic { host, port, .. } => format!("quic://{}", authority(host, *port)),
             #[cfg(unix)]
             Self::Unix { path } => format!("unix://{}", path.display()),
             #[cfg(unix)]
@@ -158,7 +166,7 @@ impl Target {
 
     /// TCP listeners on a non-loopback address expose plaintext traffic to the
     /// local network. Callers should warn instead of silently pretending this
-    /// is private.
+    /// is private. QUIC is encrypted, so it is never reported as exposed.
     /// Only a loopback address is private. The unspecified addresses
     /// (`0.0.0.0`, `::`) bind every interface and are the most exposed of all.
     pub fn is_public(&self) -> bool {
@@ -174,10 +182,35 @@ impl Target {
                     Err(_) => true,
                 }
             }
+            #[cfg(feature = "peer-quic")]
+            Self::Quic { .. } => false,
             #[cfg(unix)]
             _ => false,
         }
     }
+}
+
+/// `HOST:PORT` (IPv6 in brackets) for the network schemes.
+fn host_port(scheme: &str, rest: &str) -> Result<(String, u16)> {
+    let authority = rest.trim_end_matches('/');
+    ensure!(!authority.is_empty(), "{scheme} target needs HOST:PORT");
+    ensure!(
+        !authority.contains('/') && !authority.contains('@'),
+        "{scheme} target must be HOST:PORT"
+    );
+    let (host, port) = authority
+        .rsplit_once(':')
+        .with_context(|| format!("{scheme} target must be HOST:PORT"))?;
+    ensure!(!host.is_empty(), "{scheme} host is empty");
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("invalid {scheme} port"))?;
+    Ok((
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned(),
+        port,
+    ))
 }
 
 #[cfg(unix)]
@@ -211,7 +244,20 @@ pub fn parse_connection(connection: &str, token: Option<&str>) -> Result<(Target
         .or(from_query)
         .context("no token: pass --token-file or include ?token=...")?;
     validate_token(&token)?;
-    Ok((Target::parse(location)?, token))
+    #[allow(unused_mut)]
+    let mut target = Target::parse(location)?;
+    #[cfg(feature = "peer-quic")]
+    if let Target::Quic { peer, .. } = &mut target {
+        let pin = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("peer="))
+            .context(
+                "quic connections must pin the server: add &peer=<id printed by rbq peer serve>",
+            )?;
+        quic::validate_peer_id(pin)?;
+        *peer = Some(pin.to_ascii_lowercase());
+    }
+    Ok((target, token))
 }
 
 pub fn validate_token(token: &str) -> Result<()> {
@@ -557,6 +603,13 @@ pub fn connect(target: &Target, token: String) -> Result<Box<dyn Link>> {
     validate_token(&token)?;
     match target {
         Target::Tcp { host, port } => Ok(Box::new(StreamLink::tcp(host, *port, token)?)),
+        #[cfg(feature = "peer-quic")]
+        Target::Quic { host, port, peer } => {
+            let peer = peer
+                .as_deref()
+                .context("a quic connection needs the server's peer id (&peer=...)")?;
+            Ok(Box::new(quic::QuicLink::connect(host, *port, peer, token)?))
+        }
         #[cfg(unix)]
         Target::Unix { path } => Ok(Box::new(StreamLink::unix(path, token)?)),
         #[cfg(unix)]
@@ -1214,6 +1267,10 @@ impl Server {
     pub fn bind(target: &Target, service: Service, replace_stale: bool) -> Result<Self> {
         match target {
             Target::Tcp { host, port } => Self::bind_tcp(host, *port, service),
+            #[cfg(feature = "peer-quic")]
+            Target::Quic { .. } => {
+                bail!("a quic listener needs an identity; use Server::bind_quic")
+            }
             #[cfg(unix)]
             Target::Unix { path } => Self::bind_unix(path, service, replace_stale),
             #[cfg(unix)]
@@ -1355,10 +1412,17 @@ impl Server {
         })
     }
 
-    pub fn stop(mut self) {
+    pub fn stop(self) {
+        let _ = self.shutdown();
+    }
+
+    /// Stop, and report whether every serving thread ended cleanly (none
+    /// panicked). `stop` discards this; tests assert on it.
+    pub(crate) fn shutdown(mut self) -> bool {
         self.stop.store(true, Ordering::Relaxed);
+        let mut clean = true;
         for join in self.joins.drain(..) {
-            let _ = join.join();
+            clean &= join.join().is_ok();
         }
         for path in &self.cleanup {
             if let Ok(metadata) = fs::symlink_metadata(path)
@@ -1367,6 +1431,7 @@ impl Server {
                 let _ = fs::remove_file(path);
             }
         }
+        clean
     }
 }
 
@@ -1729,6 +1794,15 @@ pub fn selftest() -> Result<SelftestReport> {
             port: 0,
         },
     ));
+    #[cfg(feature = "peer-quic")]
+    checks.push(run_check(
+        "quic",
+        Target::Quic {
+            host: "127.0.0.1".into(),
+            port: 0,
+            peer: None,
+        },
+    ));
     #[cfg(unix)]
     {
         let base = tempfile::tempdir()?;
@@ -1747,7 +1821,7 @@ pub fn selftest() -> Result<SelftestReport> {
     }
     Ok(SelftestReport {
         ok: checks.iter().all(|check| check.ok),
-        note: "Loopback only: TCP on 127.0.0.1, Unix stream and Unix datagram under a temporary directory.",
+        note: "Loopback only: TCP and QUIC on 127.0.0.1, Unix stream and Unix datagram under a temporary directory.",
         transports: checks,
     })
 }
@@ -1798,7 +1872,13 @@ fn check_transport(target: &Target) -> Result<((usize, usize, usize), u64)> {
         token.clone(),
         Arc::new(AtomicBool::new(false)),
     );
-    let server = Server::bind(target, service, false)?;
+    let server = match target {
+        #[cfg(feature = "peer-quic")]
+        Target::Quic { host, port, .. } => {
+            Server::bind_quic(host, *port, service, &quic::Identity::generate()?)?
+        }
+        _ => Server::bind(target, service, false)?,
+    };
     let result = (|| -> Result<(usize, usize, usize, u64)> {
         let remote = TransportPeer::connect(&server.target, token)?;
         let pushed = peer::push(&source, &remote, &peer::default_prefixes(), &mut journal)?;

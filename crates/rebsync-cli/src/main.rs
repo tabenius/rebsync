@@ -529,7 +529,8 @@ enum GitAction {
 }
 #[derive(Args)]
 struct PeerTargetArgs {
-    /// Connection string from the app (rbq+http://HOST:PORT/v1?token=…);
+    /// Connection string: from the app (rbq+http://HOST:PORT/v1?token=…), or
+    /// rbq+quic://HOST:PORT?peer=ID&token=… / tcp:// / unix:// for `rbq peer serve`;
     /// defaults to $RBQ_PEER so the token stays out of shell history.
     connection: Option<String>,
     /// File holding the token, when the connection has none.
@@ -612,10 +613,15 @@ struct ResticServeArgs {
 }
 #[derive(Args)]
 struct ServeArgs {
-    /// Listen address; repeat for several. tcp://HOST:PORT, unix:///path or
-    /// unix-dgram:///path.
+    /// Listen address; repeat for several. quic://HOST:PORT (encrypted,
+    /// recommended beyond this host), tcp://HOST:PORT (plaintext),
+    /// unix:///path or unix-dgram:///path.
     #[arg(long = "listen", required = true)]
     listen: Vec<String>,
+    /// Directory holding the QUIC server identity (created on first use,
+    /// owner-only). Default: quic-identity/ under rbq's state directory.
+    #[arg(long)]
+    quic_identity: Option<PathBuf>,
     /// File holding the shared token; must not be group- or world-readable.
     #[arg(long)]
     token_file: PathBuf,
@@ -1576,30 +1582,54 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             let service =
                 transport::Service::new(Arc::new(storage), token, Arc::new(AtomicBool::new(false)));
             let mut servers = Vec::new();
+            let mut quic_peer = None;
             for listen in &args.listen {
                 let target = transport::Target::parse(listen)?;
                 if target.is_public() {
                     eprintln!(
-                        "rbq: warning: {} is reachable beyond this host and is not encrypted",
+                        "rbq: warning: {} is reachable beyond this host and is not encrypted; \
+                         prefer quic://",
                         target.describe()
                     );
                 }
-                servers.push(transport::Server::bind(
-                    &target,
-                    service.clone(),
-                    args.replace_stale,
-                )?);
+                let server = match &target {
+                    transport::Target::Quic { host, port, .. } => {
+                        let dir = match &args.quic_identity {
+                            Some(dir) => dir.clone(),
+                            None => transport::quic::default_identity_dir(config)?,
+                        };
+                        let identity = transport::quic::Identity::load_or_create(&dir)?;
+                        quic_peer = Some(identity.peer_id().to_owned());
+                        transport::Server::bind_quic(host, *port, service.clone(), &identity)?
+                    }
+                    _ => transport::Server::bind(&target, service.clone(), args.replace_stale)?,
+                };
+                servers.push(server);
             }
             let serving: Vec<String> = servers
                 .iter()
                 .map(|server| server.target.describe())
+                .collect();
+            let connect: Vec<String> = servers
+                .iter()
+                .filter_map(|server| match &server.target {
+                    transport::Target::Quic { port, peer, .. } => Some(format!(
+                        "rbq+quic://HOST:{port}?peer={}&token=…",
+                        peer.as_deref().unwrap_or_default()
+                    )),
+                    _ => None,
+                })
                 .collect();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "protocol": transport::PROTOCOL,
                     "serving": serving,
-                    "note": "Additive only: create-if-absent, no overwrite and no delete.",
+                    "quic_peer_id": quic_peer,
+                    "connect": connect,
+                    "note": "Additive only: create-if-absent, no overwrite and no delete. \
+                             A QUIC client must pin quic_peer_id (peer=...); HOST is this \
+                             machine's address as the client reaches it.",
                 }))?
             );
             loop {
