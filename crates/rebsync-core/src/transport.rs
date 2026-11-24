@@ -354,7 +354,23 @@ pub struct Service {
     storage: Arc<dyn ObjectStorage>,
     token: Arc<String>,
     writes_paused: Arc<AtomicBool>,
+    listing: Arc<Mutex<Option<CachedListing>>>,
 }
+
+/// The full listing behind a paginated `list`. Without it every page re-read
+/// the whole prefix: quadratic in the inventory, and with 32-entry datagram
+/// pages a 10 000-object layer meant ~300 full storage walks. Objects are
+/// immutable and only ever added, so cutting later pages from the listing
+/// taken for the first page is a consistent snapshot; anything added
+/// meanwhile is picked up by the next sync.
+struct CachedListing {
+    prefix: String,
+    items: Arc<Vec<Item>>,
+    at: Instant,
+}
+
+/// How long a cached listing serves follow-up pages.
+const LISTING_TTL: Duration = Duration::from_secs(30);
 
 impl Service {
     pub fn new(
@@ -366,7 +382,40 @@ impl Service {
             storage,
             token: Arc::new(token),
             writes_paused,
+            listing: Arc::default(),
         }
+    }
+
+    /// Every item under `prefix`, sorted by key. A first page (`after` empty)
+    /// always reads storage; follow-up pages reuse a fresh enough listing.
+    fn listing(&self, prefix: &str, first_page: bool) -> Result<Arc<Vec<Item>>, StorageError> {
+        if !first_page
+            && let Ok(cache) = self.listing.lock()
+            && let Some(cached) = cache.as_ref()
+            && cached.prefix == prefix
+            && cached.at.elapsed() < LISTING_TTL
+        {
+            return Ok(cached.items.clone());
+        }
+        let mut items: Vec<Item> = self
+            .storage
+            .list_prefix(prefix, 0)?
+            .into_iter()
+            .map(|item| Item {
+                key: item.key,
+                size: item.size,
+            })
+            .collect();
+        items.sort_by(|a, b| a.key.cmp(&b.key));
+        let items = Arc::new(items);
+        if let Ok(mut cache) = self.listing.lock() {
+            *cache = Some(CachedListing {
+                prefix: prefix.to_owned(),
+                items: items.clone(),
+                at: Instant::now(),
+            });
+        }
+        Ok(items)
     }
 
     pub fn authorize(&self, presented: &str) -> bool {
@@ -403,18 +452,14 @@ impl Service {
                     return (error_response(400, error.to_string()), None);
                 }
                 let limit = (*limit).clamp(1, MAX_LIST);
-                match self.storage.list_prefix(prefix, 0) {
+                match self.listing(prefix, after.is_empty()) {
                     Ok(items) => {
-                        let mut page: Vec<Item> = items
-                            .into_iter()
-                            .filter(|item| item.key.as_str() > after.as_str())
-                            .map(|item| Item {
-                                key: item.key,
-                                size: item.size,
-                            })
-                            .collect();
-                        let truncated = page.len() > limit;
-                        page.truncate(limit);
+                        // Sorted, so the page starts after a binary search.
+                        let start =
+                            items.partition_point(|item| item.key.as_str() <= after.as_str());
+                        let rest = &items[start..];
+                        let truncated = rest.len() > limit;
+                        let page: Vec<Item> = rest[..rest.len().min(limit)].to_vec();
                         let next = if truncated {
                             page.last().map(|item| item.key.clone())
                         } else {
@@ -2119,6 +2164,104 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the serving thread must not block forever on a client that never reads");
         drop(hog);
+    }
+
+    /// Counts listings, delegating everything to a real store.
+    struct CountingStore(crate::FsObjectStorage, AtomicUsize);
+
+    impl ObjectStorage for CountingStore {
+        fn capabilities(&self) -> crate::storage::StorageCapabilities {
+            self.0.capabilities()
+        }
+        fn put(&self, k: &ObjectKey, d: &[u8]) -> Result<crate::storage::ObjectMeta, StorageError> {
+            self.0.put(k, d)
+        }
+        fn put_if_absent(&self, k: &ObjectKey, d: &[u8]) -> Result<PutOutcome, StorageError> {
+            self.0.put_if_absent(k, d)
+        }
+        fn get(&self, k: &ObjectKey) -> Result<Vec<u8>, StorageError> {
+            self.0.get(k)
+        }
+        fn get_range(
+            &self,
+            k: &ObjectKey,
+            r: std::ops::Range<u64>,
+        ) -> Result<Vec<u8>, StorageError> {
+            self.0.get_range(k, r)
+        }
+        fn head(&self, k: &ObjectKey) -> Result<crate::storage::ObjectMeta, StorageError> {
+            self.0.head(k)
+        }
+        fn list_prefix(
+            &self,
+            p: &str,
+            n: usize,
+        ) -> Result<Vec<crate::storage::ObjectMeta>, StorageError> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.list_prefix(p, n)
+        }
+        fn delete(&self, k: &ObjectKey) -> Result<(), StorageError> {
+            self.0.delete(k)
+        }
+    }
+
+    #[test]
+    fn pagination_lists_storage_once_per_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingStore(
+            crate::FsObjectStorage::open(root.path().join("store")).unwrap(),
+            AtomicUsize::new(0),
+        ));
+        for n in 0..100_u8 {
+            store
+                .put(&ObjectKey::parse(&chunk_key(n)).unwrap(), b"x")
+                .unwrap();
+        }
+        let service = Service::new(store.clone(), token(), Arc::new(AtomicBool::new(false)));
+        let mut after = String::new();
+        let mut seen = Vec::new();
+        loop {
+            let (response, _) = service.handle(
+                &Request::List {
+                    prefix: "mneme/".into(),
+                    after: after.clone(),
+                    limit: 7,
+                },
+                None,
+            );
+            let Response::Listing {
+                items,
+                truncated,
+                next,
+            } = response
+            else {
+                panic!("expected a listing");
+            };
+            assert!(items.len() <= 7);
+            seen.extend(items.into_iter().map(|item| item.key));
+            if !truncated {
+                break;
+            }
+            after = next.unwrap();
+        }
+        let mut expected: Vec<String> = (0..100_u8).map(chunk_key).collect();
+        expected.sort();
+        assert_eq!(seen, expected, "every key once, in order");
+        assert_eq!(
+            store.1.load(Ordering::SeqCst),
+            1,
+            "15 pages, one storage walk"
+        );
+        // A new listing (first page) always reads storage again.
+        service.handle(
+            &Request::List {
+                prefix: "mneme/".into(),
+                after: String::new(),
+                limit: 7,
+            },
+            None,
+        );
+        assert_eq!(store.1.load(Ordering::SeqCst), 2);
     }
 
     #[test]
