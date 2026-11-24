@@ -541,10 +541,11 @@ impl<'a> VerifiedReads<'a> {
 
     fn get(&mut self, key: &str) -> Result<Vec<u8>> {
         let chunk = key.contains("/chunks/sha256/");
-        if chunk && self.verified.contains(key) {
-            if let Ok(bytes) = self.storage.get(&ObjectKey::parse(key)?) {
-                return Ok(bytes);
-            }
+        if chunk
+            && self.verified.contains(key)
+            && let Ok(bytes) = self.storage.get(&ObjectKey::parse(key)?)
+        {
+            return Ok(bytes);
         }
         let bytes = self.peer.get(key)?;
         if chunk
