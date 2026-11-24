@@ -596,6 +596,11 @@ async fn serve(endpoint: quinn::Endpoint, service: Service, stop: Arc<AtomicBool
         tokio::select! {
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                let peer = incoming.remote_address().ip().to_string();
+                if !service.admit(&peer) {
+                    incoming.refuse();
+                    continue;
+                }
                 if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                     active.fetch_sub(1, Ordering::SeqCst);
                     incoming.refuse();
@@ -604,7 +609,7 @@ async fn serve(endpoint: quinn::Endpoint, service: Service, stop: Arc<AtomicBool
                 let (service, active) = (service.clone(), active.clone());
                 tokio::spawn(async move {
                     if let Ok(Ok(conn)) = tokio::time::timeout(AUTH_DEADLINE, incoming).await {
-                        serve_connection(conn, service).await;
+                        serve_connection(conn, service, Arc::from(peer.as_str())).await;
                     }
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
@@ -622,7 +627,7 @@ async fn serve(endpoint: quinn::Endpoint, service: Service, stop: Arc<AtomicBool
 
 /// Serve one connection's requests. A connection must authenticate within
 /// [`AUTH_DEADLINE`] of the handshake, and one bad token ends it.
-async fn serve_connection(conn: quinn::Connection, service: Service) {
+async fn serve_connection(conn: quinn::Connection, service: Service, peer: Arc<str>) {
     let authenticated = Arc::new(AtomicBool::new(false));
     {
         let (conn, authenticated) = (conn.clone(), authenticated.clone());
@@ -634,9 +639,14 @@ async fn serve_connection(conn: quinn::Connection, service: Service) {
         });
     }
     while let Ok((send, recv)) = conn.accept_bi().await {
-        let (conn, service, authenticated) = (conn.clone(), service.clone(), authenticated.clone());
+        let (conn, service, authenticated, peer) = (
+            conn.clone(),
+            service.clone(),
+            authenticated.clone(),
+            peer.clone(),
+        );
         tokio::spawn(async move {
-            match serve_stream(send, recv, service, &authenticated).await {
+            match serve_stream(send, recv, service, &authenticated, &peer).await {
                 Ok(true) => {}
                 Ok(false) => conn.close(quinn::VarInt::from_u32(2), b"invalid token"),
                 Err(_) => {}
@@ -652,6 +662,7 @@ async fn serve_stream(
     mut recv: quinn::RecvStream,
     service: Service,
     authenticated: &AtomicBool,
+    peer: &str,
 ) -> Result<bool> {
     let deadline = if authenticated.load(Ordering::SeqCst) {
         IO_TIMEOUT
@@ -686,7 +697,18 @@ async fn serve_stream(
         return Ok(true);
     }
     if !service.authorize(&envelope.token) {
-        let _ = respond(&mut send, error_response(401, "invalid token"), None).await;
+        let sent = respond(&mut send, error_response(401, "invalid token"), None)
+            .await
+            .unwrap_or(0);
+        service.observe(
+            peer,
+            "quic",
+            Some(&envelope.request),
+            false,
+            true,
+            frame.len() as u64,
+            sent,
+        );
         return Ok(false);
     }
     authenticated.store(true, Ordering::SeqCst);
@@ -716,33 +738,41 @@ async fn serve_stream(
         }
         _ => None,
     };
+    let received = (frame.len() + body.as_ref().map_or(0, Vec::len)) as u64;
     let request = envelope.request;
     // Storage is blocking I/O; keep it off the runtime's workers.
-    let (response, out) =
-        tokio::task::spawn_blocking(move || service.handle(&request, body.as_deref())).await?;
-    respond(&mut send, response, out).await?;
+    let (request, response, out, service) = tokio::task::spawn_blocking(move || {
+        let (response, out) = service.handle(&request, body.as_deref());
+        (request, response, out, service)
+    })
+    .await?;
+    let sent = respond(&mut send, response, out).await?;
+    service.observe(peer, "quic", Some(&request), true, false, received, sent);
     Ok(true)
 }
 
+/// Send a response; returns the bytes written, frame headers included.
 async fn respond(
     send: &mut quinn::SendStream,
     response: Response,
     body: Option<Vec<u8>>,
-) -> Result<()> {
+) -> Result<u64> {
     let envelope = serde_json::to_vec(&ResponseEnvelope {
         schema: PROTOCOL.into(),
         response,
     })?;
     tokio::time::timeout(IO_TIMEOUT, async {
         write_frame(send, &envelope, MAX_CONTROL).await?;
+        let mut sent = 4 + envelope.len() as u64;
         if let Some(body) = body {
             write_frame(send, &body, MAX_OBJECT as usize).await?;
+            sent += 4 + body.len() as u64;
         }
         send.finish()?;
         // Wait until the peer has the whole reply (or gave up), so dropping
         // the stream cannot cut it short.
         let _ = send.stopped().await;
-        Ok::<(), anyhow::Error>(())
+        Ok::<u64, anyhow::Error>(sent)
     })
     .await
     .context("peer did not read the reply in time")?
@@ -883,6 +913,83 @@ mod tests {
         );
         assert!(check.ok, "{:?}", check.error);
         assert!(check.verified > 0);
+    }
+
+    /// peer, transport, request, authorized, rejected, bytes in, bytes out
+    type Seen = (String, &'static str, String, bool, bool, u64, u64);
+
+    /// Records what the server reports and turns away listed peers.
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<Seen>>,
+        banned: Mutex<Vec<String>>,
+    }
+
+    impl super::super::Observer for Recorder {
+        fn request(&self, r: &super::super::RequestRecord<'_>) {
+            self.seen.lock().unwrap().push((
+                r.peer.to_owned(),
+                r.transport,
+                r.request.clone(),
+                r.authorized,
+                r.rejected,
+                r.bytes_in,
+                r.bytes_out,
+            ));
+        }
+
+        fn admit(&self, peer: &str) -> bool {
+            !self
+                .banned
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|banned| banned == peer)
+        }
+    }
+
+    #[test]
+    fn requests_are_reported_and_turned_away_peers_cannot_connect() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)))
+            .with_observer(recorder.clone());
+        let identity = Identity::generate().unwrap();
+        let server = Server::bind_quic("127.0.0.1", 0, service, &identity).unwrap();
+        let port = port(&server);
+
+        let mut link = QuicLink::connect("127.0.0.1", port, identity.peer_id(), token()).unwrap();
+        let digest = crate::wire::sha256_hex(b"hello");
+        let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+        link.put(&key, b"hello").unwrap();
+        link.get(&key).unwrap();
+        drop(link);
+        let mut bad =
+            QuicLink::connect("127.0.0.1", port, identity.peer_id(), "wrong".into()).unwrap();
+        assert!(bad.status().is_err());
+        drop(bad);
+
+        let seen = recorder.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        let (peer, transport, request, authorized, rejected, bytes_in, _) = &seen[0];
+        assert_eq!((peer.as_str(), *transport), ("127.0.0.1", "quic"));
+        assert!(request.starts_with("put mneme/") && *authorized && !rejected);
+        assert!(*bytes_in > 5, "the body is counted");
+        assert!(seen[1].2.starts_with("get ") && seen[1].6 > 5, "{seen:?}");
+        assert!(
+            seen[2].4 && !seen[2].3,
+            "a wrong token is recorded as rejected"
+        );
+        assert!(
+            seen.iter().all(|r| !r.2.contains("quicToken42")),
+            "never the token"
+        );
+
+        // A peer the observer turns away cannot even complete a handshake.
+        recorder.banned.lock().unwrap().push("127.0.0.1".into());
+        assert!(QuicLink::connect("127.0.0.1", port, identity.peer_id(), token()).is_err());
+        assert!(server.shutdown(), "the QUIC server thread must not panic");
     }
 
     #[test]

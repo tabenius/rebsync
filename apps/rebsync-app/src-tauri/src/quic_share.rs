@@ -12,7 +12,7 @@
 //! current root and answers "unavailable" (503) while a move holds it, like
 //! the HTTP endpoint does.
 
-use crate::peer::SharedStorage;
+use crate::peer::{Clients, SharedStorage};
 use rebsync_core::{
     ObjectKey, ObjectStorage, PutOutcome, StorageError,
     storage::{ObjectMeta, StorageCapabilities},
@@ -98,14 +98,17 @@ impl QuicShare {
         storage: SharedStorage,
         writes_paused: Arc<AtomicBool>,
         identity_dir: &Path,
+        clients: Arc<Clients>,
     ) -> Result<Self, String> {
         transport::validate_token(&token).map_err(|e| e.to_string())?;
         let identity = Identity::load_or_create(identity_dir).map_err(|e| format!("{e:#}"))?;
+        // QUIC clients appear in the same Connected clients list as HTTP ones.
         let service = transport::Service::new(
             Arc::new(FollowStorage(storage)),
             token,
             writes_paused,
-        );
+        )
+        .with_observer(clients);
         let server = transport::Server::bind_quic("0.0.0.0", port, service.clone(), &identity)
             .or_else(|_| transport::Server::bind_quic("0.0.0.0", 0, service, &identity))
             .map_err(|e| format!("{e:#}"))?;

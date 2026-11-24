@@ -50,6 +50,9 @@ pub struct Client {
     pub last_request: String,
     pub authorized: bool,
     pub active: bool,
+    /// How this client has reached the phone: `http` (plaintext) and/or
+    /// `quic` (encrypted).
+    pub transports: Vec<String>,
     #[serde(skip)]
     recent_failures: Vec<u64>,
 }
@@ -88,6 +91,7 @@ impl Clients {
     #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
+        transport: &str,
         address: &str,
         user_agent: Option<String>,
         line: String,
@@ -115,6 +119,10 @@ impl Clients {
             });
             client.last_seen_ms = now;
             client.requests += 1;
+            if !client.transports.iter().any(|t| t == transport) {
+                client.transports.push(transport.to_owned());
+                client.transports.sort();
+            }
             client.bytes_in += bytes_in;
             client.bytes_out += bytes_out;
             client.last_request = line;
@@ -129,6 +137,27 @@ impl Clients {
                 client.authorized = true;
             }
         }
+    }
+}
+
+/// The QUIC share reports its requests here too, so one list shows every
+/// client however it connected, and the same failure throttle applies.
+impl rebsync_core::transport::Observer for Clients {
+    fn request(&self, record: &rebsync_core::transport::RequestRecord<'_>) {
+        self.record(
+            record.transport,
+            record.peer,
+            None,
+            format!("{} {}", record.transport.to_ascii_uppercase(), record.request),
+            record.authorized,
+            record.rejected,
+            record.bytes_in,
+            record.bytes_out,
+        );
+    }
+
+    fn admit(&self, peer: &str) -> bool {
+        !self.throttled(peer)
     }
 }
 
@@ -301,6 +330,7 @@ fn handle(
         let received = request.body_length().unwrap_or(0) as u64;
         let _ = request.respond(response);
         clients.record(
+            "http",
             &address,
             agent.clone(),
             line.clone(),
@@ -422,7 +452,7 @@ fn handle(
                         .expect("numeric header");
                         let response = Response::empty(200).with_header(len);
                         let _ = request.respond(response);
-                        clients.record(&address, agent, line, true, false, 0, 0);
+                        clients.record("http", &address, agent, line, true, false, 0, 0);
                     }
                     Err(e) => respond(request, status_of(&e), Vec::new(), false, true),
                 },

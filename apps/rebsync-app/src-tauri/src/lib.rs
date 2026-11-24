@@ -263,6 +263,7 @@ fn start_peer(app: &App, settings: &Settings) -> Result<u16, String> {
         app.storage.clone(),
         app.writes_paused.clone(),
         &app.internal.join("quic-identity"),
+        app.clients.clone(),
     );
     if let (Ok(mut quic_slot), Ok(mut error)) = (app.quic.lock(), app.quic_error.lock()) {
         match quic {

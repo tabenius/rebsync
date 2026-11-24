@@ -225,6 +225,9 @@ function renderOverview(o) {
     <li class="client">
       <div class="row spread"><span class="row"><i class="dot ${c.active ? "on" : ""}"></i><b class="mono">${esc(c.address)}</b>
         ${c.authorized ? '<span class="tag ok">paired</span>' : '<span class="tag warn">not paired</span>'}
+        ${(c.transports || []).map((t) => t === "quic"
+          ? '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">QUIC</span>'
+          : '<span class="tag warn" title="Plaintext on the network">HTTP</span>').join("")}
         ${c.rejected ? `<span class="tag bad">${c.rejected} rejected</span>` : ""}</span>
         <span class="muted small">${ago(c.last_seen_ms)}</span></div>
       <div class="muted small">${c.requests} requests · ↓${bytes(c.bytes_in)} ↑${bytes(c.bytes_out)} · <span class="mono">${esc(c.last_request)}</span></div>

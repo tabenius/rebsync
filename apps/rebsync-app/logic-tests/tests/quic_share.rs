@@ -1,5 +1,8 @@
 //! End to end: the real `rbq peer` QUIC client against the app's QUIC share.
-use rebeqah_logic_tests::{peer::SharedStorage, quic_share};
+use rebeqah_logic_tests::{
+    peer::{Clients, SharedStorage},
+    quic_share,
+};
 use rebsync_core::{
     FsObjectStorage, ObjectStorage,
     journal::Journal,
@@ -42,12 +45,14 @@ fn push_to_the_phone_and_pull_elsewhere_over_quic() {
     let phone: Arc<dyn ObjectStorage> =
         Arc::new(FsObjectStorage::open(t.path().join("phone")).unwrap());
     let shared: SharedStorage = Arc::new(RwLock::new(phone));
+    let clients = Arc::new(Clients::default());
     let share = quic_share::QuicShare::start(
         0,
         TOKEN.into(),
         shared.clone(),
         Arc::new(AtomicBool::new(false)),
         &t.path().join("identity"),
+        clients.clone(),
     )
     .unwrap();
     let mut journal = Journal::open(t.path()).unwrap();
@@ -64,6 +69,17 @@ fn push_to_the_phone_and_pull_elsewhere_over_quic() {
     let out = t.path().join("restored");
     layer::assemble(&laptop, &manifest, &out).unwrap();
     assert_eq!(std::fs::read(out.join("AGENTS.db")).unwrap(), big);
+
+    // The QUIC peer is listed under Connected clients, like an HTTP one.
+    let listed = clients.snapshot();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let client = &listed[0];
+    assert_eq!(client.address, "127.0.0.1");
+    assert_eq!(client.transports, vec!["quic".to_string()]);
+    assert!(client.authorized && client.active && client.rejected == 0);
+    assert!(client.requests > 10 && client.bytes_in > 60_000 && client.bytes_out > 60_000);
+    assert!(client.last_request.starts_with("QUIC "), "{}", client.last_request);
+    assert!(!client.last_request.contains(TOKEN));
 
     // During a volume move the store is write-locked: requests are refused
     // as busy, not blocked.
@@ -87,6 +103,7 @@ fn the_phone_keeps_its_identity_and_refuses_a_wrong_pin() {
     let store: Arc<dyn ObjectStorage> =
         Arc::new(FsObjectStorage::open(t.path().join("phone")).unwrap());
     let shared: SharedStorage = Arc::new(RwLock::new(store));
+    let clients = Arc::new(Clients::default());
     let start = || {
         quic_share::QuicShare::start(
             0,
@@ -94,6 +111,7 @@ fn the_phone_keeps_its_identity_and_refuses_a_wrong_pin() {
             shared.clone(),
             Arc::new(AtomicBool::new(false)),
             &t.path().join("identity"),
+            clients.clone(),
         )
         .unwrap()
     };
@@ -109,5 +127,18 @@ fn the_phone_keeps_its_identity_and_refuses_a_wrong_pin() {
     let (target, token) = transport::parse_connection(&pairing, None).unwrap();
     let error = TransportPeer::connect(&target, token).err().expect("wrong pin");
     assert!(format!("{error:#}").contains("not the pinned"), "{error:#}");
+
+    // Ten wrong tokens in a minute throttle the address, over QUIC as over
+    // HTTP: the eleventh connection is refused before any request.
+    let guess = quic_share::pairing("127.0.0.1", second.port, &id, "guess0");
+    for _ in 0..10 {
+        let (target, token) = transport::parse_connection(&guess, None).unwrap();
+        let peer = TransportPeer::connect(&target, token).unwrap();
+        assert!(peer.status().is_err());
+    }
+    let rejected = clients.snapshot();
+    assert_eq!(rejected[0].rejected, 10, "{rejected:?}");
+    let (target, token) = transport::parse_connection(&guess, None).unwrap();
+    assert!(TransportPeer::connect(&target, token).is_err(), "throttled");
     second.stop();
 }

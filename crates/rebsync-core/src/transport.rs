@@ -315,6 +315,17 @@ fn default_limit() -> usize {
     PAGE
 }
 
+/// A short, token-free description of a request for client lists.
+fn describe_request(request: &Request) -> String {
+    let short = |text: &str| text.chars().take(120).collect::<String>();
+    match request {
+        Request::Status => "status".into(),
+        Request::List { prefix, .. } => format!("list {}", short(prefix)),
+        Request::Get { key } => format!("get {}", short(key)),
+        Request::Put { key, size } => format!("put {} ({size} bytes)", short(key)),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Item {
     pub key: String,
@@ -396,6 +407,36 @@ fn storage_response(error: &StorageError) -> Response {
     error_response(code, error.to_string())
 }
 
+/// One request a server answered, as reported to an [`Observer`].
+#[derive(Clone, Debug)]
+pub struct RequestRecord<'a> {
+    /// The peer's address without a port (an IP, or the transport name for
+    /// local sockets), so one machine is one client across connections.
+    pub peer: &'a str,
+    /// `quic`, `tcp` or `unix`.
+    pub transport: &'static str,
+    /// What was asked, e.g. `get mneme/v1/chunks/...`. Never the token.
+    pub request: String,
+    /// The request carried the right token.
+    pub authorized: bool,
+    /// The request was refused for a wrong token.
+    pub rejected: bool,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// Watches a [`Service`]'s traffic, e.g. to list connected clients, and may
+/// turn peers away (throttling repeated failures). Calls are made on serving
+/// threads and must not block.
+pub trait Observer: Send + Sync {
+    /// Called after each answered request.
+    fn request(&self, record: &RequestRecord<'_>);
+    /// Whether to serve a new connection from `peer` at all.
+    fn admit(&self, _peer: &str) -> bool {
+        true
+    }
+}
+
 /// A token-protected view of one object store. Cloneable so each connection and
 /// datagram worker can hold it.
 #[derive(Clone)]
@@ -404,6 +445,7 @@ pub struct Service {
     token: Arc<String>,
     writes_paused: Arc<AtomicBool>,
     listing: Arc<Mutex<Option<CachedListing>>>,
+    observer: Option<Arc<dyn Observer>>,
 }
 
 /// The full listing behind a paginated `list`. Without it every page re-read
@@ -432,6 +474,44 @@ impl Service {
             token: Arc::new(token),
             writes_paused,
             listing: Arc::default(),
+            observer: None,
+        }
+    }
+
+    /// Report every answered request to `observer` (QUIC, TCP and Unix
+    /// stream servers).
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    fn admit(&self, peer: &str) -> bool {
+        self.observer
+            .as_ref()
+            .is_none_or(|observer| observer.admit(peer))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &self,
+        peer: &str,
+        transport: &'static str,
+        request: Option<&Request>,
+        authorized: bool,
+        rejected: bool,
+        bytes_in: u64,
+        bytes_out: u64,
+    ) {
+        if let Some(observer) = &self.observer {
+            observer.request(&RequestRecord {
+                peer,
+                transport,
+                request: request.map_or_else(|| "malformed".into(), describe_request),
+                authorized,
+                rejected,
+                bytes_in,
+                bytes_out,
+            });
         }
     }
 
@@ -1312,7 +1392,8 @@ impl Server {
                                     &mut stream,
                                     &service,
                                     &stop,
-                                    &address.to_string(),
+                                    &address.ip().to_string(),
+                                    "tcp",
                                 );
                                 active.fetch_sub(1, Ordering::SeqCst);
                             });
@@ -1363,7 +1444,7 @@ impl Server {
                             thread::spawn(move || {
                                 let mut stream = Stream::Unix(stream);
                                 let _ = stream.set_timeouts();
-                                serve_connection(&mut stream, &service, &stop, "unix");
+                                serve_connection(&mut stream, &service, &stop, "local", "unix");
                                 active.fetch_sub(1, Ordering::SeqCst);
                             });
                         }
@@ -1478,7 +1559,16 @@ fn prepare_socket_path(path: &Path, replace_stale: bool) -> Result<()> {
     Ok(())
 }
 
-fn serve_connection(stream: &mut Stream, service: &Service, stop: &AtomicBool, peer: &str) {
+fn serve_connection(
+    stream: &mut Stream,
+    service: &Service,
+    stop: &AtomicBool,
+    peer: &str,
+    transport: &'static str,
+) {
+    if !service.admit(peer) {
+        return;
+    }
     let mut authenticated = false;
     let connected = Instant::now();
     while !stop.load(Ordering::Relaxed) {
@@ -1512,7 +1602,17 @@ fn serve_connection(stream: &mut Stream, service: &Service, stop: &AtomicBool, p
             return;
         }
         if !service.authorize(&envelope.token) {
-            let _ = send_response(stream, None, error_response(401, "invalid token"));
+            let sent =
+                send_response(stream, None, error_response(401, "invalid token")).unwrap_or(0);
+            service.observe(
+                peer,
+                transport,
+                Some(&envelope.request),
+                false,
+                true,
+                frame.len() as u64,
+                sent,
+            );
             return;
         }
         authenticated = true;
@@ -1538,23 +1638,36 @@ fn serve_connection(stream: &mut Stream, service: &Service, stop: &AtomicBool, p
             _ => None,
         };
         let (response, out) = service.handle(&envelope.request, body.as_deref());
-        if send_response(stream, out.as_deref(), response).is_err() {
+        let received = (frame.len() + body.as_ref().map_or(0, Vec::len)) as u64;
+        let Ok(sent) = send_response(stream, out.as_deref(), response) else {
             return;
-        }
-        let _ = peer;
+        };
+        service.observe(
+            peer,
+            transport,
+            Some(&envelope.request),
+            true,
+            false,
+            received,
+            sent,
+        );
     }
 }
 
-fn send_response(stream: &mut Stream, body: Option<&[u8]>, response: Response) -> Result<()> {
+/// Send a response; returns the bytes written, frame headers included.
+fn send_response(stream: &mut Stream, body: Option<&[u8]>, response: Response) -> Result<u64> {
     let envelope = ResponseEnvelope {
         schema: PROTOCOL.into(),
         response,
     };
-    write_frame(stream, &serde_json::to_vec(&envelope)?, MAX_CONTROL)?;
+    let json = serde_json::to_vec(&envelope)?;
+    write_frame(stream, &json, MAX_CONTROL)?;
+    let mut sent = 4 + json.len() as u64;
     if let Some(body) = body {
         write_frame(stream, body, MAX_OBJECT as usize)?;
+        sent += 4 + body.len() as u64;
     }
-    Ok(())
+    Ok(sent)
 }
 
 #[cfg(unix)]
@@ -2409,6 +2522,54 @@ mod tests {
         let reply: ResponseEnvelope = serde_json::from_slice(payload).unwrap();
         assert!(matches!(reply.response, Response::Error { code: 503, .. }));
         assert!(server.shutdown());
+    }
+
+    #[test]
+    fn tcp_requests_are_reported_to_the_observer() {
+        /// peer, transport, request, authorized, rejected
+        type Row = (String, &'static str, String, bool, bool);
+        #[derive(Default)]
+        struct Count(Mutex<Vec<Row>>);
+        impl Observer for Count {
+            fn request(&self, r: &RequestRecord<'_>) {
+                self.0.lock().unwrap().push((
+                    r.peer.to_owned(),
+                    r.transport,
+                    r.request.clone(),
+                    r.authorized,
+                    r.rejected,
+                ));
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let count = Arc::new(Count::default());
+        let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)))
+            .with_observer(count.clone());
+        let server = Server::bind(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            service,
+            false,
+        )
+        .unwrap();
+        let mut link = connect(&server.target, token()).unwrap();
+        link.status().unwrap();
+        drop(link);
+        let mut bad = connect(&server.target, "wrong0".into()).unwrap();
+        assert!(bad.status().is_err());
+        drop(bad);
+        server.stop();
+        let seen = count.0.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("127.0.0.1".into(), "tcp", "status".into(), true, false),
+                ("127.0.0.1".into(), "tcp", "status".into(), false, true),
+            ]
+        );
     }
 
     #[test]
