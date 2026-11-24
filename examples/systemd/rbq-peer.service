@@ -17,7 +17,12 @@ After=network-online.target
 [Service]
 Type=simple
 # All configuration by environment; override with `systemctl --user edit`.
-Environment=RBQ_LISTEN=quic://0.0.0.0:8788
+# With no RBQ_LISTEN, rbq shares only over this host's Tailscale and NetBird
+# addresses (port 8788), following overlays that come up or go away. That is
+# the private default: nothing listens on the LAN or the internet. To also
+# listen everywhere:
+# Environment=RBQ_LISTEN=quic://0.0.0.0:8788
+# Environment=RBQ_NO_OVERLAYS=true   # never share over overlays automatically
 # Uncomment to also accept a shared token (needed for tcp:// and unix://):
 # Environment=RBQ_TOKEN_FILE=%h/.config/rbq/peer-token
 ExecStart=%h/.local/bin/rbq peer serve

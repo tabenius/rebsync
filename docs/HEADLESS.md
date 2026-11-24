@@ -10,7 +10,9 @@ tools and scripts on machines nobody is logged in to.
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `RBQ_LISTEN` | `peer serve` | Listen addresses, comma-separated (`quic://0.0.0.0:8788,unix:///run/user/1000/rbq.sock`). |
+| `RBQ_LISTEN` | `peer serve` | Listen addresses, comma-separated (`quic://0.0.0.0:8788,unix:///run/user/1000/rbq.sock`). Optional on a Tailscale/NetBird host. |
+| `RBQ_NO_OVERLAYS` | `peer serve` | `true`: do not share over Tailscale/NetBird automatically. |
+| `RBQ_OVERLAY_PORT` | `peer serve` | UDP port for overlay listeners (default: the first `quic://` port, else 8788). |
 | `RBQ_TOKEN_FILE` | `peer serve`, `peer status/push/pull` | Owner-only file with the shared token. Optional for QUIC between paired devices. |
 | `RBQ_QUIC_IDENTITY` | every `peer` command | Directory of this device's key. Its pairings are kept in `paired/` inside it. Default: `quic-identity/` and `paired/` under rbq's state directory. |
 | `RBQ_PEER` | `peer status/push/pull` | Connection string or `paired:NAME`, so tokens and pins stay out of shell history. |
@@ -61,9 +63,15 @@ connection.
 
 ## Overlays
 
-`rbq peer networks --json` reports Tailscale and NetBird interfaces (and, when
-their CLIs are installed, connection state and peers) and suggests a listen
-address on each. Binding to the overlay address only
-(`RBQ_LISTEN=quic://100.101.102.103:8788`) keeps the server off other
-networks; the overlay carries packets, rbq still pins keys and checks
-pairings.
+When this host is on Tailscale or NetBird, `rbq peer serve` shares over it
+by itself: one QUIC listener per overlay address (unless a wildcard listener
+on the same port already reaches it), re-checked every 30 seconds, so an
+overlay that comes up after boot is picked up and one that goes away is
+dropped (JSON lines on stderr say which). With no `RBQ_LISTEN` at all the
+server is reachable *only* over the overlays, which is the private default
+of the systemd unit. A plain `100.64.0.0/10` address on an unknown interface
+is never shared automatically (carrier-grade NAT uses that range).
+
+`rbq peer networks --json` shows what is detected (and, when their CLIs are
+installed, connection state and peers). The overlay carries packets; rbq
+still pins keys and checks pairings.

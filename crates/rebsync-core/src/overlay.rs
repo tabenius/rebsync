@@ -52,7 +52,7 @@ impl OverlayKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct OverlayAddress {
     pub kind: OverlayKind,
     pub interface: String,
@@ -263,6 +263,48 @@ pub fn detect(probe_clis: bool) -> OverlayReport {
     }
 }
 
+/// Which overlay addresses a server should start or stop listening on.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ListenPlan {
+    pub bind: Vec<OverlayAddress>,
+    pub drop: Vec<IpAddr>,
+}
+
+/// Plan listeners for the Tailscale and NetBird addresses in `detected`,
+/// given the overlay addresses already `bound` and whether a wildcard
+/// listener on the same port already reaches IPv4 / IPv6 addresses.
+/// Unclassified 100.64.0.0/10 addresses are never shared automatically: on a
+/// phone or a mobile router that range is carrier NAT.
+pub fn plan_listeners(
+    detected: &[OverlayAddress],
+    bound: &[IpAddr],
+    wildcard_v4: bool,
+    wildcard_v6: bool,
+) -> ListenPlan {
+    let wanted: Vec<&OverlayAddress> = detected
+        .iter()
+        .filter(|a| matches!(a.kind, OverlayKind::Tailscale | OverlayKind::Netbird))
+        .filter(|a| match a.address {
+            IpAddr::V4(_) => !wildcard_v4,
+            IpAddr::V6(_) => !wildcard_v6,
+        })
+        .collect();
+    let mut plan = ListenPlan::default();
+    for address in &wanted {
+        if !bound.contains(&address.address)
+            && !plan.bind.iter().any(|b| b.address == address.address)
+        {
+            plan.bind.push((*address).clone());
+        }
+    }
+    for address in bound {
+        if !wanted.iter().any(|a| a.address == *address) {
+            plan.drop.push(*address);
+        }
+    }
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +377,37 @@ mod tests {
             OverlayStatus::default()
         );
         assert!(parse_netbird_status(b"not json").is_none());
+    }
+
+    #[test]
+    fn listeners_follow_overlays_and_skip_what_is_covered_or_unclassified() {
+        let found = classify(&[
+            at("tailscale0", "100.101.102.103"),
+            at("tailscale0", "fd7a:115c:a1e0::1234"),
+            at("wt0", "100.88.0.7"),
+            at("rmnet0", "100.70.1.2"),
+        ]);
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let addresses = |plan: &ListenPlan| plan.bind.iter().map(|a| a.address).collect::<Vec<_>>();
+        // Nothing bound yet: both overlays, both families; never carrier NAT.
+        let plan = plan_listeners(&found, &[], false, false);
+        assert_eq!(
+            addresses(&plan),
+            vec![
+                ip("100.101.102.103"),
+                ip("fd7a:115c:a1e0::1234"),
+                ip("100.88.0.7")
+            ]
+        );
+        assert!(plan.drop.is_empty());
+        // A 0.0.0.0 listener on the same port already reaches IPv4 overlays.
+        let plan = plan_listeners(&found, &[], true, false);
+        assert_eq!(addresses(&plan), vec![ip("fd7a:115c:a1e0::1234")]);
+        // Already bound: nothing to do. An overlay that went away is dropped.
+        let bound = [ip("100.101.102.103"), ip("100.88.0.7"), ip("100.99.0.1")];
+        let plan = plan_listeners(&found, &bound, false, true);
+        assert!(plan.bind.is_empty());
+        assert_eq!(plan.drop, vec![ip("100.99.0.1")]);
     }
 
     #[test]

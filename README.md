@@ -927,8 +927,13 @@ rbq peer selftest
   address on it. A plain `100.64.0.0/10` address on an unknown interface is
   reported as unclassified: carrier-grade NAT uses that range too. When
   `serve` listens on all interfaces, its `connect` list includes one string
-  per overlay address. The overlay carries packets; rbq still pins keys and
-  checks tokens or pairings. Rebeqah labels overlay interfaces the same way.
+  per overlay address. When the host is on either overlay, `rbq peer serve`
+  shares over it automatically (one QUIC listener per Tailscale/NetBird
+  address, following overlays that come up or go away; `--no-overlays` to
+  opt out), and `--listen` becomes optional: with none, the server is
+  reachable only over the overlays. The overlay carries packets; rbq still
+  pins keys and checks tokens or pairings. Rebeqah listens on all interfaces,
+  overlays included, and labels them.
 - **No mesh integration.** A relay must carry one of these transports (QUIC
   over any IP path, including mesh overlays, or a local socket); rbq does not
   talk to OSHI or other mesh APIs directly.

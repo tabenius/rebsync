@@ -689,12 +689,9 @@ struct ServeArgs {
     /// Listen address; repeat for several (or comma-separate in
     /// $RBQ_LISTEN). quic://HOST:PORT (encrypted, recommended beyond this
     /// host), tcp://HOST:PORT (plaintext), unix:///path or unix-dgram:///path.
-    #[arg(
-        long = "listen",
-        required = true,
-        env = "RBQ_LISTEN",
-        value_delimiter = ','
-    )]
+    /// Optional when this host is on Tailscale or NetBird: the overlays are
+    /// shared automatically.
+    #[arg(long = "listen", env = "RBQ_LISTEN", value_delimiter = ',')]
     listen: Vec<String>,
     /// Directory holding the QUIC server identity (created on first use,
     /// owner-only). Default: quic-identity/ under rbq's state directory.
@@ -707,6 +704,16 @@ struct ServeArgs {
     /// Remove an existing socket path. A live server is never replaced.
     #[arg(long)]
     replace_stale: bool,
+    /// Do not share automatically over this host's Tailscale and NetBird
+    /// addresses. By default each one gets a QUIC listener (unless a
+    /// wildcard listener already reaches it), including overlays that come
+    /// up while serving.
+    #[arg(long, env = "RBQ_NO_OVERLAYS")]
+    no_overlays: bool,
+    /// UDP port for overlay listeners. Default: the first quic:// listen
+    /// port, else 8788.
+    #[arg(long, env = "RBQ_OVERLAY_PORT")]
+    overlay_port: Option<u16>,
 }
 #[derive(Subcommand)]
 enum MnemeAction {
@@ -1791,14 +1798,124 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 };
                 servers.push(server);
             }
+            // Share over Tailscale / NetBird: a QUIC listener per overlay
+            // address that no wildcard listener already reaches.
+            let overlay_port = args.overlay_port.unwrap_or_else(|| {
+                servers
+                    .iter()
+                    .find_map(|server| match &server.target {
+                        transport::Target::Quic { port, .. } => Some(*port),
+                        _ => None,
+                    })
+                    .unwrap_or(8788)
+            });
+            let wildcard = |any: &str| {
+                servers.iter().any(|server| {
+                    matches!(&server.target, transport::Target::Quic { host, port, .. }
+                        if *port == overlay_port && host == any)
+                })
+            };
+            let (wildcard_v4, wildcard_v6) = (wildcard("0.0.0.0"), wildcard("::"));
+            type Overlay = (std::net::IpAddr, &'static str, transport::Server);
+            let mut overlays: Vec<Overlay> = Vec::new();
+            let mut reported = std::collections::HashSet::new();
+            let mut refresh = |overlays: &mut Vec<Overlay>, announce: bool| {
+                let detected = rebsync_core::overlay::detect(false).addresses;
+                let bound: Vec<std::net::IpAddr> = overlays.iter().map(|(ip, ..)| *ip).collect();
+                let plan = rebsync_core::overlay::plan_listeners(
+                    &detected,
+                    &bound,
+                    wildcard_v4,
+                    wildcard_v6,
+                );
+                for gone in plan.drop {
+                    if let Some(index) = overlays.iter().position(|(ip, ..)| *ip == gone) {
+                        let (_, via, server) = overlays.remove(index);
+                        server.stop();
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"overlay": via, "stopped": gone.to_string()})
+                        );
+                    }
+                }
+                for address in plan.bind {
+                    let via = address.kind.label();
+                    match transport::Server::bind_quic(
+                        &address.address.to_string(),
+                        overlay_port,
+                        service.clone(),
+                        &device,
+                    ) {
+                        Ok(server) => {
+                            if announce {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({"overlay": via, "listening": server.target.describe()})
+                                );
+                            }
+                            reported.remove(&address.address);
+                            overlays.push((address.address, via, server));
+                        }
+                        // Report a failing overlay once; keep retrying quietly.
+                        Err(error) => {
+                            if reported.insert(address.address) {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "overlay": via,
+                                        "address": address.address.to_string(),
+                                        "error": format!("{error:#}"),
+                                    })
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+            if !args.no_overlays {
+                refresh(&mut overlays, false);
+            }
+            if servers.is_empty() && overlays.is_empty() {
+                anyhow::ensure!(
+                    !args.no_overlays,
+                    "nothing to listen on: give --listen (or RBQ_LISTEN), or allow overlays"
+                );
+                eprintln!(
+                    "rbq: no --listen and no Tailscale/NetBird address yet; \
+                     waiting for an overlay to come up"
+                );
+            }
+            if !overlays.is_empty() {
+                quic_peer = Some(device.peer_id().to_owned());
+            }
             let serving: Vec<String> = servers
                 .iter()
+                .chain(overlays.iter().map(|(_, _, server)| server))
                 .map(|server| server.target.describe())
                 .collect();
             // Offer each Tailscale/NetBird address of this host explicitly:
             // those are usually how a phone or a remote box reaches it.
             let overlay = rebsync_core::overlay::detect(false);
-            let mut connect: Vec<serde_json::Value> = Vec::new();
+            let mut connect: Vec<serde_json::Value> = overlays
+                .iter()
+                .map(|(_, via, server)| {
+                    let transport::Target::Quic { host, port, .. } = &server.target else {
+                        unreachable!("overlay listeners are QUIC")
+                    };
+                    let shown = if host.contains(':') {
+                        format!("[{host}]")
+                    } else {
+                        host.clone()
+                    };
+                    serde_json::json!({
+                        "via": via,
+                        "connection": format!(
+                            "rbq+quic://{shown}:{port}?peer={}&token=…",
+                            device.peer_id()
+                        ),
+                    })
+                })
+                .collect();
             for server in &servers {
                 let transport::Target::Quic {
                     host, port, peer, ..
@@ -1845,8 +1962,24 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             {
                 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
                 let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP])?;
-                let signal = signals.forever().next().unwrap_or(SIGTERM);
+                // Wait for a stop signal; meanwhile follow overlays that come
+                // up or go away (tailscale up after boot, a NetBird reconnect).
+                const OVERLAY_POLL: std::time::Duration = std::time::Duration::from_secs(30);
+                let mut polled = std::time::Instant::now();
+                let signal = loop {
+                    if let Some(signal) = signals.pending().next() {
+                        break signal;
+                    }
+                    if !args.no_overlays && polled.elapsed() >= OVERLAY_POLL {
+                        refresh(&mut overlays, true);
+                        polled = std::time::Instant::now();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                };
                 for server in servers {
+                    server.stop();
+                }
+                for (_, _, server) in overlays {
                     server.stop();
                 }
                 eprintln!("{}", serde_json::json!({"stopped": true, "signal": signal}));
