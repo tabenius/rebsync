@@ -573,7 +573,7 @@ fn host_allowed(host: Option<&str>, names: &[String]) -> bool {
             .unwrap_or(host)
     };
     let bare = bare.trim_end_matches('.').to_ascii_lowercase();
-    bare.parse::<IpAddr>().is_ok() || names.iter().any(|name| *name == bare)
+    bare.parse::<IpAddr>().is_ok() || names.contains(&bare)
 }
 
 fn handle(
