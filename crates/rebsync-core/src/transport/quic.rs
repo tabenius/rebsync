@@ -47,8 +47,11 @@ use std::{
 
 /// TLS needs a server name; the key pin makes its value irrelevant.
 const SERVER_NAME: &str = "rbq";
-/// Requests one connection may have in flight. A client sends one at a time.
-const MAX_STREAMS: u32 = 4;
+/// Requests one connection may have in flight. A client sends one at a
+/// time, and each request may hold a 64 MiB object in memory, so one stream
+/// per connection keeps the server's worst case at the stream transport's:
+/// [`MAX_CONNECTIONS`] objects.
+const MAX_STREAMS: u32 = 1;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

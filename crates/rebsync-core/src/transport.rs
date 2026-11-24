@@ -80,6 +80,9 @@ pub const CHUNK: usize = 32 * 1024;
 const MAX_DATAGRAM: usize = 60 * 1024;
 const DATAGRAM_PAGE: usize = 32;
 const MAX_ASSEMBLIES: usize = 16;
+/// Bytes all unfinished datagram uploads may reserve together. Sixteen
+/// 64 MiB uploads would otherwise pin a gigabyte.
+const ASSEMBLY_BUDGET: usize = 128 * 1024 * 1024;
 const ASSEMBLY_TTL: Duration = Duration::from_secs(60);
 const DATAGRAM_TIMEOUT: Duration = Duration::from_secs(30);
 /// A reply that cannot be queued within this is dropped. Without a bound the
@@ -1653,6 +1656,23 @@ fn serve_datagrams(
                         continue;
                     }
                     let total = expected.div_ceil(CHUNK) as u32;
+                    // An upload replacing this sender's own unfinished one
+                    // frees that reservation first.
+                    let reserved: usize = assemblies
+                        .iter()
+                        .filter(|(sender, _)| **sender != key)
+                        .map(|(_, assembly)| assembly.expected)
+                        .sum();
+                    if reserved + expected > ASSEMBLY_BUDGET {
+                        let _ = send_datagram(
+                            socket,
+                            &addr,
+                            id,
+                            error_response(503, "too many uploads in progress; retry later"),
+                            None,
+                        );
+                        continue;
+                    }
                     if assemblies.len() >= MAX_ASSEMBLIES
                         && let Some(oldest) = assemblies
                             .values()
@@ -2342,6 +2362,53 @@ mod tests {
             None,
         );
         assert_eq!(store.1.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unfinished_datagram_uploads_share_a_memory_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)));
+        let path = root.path().join("dgram.sock");
+        let server =
+            Server::bind(&Target::UnixDatagram { path: path.clone() }, service, false).unwrap();
+        let start_upload = |name: &str| {
+            let client = std::os::unix::net::UnixDatagram::bind(root.path().join(name)).unwrap();
+            client.connect(&path).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let request = serde_json::to_vec(&RequestEnvelope {
+                schema: PROTOCOL.into(),
+                token: token(),
+                request: Request::Put {
+                    key: chunk_key(1),
+                    size: 60 * 1024 * 1024,
+                },
+            })
+            .unwrap();
+            client
+                .send(&datagram(KIND_CONTROL, 1, 0, 0, &request))
+                .unwrap();
+            client
+        };
+        // Two 60 MiB uploads fit the 128 MiB budget and wait for chunks.
+        let mut buffer = vec![0_u8; MAX_DATAGRAM];
+        for name in ["a", "b"] {
+            let client = start_upload(name);
+            assert!(
+                client.recv(&mut buffer).is_err(),
+                "no reply until chunks arrive"
+            );
+        }
+        // A third would exceed it and is refused instead of reserved.
+        let client = start_upload("c");
+        let size = client.recv(&mut buffer).expect("a refusal");
+        let (_, _, _, _, payload) = parse_datagram(&buffer[..size]).unwrap();
+        let reply: ResponseEnvelope = serde_json::from_slice(payload).unwrap();
+        assert!(matches!(reply.response, Response::Error { code: 503, .. }));
+        assert!(server.shutdown());
     }
 
     #[test]
