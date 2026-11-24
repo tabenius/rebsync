@@ -537,6 +537,11 @@ struct PeerTargetArgs {
     /// devices need none.
     #[arg(long, env = "RBQ_TOKEN_FILE")]
     token_file: Option<PathBuf>,
+    /// Treat the peer as possibly lying: ignore the hashes it reports for its
+    /// own copies and download every object both sides hold to compare it.
+    /// By default a peer's hash is trusted, which saves the transfer.
+    #[arg(long, env = "RBQ_DISTRUST_PEER")]
+    distrust_peer: bool,
     /// Additional HTTP attempts on transient connection/502/503/504/408 failures.
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=6))]
     retries: u8,
@@ -1723,16 +1728,28 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         PeerAction::Push { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
+            let distrusting = peer::Distrusting(remote.as_ref());
+            let remote: &dyn peer::PeerApi = if target.distrust_peer {
+                &distrusting
+            } else {
+                remote.as_ref()
+            };
             let mut journal = Journal::open(&config.rbq_home)?;
-            let report = peer::push(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
+            let report = peer::push(&storage, remote, &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
         PeerAction::Pull { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
+            let distrusting = peer::Distrusting(remote.as_ref());
+            let remote: &dyn peer::PeerApi = if target.distrust_peer {
+                &distrusting
+            } else {
+                remote.as_ref()
+            };
             let mut journal = Journal::open(&config.rbq_home)?;
-            let report = peer::pull(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
+            let report = peer::pull(&storage, remote, &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }

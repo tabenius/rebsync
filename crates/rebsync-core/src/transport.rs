@@ -345,6 +345,11 @@ pub enum Request {
         key: String,
         size: u64,
     },
+    /// The SHA-256 of the stored object, computed by the server, so a copy
+    /// both sides hold is verified without transferring it.
+    Hash {
+        key: String,
+    },
     /// Redeem a one-time pairing secret (QUIC only): `card` is the client's
     /// self-signed card, whose key must be the one the TLS handshake proved.
     Pair {
@@ -377,6 +382,7 @@ fn describe_request(request: &Request) -> String {
             length,
         } => format!("put {} [{offset}+{length}]", short(key)),
         Request::PutCommit { key, .. } => format!("put {} (commit)", short(key)),
+        Request::Hash { key } => format!("hash {}", short(key)),
         Request::Pair { .. } => "pair (one-time secret)".into(),
     }
 }
@@ -401,6 +407,9 @@ pub struct Capabilities {
     /// The server accepts staged, resumable uploads.
     #[serde(default)]
     pub staged_put: bool,
+    /// The server answers `hash`.
+    #[serde(default)]
+    pub hashes: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -434,6 +443,11 @@ pub enum Response {
     /// Bytes of a staged upload received so far.
     Staged {
         offset: u64,
+    },
+    /// The stored object's SHA-256 (lowercase hex) and size.
+    Hash {
+        sha256: String,
+        size: u64,
     },
     /// A redeemed pairing: the server's self-signed card.
     Paired {
@@ -644,7 +658,8 @@ impl Scopes {
             Request::Status
             | Request::List { .. }
             | Request::Get { .. }
-            | Request::GetRange { .. } => self.read,
+            | Request::GetRange { .. }
+            | Request::Hash { .. } => self.read,
             // Pairing is decided by its secret, never by an existing grant.
             Request::Pair { .. } => false,
         }
@@ -840,6 +855,7 @@ impl Service {
                 datagram_chunk_bytes: CHUNK as u64,
                 ranged_get: true,
                 staged_put: self.staging.is_some(),
+                hashes: true,
             },
         }
     }
@@ -977,6 +993,25 @@ impl Service {
                     },
                     Some(body),
                 ),
+                Err(response) => (response, None),
+            },
+            Request::Hash { key } => match self.object(key, 0, u64::MAX) {
+                Ok((body, size)) => {
+                    let mut hasher = Sha256::new();
+                    match body.for_each_window(self.storage.as_ref(), |window| {
+                        hasher.update(window);
+                        Ok(())
+                    }) {
+                        Ok(()) => (
+                            Response::Hash {
+                                sha256: format!("{:x}", hasher.finalize()),
+                                size,
+                            },
+                            None,
+                        ),
+                        Err(error) => (error_response(500, format!("{error:#}")), None),
+                    }
+                }
                 Err(response) => (response, None),
             },
             Request::GetRange {
@@ -2035,6 +2070,20 @@ impl PeerApi for TransportPeer {
             self.get_resumable(key)
         } else {
             self.with_retry(|link| link.get(key))
+        }
+    }
+
+    fn hash(&self, key: &str) -> Result<Option<String>> {
+        if !self.capabilities()?.hashes {
+            return Ok(None);
+        }
+        match self.with_retry(|link| link.call(Request::Hash { key: key.into() }, None))? {
+            Response::Hash { sha256, .. }
+                if sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                Ok(Some(sha256.to_ascii_lowercase()))
+            }
+            _ => bail!("peer returned an unexpected hash reply"),
         }
     }
 
@@ -3766,6 +3815,64 @@ mod tests {
             // No temporaries are left beside the object, or listed.
             assert_eq!(storage.list_prefix("mneme/", 0).unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn a_push_with_nothing_to_send_hashes_instead_of_downloading() {
+        #[derive(Default)]
+        struct Requests(Mutex<Vec<String>>);
+        impl Observer for Requests {
+            fn request(&self, r: &RequestRecord<'_>) {
+                self.0.lock().unwrap().push(r.request.clone());
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = crate::FsObjectStorage::open(root.path().join("source")).unwrap();
+        write_fixture(&source, 300 * 1024).unwrap();
+        let requests = Arc::new(Requests::default());
+        let service = Service::new(
+            Arc::new(crate::FsObjectStorage::open(root.path().join("peer")).unwrap()),
+            token(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .with_observer(requests.clone());
+        let server = Server::bind(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            service,
+            false,
+        )
+        .unwrap();
+        let peer = TransportPeer::connect(&server.target, token()).unwrap();
+        let mut journal = Journal::open(root.path()).unwrap();
+        let prefixes = peer::default_prefixes();
+        assert!(
+            peer::push(&source, &peer, &prefixes, &mut journal)
+                .unwrap()
+                .clean()
+        );
+        requests.0.lock().unwrap().clear();
+        let again = peer::push(&source, &peer, &prefixes, &mut journal).unwrap();
+        assert!(again.clean() && again.transferred == 0 && again.already_present > 0);
+        let seen = requests.0.lock().unwrap().clone();
+        assert!(seen.iter().any(|r| r.starts_with("hash ")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|r| r.starts_with("get ")),
+            "nothing downloaded: {seen:?}"
+        );
+        // Distrusting the peer downloads the copies instead.
+        requests.0.lock().unwrap().clear();
+        assert!(
+            peer::push(&source, &peer::Distrusting(&peer), &prefixes, &mut journal)
+                .unwrap()
+                .clean()
+        );
+        let seen = requests.0.lock().unwrap().clone();
+        assert!(seen.iter().any(|r| r.starts_with("get ")), "{seen:?}");
+        drop(peer);
+        server.stop();
     }
 
     #[test]

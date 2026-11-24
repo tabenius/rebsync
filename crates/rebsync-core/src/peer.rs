@@ -41,6 +41,84 @@ pub trait PeerApi {
     fn get(&self, key: &str) -> Result<Vec<u8>>;
     /// Create-if-absent on the peer. Returns true when created.
     fn put(&self, key: &str, bytes: &[u8]) -> Result<bool>;
+    /// The SHA-256 (lowercase hex) of the peer's stored copy, computed by the
+    /// peer, so an object both sides already hold is verified without
+    /// transferring it. `None` when the peer cannot hash; callers then fall
+    /// back to downloading. The peer vouches for its own copy: this detects
+    /// damaged or different replicas on an honest peer, which is what the
+    /// download did too (a dishonest peer could serve good bytes on demand).
+    fn hash(&self, _key: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// A peer treated as possibly lying: its own hashes are ignored, so every
+/// copy both sides hold is downloaded and compared byte for byte. By default
+/// rbq trusts a peer's hash of its own copy (saving the transfer); wrap the
+/// peer in this to opt out (`rbq peer push|pull --distrust-peer`).
+pub struct Distrusting<'a>(pub &'a dyn PeerApi);
+
+impl PeerApi for Distrusting<'_> {
+    fn base(&self) -> &str {
+        self.0.base()
+    }
+    fn status(&self) -> Result<Value> {
+        self.0.status()
+    }
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        self.0.put(key, bytes)
+    }
+    fn hash(&self, _key: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// The digest a chunk key commits to, if `key` is a chunk.
+fn chunk_digest(key: &str) -> Option<&str> {
+    key.rsplit_once("/chunks/sha256/")
+        .and_then(|(_, address)| address.rsplit('/').next())
+}
+
+/// Whether the peer's copy of `key` equals `local`, by hash when the peer
+/// offers one, else by downloading it. A peer hash of a chunk that does not
+/// match the chunk's own address means the peer's copy is damaged.
+fn peer_matches(peer: &dyn PeerApi, key: &str, local: &[u8]) -> Result<PeerCopy> {
+    match peer.hash(key)? {
+        Some(hash) => {
+            if chunk_digest(key).is_some_and(|digest| digest != hash) {
+                return Ok(PeerCopy::Damaged);
+            }
+            Ok(if hash == crate::wire::sha256_hex(local) {
+                PeerCopy::Same
+            } else {
+                PeerCopy::Different
+            })
+        }
+        None => {
+            let remote = peer.get(key)?;
+            if admissible(key, &remote).is_err() {
+                return Ok(PeerCopy::Damaged);
+            }
+            Ok(if remote == local {
+                PeerCopy::Same
+            } else {
+                PeerCopy::Different
+            })
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum PeerCopy {
+    Same,
+    Different,
+    Damaged,
 }
 
 #[cfg(feature = "peer-http")]
@@ -93,6 +171,8 @@ pub struct Peer {
     target: Target,
     page: usize,
     retries: u8,
+    /// Whether the peer answers `/v1/hash/`, learned from its status once.
+    hashes: std::sync::OnceLock<bool>,
 }
 
 #[cfg(feature = "peer-http")]
@@ -197,7 +277,30 @@ impl Peer {
             target,
             page: PAGE,
             retries: 3,
+            hashes: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The SHA-256 of the peer's stored copy, if the peer offers hashes.
+    pub fn hash(&self, key: &str) -> Result<Option<String>> {
+        let hashes = match self.hashes.get() {
+            Some(hashes) => *hashes,
+            None => {
+                let status = self.status()?;
+                *self
+                    .hashes
+                    .get_or_init(|| status["capabilities"]["hashes"].as_bool() == Some(true))
+            }
+        };
+        if !hashes {
+            return Ok(None);
+        }
+        let reply = self.json(&format!("/v1/hash/{}", encode_key(key)))?;
+        let sha256 = reply["sha256"]
+            .as_str()
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .context("peer returned a malformed hash")?;
+        Ok(Some(sha256.to_ascii_lowercase()))
     }
 
     /// Smaller pages exercise pagination in tests; servers cap at 10 000.
@@ -379,6 +482,10 @@ impl PeerApi for Peer {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
         Peer::put(self, key, bytes)
     }
+
+    fn hash(&self, key: &str) -> Result<Option<String>> {
+        Peer::hash(self, key)
+    }
 }
 
 #[cfg(feature = "peer-http")]
@@ -547,6 +654,17 @@ impl<'a> VerifiedReads<'a> {
         {
             return Ok(bytes);
         }
+        // A peer that hashes its copy saves the transfer: if its hash is the
+        // chunk's address and ours is intact, the copies are identical.
+        if chunk
+            && let Some(digest) = chunk_digest(key)
+            && self.peer.hash(key)?.as_deref() == Some(digest)
+            && let Ok(local) = self.storage.get(&ObjectKey::parse(key)?)
+            && crate::wire::sha256_hex(&local) == digest
+        {
+            self.verified.insert(key.to_owned());
+            return Ok(local);
+        }
         let bytes = self.peer.get(key)?;
         if chunk
             && admissible(key, &bytes).is_ok()
@@ -559,6 +677,19 @@ impl<'a> VerifiedReads<'a> {
         }
         Ok(bytes)
     }
+}
+
+/// Push's byte-for-byte check of an object the peer already has, by hash
+/// where possible, remembering verified chunks for the snapshot checks.
+fn peer_matches_cached(reads: &mut VerifiedReads<'_>, key: &str, local: &[u8]) -> Result<bool> {
+    if reads.peer.hash(key)?.is_some() {
+        let same = peer_matches(reads.peer, key, local)? == PeerCopy::Same;
+        if same && key.contains("/chunks/sha256/") {
+            reads.verified.insert(key.to_owned());
+        }
+        return Ok(same);
+    }
+    Ok(reads.get(key)? == local)
 }
 
 fn local_listing(storage: &dyn ObjectStorage, prefix: &str) -> Result<BTreeMap<String, u64>> {
@@ -617,7 +748,7 @@ pub fn push(
                             continue;
                         }
                     }
-                    if reads.get(key)? == source {
+                    if peer_matches_cached(&mut reads, key, &source)? {
                         report.already_present += 1;
                     } else {
                         report
@@ -665,7 +796,7 @@ pub fn push(
                 report.transferred += 1;
                 report.transferred_bytes += bytes.len() as u64;
             } else {
-                if peer.get(&key)? == bytes {
+                if peer_matches(peer, &key, &bytes)? == PeerCopy::Same {
                     report.already_present += 1;
                 } else {
                     report
@@ -707,16 +838,20 @@ pub fn pull(
             match local.get(key) {
                 Some(local_size) if local_size == size => {
                     let existing = storage.get(&ObjectKey::parse(key)?)?;
-                    let incoming = peer.get(key)?;
-                    if existing.len() as u64 != *size
-                        || incoming.len() as u64 != *size
-                        || admissible(key, &existing).is_err()
-                        || admissible(key, &incoming).is_err()
-                    {
+                    let intact =
+                        existing.len() as u64 == *size && admissible(key, &existing).is_ok();
+                    // Compare by the peer's hash where it offers one, so an
+                    // object both sides hold is not downloaded again.
+                    let copy = if intact {
+                        peer_matches(peer, key, &existing)?
+                    } else {
+                        PeerCopy::Damaged
+                    };
+                    if copy == PeerCopy::Damaged {
                         report
                             .rejected
                             .push(format!("{key}: existing object fails integrity validation"));
-                    } else if existing != incoming {
+                    } else if copy == PeerCopy::Different {
                         report
                             .conflicts
                             .push(format!("{key}: same-size local and peer objects differ"));

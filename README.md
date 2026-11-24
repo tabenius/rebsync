@@ -871,6 +871,14 @@ rbq peer selftest
   its address, computed while reading), and the object is then created if
   absent straight from the file. Staging is capped at 1 GiB and stale uploads
   are removed after a day.
+- **Verified by hash, unless you distrust the peer.** For an object both
+  sides already hold, the peer reports the SHA-256 of its own copy (rbq-peer/1
+  `hash`, Rebeqah's `/v1/hash/`) and rbq compares it with the local copy and,
+  for a chunk, with its address, so a sync with nothing to send moves almost
+  no data. Damaged or different replicas are still reported. This trusts the
+  peer's word about its own copy; `--distrust-peer` (or
+  `RBQ_DISTRUST_PEER=true`) on `rbq peer push|pull` treats it as possibly
+  lying and downloads every copy to compare it byte for byte.
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.

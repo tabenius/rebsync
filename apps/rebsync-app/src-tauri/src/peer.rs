@@ -385,6 +385,7 @@ fn handle(
                     "owner_only_permissions": caps.owner_only_permissions,
                     "range_reads": caps.range_reads,
                     "max_key_bytes": caps.max_key_bytes,
+                    "hashes": true,
                 },
             });
             respond(
@@ -424,6 +425,41 @@ fn handle(
                         true,
                     )
                 }
+                Err(e) => respond(request, status_of(&e), error(&e.to_string()), true, true),
+            }
+        }
+        // The SHA-256 of a stored object, so a client verifies a copy both
+        // sides hold without downloading it. Read in 1 MiB windows.
+        (Method::Get, p) if p.starts_with("/v1/hash/") => {
+            let key = match decode(&p["/v1/hash/".len()..])
+                .ok_or_else(|| StorageError::InvalidKey("bad percent-encoding".into()))
+                .and_then(|k| ObjectKey::parse(&k))
+            {
+                Ok(key) => key,
+                Err(e) => return respond(request, 400, error(&e.to_string()), true, true),
+            };
+            if rebsync_core::peer::validate_peer_key(key.as_str()).is_err() {
+                return respond(request, 400, error("not a canonical layer object"), true, true);
+            }
+            let hashed = store.head(&key).and_then(|meta| {
+                let mut hasher = Sha256::new();
+                let mut at = 0;
+                while at < meta.size {
+                    let next = (at + 1024 * 1024).min(meta.size);
+                    hasher.update(store.get_range(&key, at..next)?);
+                    at = next;
+                }
+                Ok((format!("{:x}", hasher.finalize()), meta.size))
+            });
+            match hashed {
+                Ok((sha256, size)) => respond(
+                    request,
+                    200,
+                    serde_json::to_vec(&serde_json::json!({"sha256": sha256, "size": size}))
+                        .unwrap_or_default(),
+                    true,
+                    true,
+                ),
                 Err(e) => respond(request, status_of(&e), error(&e.to_string()), true, true),
             }
         }
