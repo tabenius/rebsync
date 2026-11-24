@@ -859,6 +859,13 @@ rbq peer selftest
   relay or mesh link needs.
 - **TCP is not encrypted.** `serve` warns when a TCP listen address is
   reachable beyond this host (including `0.0.0.0`); prefer `quic://`.
+- **Large objects stream and resume.** A server reads an object body from
+  storage in 1 MiB windows while it sends it, so serving a 64 MiB chunk does
+  not hold 64 MiB in memory. Clients fetch objects in 4 MiB `get_range`
+  windows; if the link drops mid-object (a mesh hop, a phone changing
+  networks), the client reconnects and resumes from the bytes it already has.
+  A peer's own refusal is never retried. Uploads are still sent whole (at most
+  64 MiB each, at most eight in flight per server).
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.

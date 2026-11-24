@@ -314,6 +314,14 @@ pub enum Request {
     Get {
         key: String,
     },
+    /// Up to `length` bytes of an object from `offset`. The reply's `total`
+    /// is the object's size, so a client can fetch a large object in
+    /// windows and resume after a broken link.
+    GetRange {
+        key: String,
+        offset: u64,
+        length: u64,
+    },
     Put {
         key: String,
         size: u64,
@@ -337,6 +345,11 @@ fn describe_request(request: &Request) -> String {
         Request::Status => "status".into(),
         Request::List { prefix, .. } => format!("list {}", short(prefix)),
         Request::Get { key } => format!("get {}", short(key)),
+        Request::GetRange {
+            key,
+            offset,
+            length,
+        } => format!("get {} [{offset}+{length}]", short(key)),
         Request::Put { key, size } => format!("put {} ({size} bytes)", short(key)),
         Request::Pair { .. } => "pair (one-time secret)".into(),
     }
@@ -356,6 +369,9 @@ pub struct Capabilities {
     pub max_key_bytes: usize,
     pub max_object_bytes: u64,
     pub datagram_chunk_bytes: u64,
+    /// The server answers `get_range` (absent from older servers).
+    #[serde(default)]
+    pub ranged_get: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -376,7 +392,11 @@ pub enum Response {
         next: Option<String>,
     },
     Object {
+        /// Bytes in the body that follows.
         size: u64,
+        /// For a range: the whole object's size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
     },
     Stored {
         created: bool,
@@ -405,6 +425,95 @@ struct ResponseEnvelope {
     schema: String,
     #[serde(flatten)]
     response: Response,
+}
+
+/// The peer answered with an error (a "no", as opposed to a broken link):
+/// retrying the same request will not help.
+#[derive(Debug, Clone)]
+pub struct PeerError {
+    pub code: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for PeerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "peer error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for PeerError {}
+
+/// Largest range one `get_range` reply carries.
+const MAX_RANGE: u64 = 16 * 1024 * 1024;
+/// Window a server reads from storage while it writes an object body, so a
+/// 64 MiB object never needs 64 MiB of server memory.
+const STREAM_WINDOW: u64 = 1024 * 1024;
+/// Window a client fetches large objects in; a broken link loses at most
+/// this much.
+const CLIENT_WINDOW: u64 = 4 * 1024 * 1024;
+/// Attempts per window before a download gives up.
+const WINDOW_ATTEMPTS: usize = 4;
+
+/// An object body a server sends: in memory, or read from storage window by
+/// window as it is written.
+pub(crate) enum Body {
+    Bytes(Vec<u8>),
+    Stored {
+        key: ObjectKey,
+        offset: u64,
+        length: u64,
+    },
+}
+
+impl Body {
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Stored { length, .. } => *length,
+        }
+    }
+
+    /// The whole body in memory (for transports that cannot stream).
+    pub(crate) fn materialize(self, storage: &dyn ObjectStorage) -> Result<Vec<u8>> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes),
+            Self::Stored {
+                key,
+                offset,
+                length,
+            } => Ok(storage.get_range(&key, offset..offset + length)?),
+        }
+    }
+
+    /// Call `write` with consecutive pieces of at most [`STREAM_WINDOW`].
+    pub(crate) fn for_each_window(
+        &self,
+        storage: &dyn ObjectStorage,
+        mut write: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        match self {
+            Self::Bytes(bytes) => write(bytes),
+            Self::Stored {
+                key,
+                offset,
+                length,
+            } => {
+                let end = offset + length;
+                let mut at = *offset;
+                while at < end {
+                    let next = (at + STREAM_WINDOW).min(end);
+                    let window = storage.get_range(key, at..next)?;
+                    ensure!(
+                        window.len() as u64 == next - at,
+                        "object changed size while it was read"
+                    );
+                    write(&window)?;
+                    at = next;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 fn error_response(code: u16, message: impl Into<String>) -> Response {
@@ -476,7 +585,10 @@ impl Scopes {
     pub fn allows(self, request: &Request) -> bool {
         match request {
             Request::Put { .. } => self.write,
-            Request::Status | Request::List { .. } | Request::Get { .. } => self.read,
+            Request::Status
+            | Request::List { .. }
+            | Request::Get { .. }
+            | Request::GetRange { .. } => self.read,
             // Pairing is decided by its secret, never by an existing grant.
             Request::Pair { .. } => false,
         }
@@ -662,12 +774,65 @@ impl Service {
                 max_key_bytes: caps.max_key_bytes,
                 max_object_bytes: MAX_OBJECT,
                 datagram_chunk_bytes: CHUNK as u64,
+                ranged_get: true,
             },
         }
     }
 
+    /// `length` bytes of `key` from `offset` (clamped to the object), and the
+    /// object's size. Where storage reads ranges, the body is read window by
+    /// window while it is sent instead of being loaded whole.
+    fn object(&self, key: &str, offset: u64, length: u64) -> Result<(Body, u64), Response> {
+        if let Err(error) = peer::admissible_key(key) {
+            return Err(error_response(400, format!("{error:#}")));
+        }
+        let key = ObjectKey::parse(key).map_err(|error| storage_response(&error))?;
+        if self.storage.capabilities().range_reads {
+            let total = self
+                .storage
+                .head(&key)
+                .map_err(|error| storage_response(&error))?
+                .size;
+            if offset > total {
+                return Err(error_response(
+                    416,
+                    "range starts past the end of the object",
+                ));
+            }
+            let length = length.min(total - offset);
+            return Ok((
+                Body::Stored {
+                    key,
+                    offset,
+                    length,
+                },
+                total,
+            ));
+        }
+        let bytes = self
+            .storage
+            .get(&key)
+            .map_err(|error| storage_response(&error))?;
+        let total = bytes.len() as u64;
+        if offset > total {
+            return Err(error_response(
+                416,
+                "range starts past the end of the object",
+            ));
+        }
+        let end = offset + length.min(total - offset);
+        Ok((
+            Body::Bytes(bytes[offset as usize..end as usize].to_vec()),
+            total,
+        ))
+    }
+
+    pub(crate) fn storage(&self) -> &dyn ObjectStorage {
+        self.storage.as_ref()
+    }
+
     /// Handle one validated request. Returns an optional body for `get`.
-    fn handle(&self, request: &Request, body: Option<&[u8]>) -> (Response, Option<Vec<u8>>) {
+    fn handle(&self, request: &Request, body: Option<&[u8]>) -> (Response, Option<Body>) {
         match request {
             Request::Pair { .. } => (
                 error_response(400, "pairing is only offered over quic://"),
@@ -708,20 +873,30 @@ impl Service {
                     Err(error) => (storage_response(&error), None),
                 }
             }
-            Request::Get { key } => {
-                if let Err(error) = peer::admissible_key(key) {
-                    return (error_response(400, format!("{error:#}")), None);
-                }
-                match ObjectKey::parse(key).and_then(|key| self.storage.get(&key)) {
-                    Ok(bytes) => (
-                        Response::Object {
-                            size: bytes.len() as u64,
-                        },
-                        Some(bytes),
-                    ),
-                    Err(error) => (storage_response(&error), None),
-                }
-            }
+            Request::Get { key } => match self.object(key, 0, u64::MAX) {
+                Ok((body, _)) => (
+                    Response::Object {
+                        size: body.len(),
+                        total: None,
+                    },
+                    Some(body),
+                ),
+                Err(response) => (response, None),
+            },
+            Request::GetRange {
+                key,
+                offset,
+                length,
+            } => match self.object(key, *offset, (*length).min(MAX_RANGE)) {
+                Ok((body, total)) => (
+                    Response::Object {
+                        size: body.len(),
+                        total: Some(total),
+                    },
+                    Some(body),
+                ),
+                Err(response) => (response, None),
+            },
             Request::Put { key, size } => {
                 let Some(body) = body else {
                     return (error_response(400, "put without a body"), None);
@@ -774,6 +949,29 @@ pub trait Link: Send {
     fn list(&mut self, prefix: &str, after: &str, limit: usize) -> Result<ListingPage>;
     fn get(&mut self, key: &str) -> Result<Vec<u8>>;
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool>;
+    /// Up to `length` bytes of `key` from `offset`, and the object's size.
+    /// Servers advertise support with `capabilities.ranged_get`.
+    fn get_range(&mut self, key: &str, offset: u64, length: u64) -> Result<(Vec<u8>, u64)>;
+}
+
+/// Shared by every link: decode a `get_range` exchange.
+fn range_reply(reply: (Response, Option<Vec<u8>>), offset: u64) -> Result<(Vec<u8>, u64)> {
+    match reply {
+        (
+            Response::Object {
+                size,
+                total: Some(total),
+            },
+            Some(body),
+        ) => {
+            ensure!(
+                body.len() as u64 == size && offset.saturating_add(size) <= total,
+                "peer returned an inconsistent range"
+            );
+            Ok((body, total))
+        }
+        _ => bail!("peer returned no range"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1047,14 +1245,14 @@ impl StreamLink {
             envelope.schema
         );
         match envelope.response {
-            Response::Object { size } => {
+            Response::Object { size, total } => {
                 ensure!(size <= MAX_OBJECT, "peer announced an oversized object");
-                let body = read_frame(&mut self.stream, MAX_OBJECT as usize)?
+                let body = read_frame(&mut self.stream, size as usize)?
                     .context("peer closed before sending the object body")?;
                 ensure!(body.len() as u64 == size, "object body length mismatch");
-                Ok((Response::Object { size }, Some(body)))
+                Ok((Response::Object { size, total }, Some(body)))
             }
-            Response::Error { code, message } => bail!("peer error {code}: {message}"),
+            Response::Error { code, message } => Err(PeerError { code, message }.into()),
             other => Ok((other, None)),
         }
     }
@@ -1106,6 +1304,18 @@ impl Link for StreamLink {
             (Response::Object { .. }, Some(body)) => Ok(body),
             _ => bail!("peer returned no object body"),
         }
+    }
+
+    fn get_range(&mut self, key: &str, offset: u64, length: u64) -> Result<(Vec<u8>, u64)> {
+        let reply = self.exchange(
+            Request::GetRange {
+                key: key.into(),
+                offset,
+                length,
+            },
+            None,
+        )?;
+        range_reply(reply, offset)
     }
 
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
@@ -1256,18 +1466,22 @@ impl DatagramLink {
                         envelope.schema
                     );
                     match envelope.response {
-                        Response::Object { size: announced } => {
+                        Response::Object {
+                            size: announced,
+                            total,
+                        } => {
                             ensure!(announced <= MAX_OBJECT, "oversized object announcement");
                             expected = Some(announced as usize);
+                            response = Some(Response::Object {
+                                size: announced,
+                                total,
+                            });
                         }
                         Response::Error { code, message } => {
-                            bail!("peer error {code}: {message}")
+                            return Err(PeerError { code, message }.into());
                         }
                         other => return Ok((other, None)),
                     }
-                    response = Some(Response::Object {
-                        size: expected.unwrap() as u64,
-                    });
                     if expected == Some(0) {
                         return Ok((response.unwrap(), Some(Vec::new())));
                     }
@@ -1353,6 +1567,18 @@ impl Link for DatagramLink {
         }
     }
 
+    fn get_range(&mut self, key: &str, offset: u64, length: u64) -> Result<(Vec<u8>, u64)> {
+        let reply = self.exchange(
+            Request::GetRange {
+                key: key.into(),
+                offset,
+                length,
+            },
+            None,
+        )?;
+        range_reply(reply, offset)
+    }
+
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
         match self
             .exchange(
@@ -1377,14 +1603,25 @@ impl Link for DatagramLink {
 // The peer adapter used by push/pull
 // ---------------------------------------------------------------------------
 
+/// Opens a fresh link to the same peer after the old one broke.
+type Reconnect = Box<dyn Fn() -> Result<Box<dyn Link>> + Send + Sync>;
+
 pub struct TransportPeer {
     link: Mutex<Box<dyn Link>>,
     description: String,
+    reconnect: Option<Reconnect>,
+    /// Whether the server answers `get_range`, learned once.
+    ranged: std::sync::OnceLock<bool>,
 }
 
 impl TransportPeer {
     pub fn connect(target: &Target, token: String) -> Result<Self> {
-        Ok(Self::from_link(connect(target, token)?))
+        let link = connect(target, token.clone())?;
+        let target = target.clone();
+        Ok(Self::from_link(
+            link,
+            Some(Box::new(move || connect(&target, token.clone()))),
+        ))
     }
 
     /// Like [`connect`], presenting this device's key over QUIC; see
@@ -1395,14 +1632,94 @@ impl TransportPeer {
         token: Option<String>,
         identity: &quic::Identity,
     ) -> Result<Self> {
-        Ok(Self::from_link(connect_paired(target, token, identity)?))
+        let link = connect_paired(target, token.clone(), identity)?;
+        let (target, identity) = (target.clone(), identity.clone());
+        Ok(Self::from_link(
+            link,
+            Some(Box::new(move || {
+                connect_paired(&target, token.clone(), &identity)
+            })),
+        ))
     }
 
-    fn from_link(link: Box<dyn Link>) -> Self {
+    fn from_link(link: Box<dyn Link>, reconnect: Option<Reconnect>) -> Self {
         let description = link.describe();
         Self {
             link: Mutex::new(link),
             description,
+            reconnect,
+            ranged: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Run `operation` on the link. A broken link (any failure that is not
+    /// the peer's own answer) is replaced by a fresh connection and the
+    /// operation retried, a few times with backoff. A [`PeerError`] is the
+    /// peer saying no and is never retried.
+    fn with_retry<T>(&self, mut operation: impl FnMut(&mut dyn Link) -> Result<T>) -> Result<T> {
+        let mut attempt = 0;
+        loop {
+            let result = operation(self.lock()?.as_mut());
+            let error = match result {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            };
+            attempt += 1;
+            let Some(reconnect) = &self.reconnect else {
+                return Err(error);
+            };
+            if error.downcast_ref::<PeerError>().is_some() || attempt >= WINDOW_ATTEMPTS {
+                return Err(error);
+            }
+            thread::sleep(Duration::from_millis(250 << attempt.min(4)));
+            // A failed reconnect counts as an attempt; the old link stays.
+            if let Ok(link) = reconnect() {
+                *self.lock()? = link;
+            }
+        }
+    }
+
+    fn ranged(&self) -> Result<bool> {
+        if let Some(ranged) = self.ranged.get() {
+            return Ok(*ranged);
+        }
+        let ranged = self
+            .with_retry(|link| link.status())?
+            .capabilities
+            .ranged_get;
+        Ok(*self.ranged.get_or_init(|| ranged))
+    }
+
+    /// Fetch an object in [`CLIENT_WINDOW`] pieces. If the link breaks
+    /// mid-object (routine on a mesh or a mobile link), reconnect and resume
+    /// from the bytes already received instead of starting over.
+    fn get_resumable(&self, key: &str) -> Result<Vec<u8>> {
+        let mut body: Vec<u8> = Vec::new();
+        let mut total = None;
+        loop {
+            let offset = body.len() as u64;
+            let (window, whole) =
+                self.with_retry(|link| link.get_range(key, offset, CLIENT_WINDOW))?;
+            match total {
+                None => {
+                    ensure!(whole <= MAX_OBJECT, "peer announced an oversized object");
+                    total = Some(whole);
+                    body.reserve_exact(whole as usize);
+                }
+                Some(total) => ensure!(total == whole, "object changed size during download"),
+            }
+            ensure!(
+                !window.is_empty() || offset == whole,
+                "peer returned an empty range before the end"
+            );
+            body.extend_from_slice(&window);
+            if body.len() as u64 >= whole {
+                ensure!(
+                    body.len() as u64 == whole,
+                    "peer returned more than the object"
+                );
+                return Ok(body);
+            }
         }
     }
 
@@ -1419,7 +1736,8 @@ impl PeerApi for TransportPeer {
     }
 
     fn status(&self) -> Result<Value> {
-        let status = self.lock()?.status()?;
+        let status = self.with_retry(|link| link.status())?;
+        let _ = self.ranged.set(status.capabilities.ranged_get);
         Ok(serde_json::json!({
             "protocol": status.protocol,
             "version": status.version,
@@ -1429,12 +1747,11 @@ impl PeerApi for TransportPeer {
     }
 
     fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
-        let mut link = self.lock()?;
         let mut found = BTreeMap::new();
         let mut after = String::new();
-        let limit = link.list_limit(PAGE);
+        let limit = self.lock()?.list_limit(PAGE);
         for _ in 0..10_000 {
-            let page = link.list(prefix, &after, limit)?;
+            let page = self.with_retry(|link| link.list(prefix, &after, limit))?;
             // A hostile peer must not be able to grow this map without bound:
             // the same caps the HTTP peer client applies.
             ensure!(
@@ -1472,11 +1789,17 @@ impl PeerApi for TransportPeer {
     }
 
     fn get(&self, key: &str) -> Result<Vec<u8>> {
-        self.lock()?.get(key)
+        if self.ranged()? {
+            self.get_resumable(key)
+        } else {
+            self.with_retry(|link| link.get(key))
+        }
     }
 
+    /// Create-if-absent, so retrying after a lost reply is safe: a put that
+    /// did land reports "already present" and push compares the bytes.
     fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
-        self.lock()?.put(key, bytes)
+        self.with_retry(|link| link.put(key, bytes))
     }
 }
 
@@ -1785,7 +2108,7 @@ fn serve_connection(
         };
         let (response, out) = service.handle(&envelope.request, body.as_deref());
         let received = (frame.len() + body.as_ref().map_or(0, Vec::len)) as u64;
-        let Ok(sent) = send_response(stream, out.as_deref(), response) else {
+        let Ok(sent) = send_body(stream, out.as_ref(), response, service.storage()) else {
             return;
         };
         service.observe(
@@ -1798,6 +2121,33 @@ fn serve_connection(
             sent,
         );
     }
+}
+
+/// Send a response whose body may be read from storage window by window as
+/// it is written; returns the bytes written, frame headers included. A
+/// storage failure mid-body ends the connection (the client sees a short
+/// body), since a frame already announced cannot be taken back.
+fn send_body(
+    stream: &mut Stream,
+    body: Option<&Body>,
+    response: Response,
+    storage: &dyn ObjectStorage,
+) -> Result<u64> {
+    let envelope = serde_json::to_vec(&ResponseEnvelope {
+        schema: PROTOCOL.into(),
+        response,
+    })?;
+    write_frame(stream, &envelope, MAX_CONTROL)?;
+    let mut sent = 4 + envelope.len() as u64;
+    if let Some(body) = body {
+        let length = body.len();
+        ensure!(length <= MAX_OBJECT, "object body exceeds the limit");
+        stream.write_all(&(length as u32).to_be_bytes())?;
+        body.for_each_window(storage, |window| Ok(stream.write_all(window)?))?;
+        stream.flush()?;
+        sent += 4 + length;
+    }
+    Ok(sent)
 }
 
 /// Send a response; returns the bytes written, frame headers included.
@@ -1911,7 +2261,7 @@ fn serve_datagrams(
                     let expected = *size as usize;
                     if expected == 0 {
                         let (response, out) = service.handle(&envelope.request, Some(&[]));
-                        let _ = send_datagram(socket, &addr, id, response, out);
+                        reply_body(socket, &addr, id, service, response, out);
                         continue;
                     }
                     let total = expected.div_ceil(CHUNK) as u32;
@@ -1956,7 +2306,7 @@ fn serve_datagrams(
                     continue;
                 }
                 let (response, out) = service.handle(&envelope.request, None);
-                let _ = send_datagram(socket, &addr, id, response, out);
+                reply_body(socket, &addr, id, service, response, out);
             }
             KIND_CHUNK => {
                 let Some(assembly) = assemblies.get_mut(&key) else {
@@ -1989,7 +2339,7 @@ fn serve_datagrams(
                 if assembly.body.len() == assembly.expected {
                     let assembly = assemblies.remove(&key).expect("checked above");
                     let (response, out) = service.handle(&assembly.request, Some(&assembly.body));
-                    let _ = send_datagram(socket, &addr, id, response, out);
+                    reply_body(socket, &addr, id, service, response, out);
                 }
             }
             _ => {}
@@ -2001,6 +2351,27 @@ fn serve_datagrams(
 fn purge_assemblies(assemblies: &mut std::collections::HashMap<PathBuf, Assembly>) {
     let now = Instant::now();
     assemblies.retain(|_, assembly| now.duration_since(assembly.at) < ASSEMBLY_TTL);
+}
+
+/// Datagram replies are assembled in memory (a local socket, and a body of at
+/// most [`MAX_RANGE`] for ranges or [`MAX_OBJECT`] for whole objects).
+#[cfg(unix)]
+fn reply_body(
+    socket: &std::os::unix::net::UnixDatagram,
+    addr: &std::os::unix::net::SocketAddr,
+    id: u32,
+    service: &Service,
+    response: Response,
+    body: Option<Body>,
+) {
+    let (response, body) = match body
+        .map(|body| body.materialize(service.storage()))
+        .transpose()
+    {
+        Ok(body) => (response, body),
+        Err(error) => (error_response(500, format!("read failed: {error:#}")), None),
+    };
+    let _ = send_datagram(socket, addr, id, response, body);
 }
 
 #[cfg(unix)]
@@ -2454,14 +2825,13 @@ mod tests {
         fn put(&mut self, _: &str, _: &[u8]) -> Result<bool> {
             bail!("unused")
         }
+        fn get_range(&mut self, _: &str, _: u64, _: u64) -> Result<(Vec<u8>, u64)> {
+            bail!("unused")
+        }
     }
 
     fn listing(page: ListingPage) -> Result<BTreeMap<String, u64>> {
-        TransportPeer {
-            link: Mutex::new(Box::new(FakeLink(page))),
-            description: "fake".into(),
-        }
-        .list("mneme/")
+        TransportPeer::from_link(Box::new(FakeLink(page)), None).list("mneme/")
     }
 
     fn chunk_key(n: u8) -> String {
@@ -2716,6 +3086,169 @@ mod tests {
                 ("127.0.0.1".into(), "tcp", "status".into(), false, true),
             ]
         );
+    }
+
+    /// A valid, incompressible chunk of `size` bytes and its key.
+    fn big_chunk(size: usize) -> (String, Vec<u8>) {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let bytes: Vec<u8> = (0..size)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let digest = crate::wire::sha256_hex(&bytes);
+        (
+            format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]),
+            bytes,
+        )
+    }
+
+    #[test]
+    fn large_objects_stream_and_arrive_whole_over_every_transport() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::FsObjectStorage::open(root.path().join("store")).unwrap());
+        let (key, bytes) = big_chunk(20 * 1024 * 1024 + 123);
+        storage
+            .put(&ObjectKey::parse(&key).unwrap(), &bytes)
+            .unwrap();
+        let mut targets = vec![Target::Tcp {
+            host: "127.0.0.1".into(),
+            port: 0,
+        }];
+        #[cfg(unix)]
+        {
+            targets.push(Target::Unix {
+                path: root.path().join("s.sock"),
+            });
+            targets.push(Target::UnixDatagram {
+                path: root.path().join("d.sock"),
+            });
+        }
+        #[cfg(feature = "peer-quic")]
+        targets.push(Target::Quic {
+            host: "127.0.0.1".into(),
+            port: 0,
+            peer: None,
+        });
+        for target in targets {
+            let service = Service::new(storage.clone(), token(), Arc::new(AtomicBool::new(false)));
+            let server = match &target {
+                #[cfg(feature = "peer-quic")]
+                Target::Quic { host, port, .. } => {
+                    Server::bind_quic(host, *port, service, &quic::Identity::generate().unwrap())
+                        .unwrap()
+                }
+                _ => Server::bind(&target, service, false).unwrap(),
+            };
+            let peer = TransportPeer::connect(&server.target, token()).unwrap();
+            assert!(peer.ranged().unwrap(), "{}", target.describe());
+            assert!(peer.get(&key).unwrap() == bytes, "{}", target.describe());
+            drop(peer);
+            assert!(server.shutdown());
+        }
+    }
+
+    /// A TCP relay that cuts its first connection after `cut_after` bytes
+    /// from the server, like a mesh link dropping mid-transfer. Returns the
+    /// relay port and a count of connections it accepted.
+    fn flaky_relay(upstream: u16, cut_after: usize) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(mut client) = client else { return };
+                let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+                let mut server = TcpStream::connect(("127.0.0.1", upstream)).unwrap();
+                let (mut client_read, mut server_write) =
+                    (client.try_clone().unwrap(), server.try_clone().unwrap());
+                thread::spawn(move || {
+                    let _ = std::io::copy(&mut client_read, &mut server_write);
+                });
+                thread::spawn(move || {
+                    let mut buffer = [0_u8; 64 * 1024];
+                    let mut relayed = 0;
+                    loop {
+                        let n = match server.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if first && relayed + n > cut_after {
+                            break;
+                        }
+                        if client.write_all(&buffer[..n]).is_err() {
+                            break;
+                        }
+                        relayed += n;
+                    }
+                    let _ = client.shutdown(Shutdown::Both);
+                    let _ = server.shutdown(Shutdown::Both);
+                });
+            }
+        });
+        (port, accepted)
+    }
+
+    #[test]
+    fn a_download_resumes_after_the_link_breaks() {
+        #[derive(Default)]
+        struct Ranges(Mutex<Vec<String>>);
+        impl Observer for Ranges {
+            fn request(&self, r: &RequestRecord<'_>) {
+                self.0.lock().unwrap().push(r.request.clone());
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::FsObjectStorage::open(root.path().join("store")).unwrap());
+        let (key, bytes) = big_chunk(18 * 1024 * 1024);
+        storage
+            .put(&ObjectKey::parse(&key).unwrap(), &bytes)
+            .unwrap();
+        let ranges = Arc::new(Ranges::default());
+        let service = Service::new(storage, token(), Arc::new(AtomicBool::new(false)))
+            .with_observer(ranges.clone());
+        let server = Server::bind(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            service,
+            false,
+        )
+        .unwrap();
+        let Target::Tcp { port, .. } = server.target else {
+            unreachable!()
+        };
+        // The relay drops the first connection 6 MiB into the download.
+        let (relay, accepted) = flaky_relay(port, 6 * 1024 * 1024);
+        let peer = TransportPeer::connect(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: relay,
+            },
+            token(),
+        )
+        .unwrap();
+        let fetched = peer.get(&key).unwrap();
+        assert!(fetched == bytes, "resumed download must be byte-identical");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "one reconnect");
+        let seen = ranges.0.lock().unwrap().clone();
+        // Only the window in flight was fetched again, not the whole object.
+        let windows = seen.iter().filter(|r| r.starts_with("get ")).count();
+        assert!(
+            (5..=7).contains(&windows),
+            "18 MiB in 4 MiB windows plus one retried: {seen:?}"
+        );
+        // A peer's "no" is not a broken link: no reconnect for a missing object.
+        let (missing, _) = big_chunk(10);
+        assert!(peer.get(&missing).is_err());
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        drop(peer);
+        server.stop();
     }
 
     #[test]

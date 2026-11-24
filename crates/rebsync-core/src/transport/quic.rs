@@ -23,9 +23,9 @@
 //! lacks: retransmission, congestion control and connection migration.
 
 use super::{
-    AUTH_DEADLINE, IO_TIMEOUT, Link, ListingPage, MAX_CONNECTIONS, MAX_CONTROL, MAX_LIST,
-    MAX_OBJECT, MAX_REQUEST, PROTOCOL, Request, RequestEnvelope, Response, ResponseEnvelope,
-    Scopes, Server, Service, Status, Target, error_response,
+    AUTH_DEADLINE, Body, IO_TIMEOUT, Link, ListingPage, MAX_CONNECTIONS, MAX_CONTROL, MAX_LIST,
+    MAX_OBJECT, MAX_REQUEST, PROTOCOL, PeerError, Request, RequestEnvelope, Response,
+    ResponseEnvelope, STREAM_WINDOW, Scopes, Server, Service, Status, Target, error_response,
 };
 use anyhow::{Context, Result, bail, ensure};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -99,6 +99,16 @@ pub struct Identity {
     certificate: CertificateDer<'static>,
     key: PrivatePkcs8KeyDer<'static>,
     peer: String,
+}
+
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self {
+            certificate: self.certificate.clone(),
+            key: self.key.clone_key(),
+            peer: self.peer.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Identity {
@@ -566,15 +576,15 @@ impl QuicLink {
                     envelope.schema
                 );
                 match envelope.response {
-                    Response::Object { size } => {
+                    Response::Object { size, total } => {
                         ensure!(size <= MAX_OBJECT, "peer announced an oversized object");
                         let body = read_frame(&mut recv, size as usize)
                             .await?
                             .context("peer closed before sending the object body")?;
                         ensure!(body.len() as u64 == size, "object body length mismatch");
-                        Ok((Response::Object { size }, Some(body)))
+                        Ok((Response::Object { size, total }, Some(body)))
                     }
-                    Response::Error { code, message } => bail!("peer error {code}: {message}"),
+                    Response::Error { code, message } => Err(PeerError { code, message }.into()),
                     other => Ok((other, None)),
                 }
             })
@@ -662,6 +672,18 @@ impl Link for QuicLink {
             (Response::Object { .. }, Some(body)) => Ok(body),
             _ => bail!("peer returned no object body"),
         }
+    }
+
+    fn get_range(&mut self, key: &str, offset: u64, length: u64) -> Result<(Vec<u8>, u64)> {
+        let reply = self.exchange(
+            Request::GetRange {
+                key: key.into(),
+                offset,
+                length,
+            },
+            None,
+        )?;
+        super::range_reply(reply, offset)
     }
 
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
@@ -958,9 +980,71 @@ async fn serve_stream(
         (request, response, out, service)
     })
     .await?;
-    let sent = respond(&mut send, response, out).await?;
+    let sent = match out {
+        Some(body) => respond_body(&mut send, response, body, &service).await?,
+        None => respond(&mut send, response, None).await?,
+    };
     service.observe(peer, "quic", Some(&request), true, false, received, sent);
     Ok(true)
+}
+
+/// Send a response with an object body read from storage one window at a
+/// time (off the runtime's workers), so serving a 64 MiB object holds about
+/// [`STREAM_WINDOW`] in memory. Each window must be written within
+/// [`IO_TIMEOUT`]; a slow but live peer is fine, a stalled one is dropped.
+async fn respond_body(
+    send: &mut quinn::SendStream,
+    response: Response,
+    body: Body,
+    service: &Service,
+) -> Result<u64> {
+    let envelope = serde_json::to_vec(&ResponseEnvelope {
+        schema: PROTOCOL.into(),
+        response,
+    })?;
+    let length = body.len();
+    ensure!(length <= MAX_OBJECT, "object body exceeds the limit");
+    tokio::time::timeout(IO_TIMEOUT, async {
+        write_frame(send, &envelope, MAX_CONTROL).await?;
+        send.write_all(&(length as u32).to_be_bytes()).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("peer did not read the reply in time")??;
+    match body {
+        Body::Bytes(bytes) => {
+            tokio::time::timeout(IO_TIMEOUT, send.write_all(&bytes))
+                .await
+                .context("peer did not read the reply in time")??;
+        }
+        Body::Stored {
+            key,
+            offset,
+            length,
+        } => {
+            let end = offset + length;
+            let mut at = offset;
+            while at < end {
+                let next = (at + STREAM_WINDOW).min(end);
+                let (service, window_key) = (service.clone(), key.clone());
+                let window = tokio::task::spawn_blocking(move || {
+                    service.storage().get_range(&window_key, at..next)
+                })
+                .await??;
+                ensure!(
+                    window.len() as u64 == next - at,
+                    "object changed size while it was read"
+                );
+                tokio::time::timeout(IO_TIMEOUT, send.write_all(&window))
+                    .await
+                    .context("peer did not read the reply in time")??;
+                at = next;
+            }
+        }
+    }
+    send.finish()?;
+    let _ = tokio::time::timeout(IO_TIMEOUT, send.stopped()).await;
+    Ok(4 + envelope.len() as u64 + 4 + length)
 }
 
 /// Send a response; returns the bytes written, frame headers included.
