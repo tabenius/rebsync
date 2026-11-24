@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store", "peer-quic"] }
+rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store", "peer-quic", "peer-http"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

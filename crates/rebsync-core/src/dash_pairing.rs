@@ -523,40 +523,31 @@ pub enum Outcome {
     StillPending,
 }
 
-/// Wait for approval, then claim and store the credential. `tick` is called
-/// before each poll, for progress. A lost claim response, or a credential
-/// that cannot be stored, is revoked by cancelling; that is reported as an
-/// error, with the pending pairing kept if even the cancel failed.
-pub fn wait_and_claim(
+/// Check the pairing once: if Dash approved it, claim the credential and
+/// store it. `Outcome::StillPending` means "not yet; ask again later" (also
+/// when the check itself was lost in transport). A lost claim response, or a
+/// credential that cannot be stored, is revoked by cancelling; that is
+/// reported as an error, with the pending pairing kept if even the cancel
+/// failed.
+pub fn step(
     dash: &Dash,
     pending: &Pending,
     store: &FileStore,
     pending_store: &PendingStore,
-    poll: Duration,
-    timeout: Duration,
-    mut tick: impl FnMut(State),
-) -> Result<Outcome> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let state = match status(dash, pending) {
-            Ok(state) => state,
-            // A dropped poll is harmless; keep waiting until the deadline.
-            Err(error) if error.is::<Lost>() => State::Pending,
-            Err(error) => return Err(error),
-        };
-        tick(state);
-        match state {
-            State::Approved => break,
-            State::Pending => {}
-            ended => {
-                pending_store.remove(&pending.pairing_id)?;
-                return Ok(Outcome::Ended(ended));
-            }
+) -> Result<(State, Outcome)> {
+    let state = match status(dash, pending) {
+        Ok(state) => state,
+        // A dropped poll is harmless: nothing changed on our side.
+        Err(error) if error.is::<Lost>() => return Ok((State::Pending, Outcome::StillPending)),
+        Err(error) => return Err(error),
+    };
+    match state {
+        State::Pending => return Ok((state, Outcome::StillPending)),
+        State::Approved => {}
+        ended => {
+            pending_store.remove(&pending.pairing_id)?;
+            return Ok((ended, Outcome::Ended(ended)));
         }
-        if Instant::now() + poll > deadline {
-            return Ok(Outcome::StillPending);
-        }
-        std::thread::sleep(poll);
     }
     let issued = match claim(dash, pending)? {
         Claim::Issued(issued) => issued,
@@ -580,7 +571,29 @@ pub fn wait_and_claim(
         ));
     }
     pending_store.remove(&pending.pairing_id)?;
-    Ok(Outcome::Stored(descriptor))
+    Ok((State::Claimed, Outcome::Stored(descriptor)))
+}
+
+/// [`step`] every `poll` until the pairing is stored or ended, or `timeout`
+/// passes. `tick` sees each state, for progress.
+pub fn wait_and_claim(
+    dash: &Dash,
+    pending: &Pending,
+    store: &FileStore,
+    pending_store: &PendingStore,
+    poll: Duration,
+    timeout: Duration,
+    mut tick: impl FnMut(State),
+) -> Result<Outcome> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (state, outcome) = step(dash, pending, store, pending_store)?;
+        tick(state);
+        if !matches!(outcome, Outcome::StillPending) || Instant::now() + poll > deadline {
+            return Ok(outcome);
+        }
+        std::thread::sleep(poll);
+    }
 }
 
 fn revoke_lost(

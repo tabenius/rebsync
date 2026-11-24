@@ -85,6 +85,24 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
 - **Background work is limited.** There is no background service. Sharing runs
   while the app is open.
 
+## Pairing with Dash
+
+**Pair with Dash** gives this phone its own credential to your private RBQ
+repository at Dash, without typing or copying a token:
+
+1. The phone shows a matching code and an approval link (and its QR code).
+2. Open the link in Dash on any device where you are signed in, check that Dash
+   shows the same code, and approve with your passkey.
+3. The phone collects its credential once and lists it with **Check** (asks
+   Dash to describe the repository) and **Forget** (stops using it here).
+
+Read-only leaves out `append`. Credentials last 30 days. They are kept in the
+app's private storage (`dash-credentials/`), which Android isolates per app;
+**the app does not encrypt them at rest**, so revoke one under *Paired
+devices* in Dash if the phone is lost. If the approval response is lost on the
+way, the phone cancels the pairing, which revokes the credential; pair again.
+Same flow as `rbq dash pair` (see `docs/DASH-CLI.md`).
+
 ## Build
 
 You need JDK 21, an Android SDK with platform 37 and build-tools 37, NDK
