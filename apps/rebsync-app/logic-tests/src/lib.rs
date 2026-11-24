@@ -5,5 +5,7 @@
 pub mod datastore;
 #[path = "../../src-tauri/src/peer.rs"]
 pub mod peer;
+#[path = "../../src-tauri/src/quic_share.rs"]
+pub mod quic_share;
 #[path = "../../src-tauri/src/volumes.rs"]
 pub mod volumes;

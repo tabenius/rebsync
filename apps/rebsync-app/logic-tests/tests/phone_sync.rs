@@ -38,15 +38,21 @@ fn push_to_phone_then_pull_to_another_machine() {
     let phone: Arc<dyn ObjectStorage> =
         Arc::new(FsObjectStorage::open(t.path().join("phone")).unwrap());
     let shared: SharedStorage = Arc::new(RwLock::new(phone.clone()));
+    let identity = rebsync_core::transport::quic::Identity::generate().unwrap();
     let server = PhoneServer::start(
         0,
         "tok3n".into(),
         shared,
         Arc::new(Clients::default()),
         Arc::new(AtomicBool::new(false)),
+        &identity,
     )
     .unwrap();
-    let connection = format!("rbq+http://127.0.0.1:{}/v1?token=tok3n", server.port);
+    let connection = format!(
+        "rbq+https://127.0.0.1:{}/v1?peer={}&token=tok3n",
+        server.port,
+        identity.peer_id()
+    );
     let client =
         || Peer::connect(peer::parse_connection(&connection, None).unwrap()).with_page_size(7);
     let mut journal = Journal::open(t.path()).unwrap();
@@ -138,8 +144,23 @@ fn push_to_phone_then_pull_to_another_machine() {
 
     // Wrong token is a clear error.
     let bad = Peer::connect(
-        peer::parse_connection(&format!("http://127.0.0.1:{}", server.port), Some("nope")).unwrap(),
+        peer::parse_connection(
+            &format!("https://127.0.0.1:{}?peer={}", server.port, identity.peer_id()),
+            Some("nope"),
+        )
+        .unwrap(),
     );
     assert!(format!("{:#}", bad.status().unwrap_err()).contains("401"));
+    // HTTPS without a pin is refused before connecting; a wrong pin fails
+    // the handshake.
+    assert!(peer::parse_connection(&format!("https://127.0.0.1:{}", server.port), Some("tok3n")).is_err());
+    let impostor = Peer::connect(
+        peer::parse_connection(
+            &format!("https://127.0.0.1:{}?peer={}", server.port, "ab".repeat(32)),
+            Some("tok3n"),
+        )
+        .unwrap(),
+    );
+    assert!(impostor.status().is_err());
     server.stop();
 }

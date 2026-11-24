@@ -1,6 +1,6 @@
 [package]
 name = "rebsync-app"
-version = "0.2.4"
+version = "0.2.5"
 description = "RAGBAZ Rebeqah: Android companion for the rbq preservation core"
 authors = ["rbq contributors"]
 license = "GPL-3.0-or-later"
@@ -17,13 +17,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store"] }
+rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store", "peer-quic"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-log = "2"
-tiny_http = "0.12"
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }
 if-addrs = "0.15"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 getrandom = "0.3"
@@ -33,3 +33,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+
+# tiny_http 0.12.0 with its rustls backend ported to rustls 0.23; upstream has
+# no release off rustls 0.20 (see vendor/tiny_http/README.md).
+[patch.crates-io]
+tiny_http = { path = "../../../vendor/tiny_http" }

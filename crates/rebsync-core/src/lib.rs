@@ -16,6 +16,8 @@ pub mod journal;
 pub mod layer;
 pub mod migration;
 pub mod mneme;
+#[cfg(feature = "peer-transport")]
+pub mod overlay;
 pub mod peer;
 pub mod phone;
 #[cfg(feature = "peer-http")]

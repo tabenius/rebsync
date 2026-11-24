@@ -113,9 +113,20 @@
     <div id="share-on" hidden>
       <div class="row spread small"><span>Token <code id="token">••••••</code></span>
         <span class="row"><button id="reveal">Show</button><button id="copy-token">Copy</button><button id="rotate">New token</button></span></div>
+      <div id="quic-id" class="small muted" hidden></div>
       <div id="connections"></div>
-      <div class="note small">Plain HTTP on the local network: anyone on the same network can see the token.
-        Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.</div>
+      <div class="note small" id="share-note"></div>
+      <div id="pairing" hidden>
+        <h3 class="small" style="margin:14px 0 4px">Paired devices</h3>
+        <p class="muted small" style="margin:0 0 6px">A paired device connects with its own key: no token is
+          shared or sent. Pair one by scanning a one-time code with <code>rbq peer pair join</code>.</p>
+        <div class="row small">
+          <button id="pair-invite">Pair a device</button>
+          <label class="check"><input type="checkbox" id="pair-read-only" /> read-only</label>
+        </div>
+        <div id="invitation"></div>
+        <ul class="clean" id="paired"></ul>
+      </div>
     </div>
   </section>
 
@@ -190,17 +201,33 @@ function renderOverview(o) {
   $("#share-on").hidden = !o.sharing;
   $("#share-off").hidden = o.sharing;
   $("#token").textContent = revealed ?? `${o.token_hint}`;
+  // The QR code and the first button carry the encrypted QUIC string when it
+  // exists; HTTPS (pinned to the same key) is offered beside it.
+  const quic = o.quic_peer_id != null;
+  $("#quic-id").hidden = !quic;
+  $("#quic-id").innerHTML = quic
+    ? `Encrypted sharing on UDP port ${esc(o.quic_port)}. Phone key <code class="mono">${esc(o.quic_peer_id.slice(0, 16))}…</code>
+       — check it matches <code>peer=</code> on the other device.`
+    : "";
+  $("#share-note").textContent = quic
+    ? "Both strings are encrypted and pin this phone's key (peer=), so the token never crosses the network in clear "
+      + "and no other device can pose as this phone. QUIC resumes better on flaky links; HTTPS works through more firewalls. "
+      + "Mobile-data addresses are usually unreachable."
+    : "HTTPS pinned to this phone's key (peer=): the token never crosses the network in clear. "
+      + "Mobile-data addresses are usually unreachable.";
   const conns = o.connections.map((c) => `
     <div class="conn">
       <div>
-        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span>
+          <span class="tag ok">encrypted</span></div>
         <div style="margin:6px 0"><code>${esc(c.url)}</code></div>
         <div class="row small">
-          <button data-copy="${esc(c.pairing)}" data-what="Connection string">Copy connection string</button>
-          <button data-copy="curl -H 'Authorization: Bearer TOKEN' ${esc(c.url)}/v1/status" data-what="curl example">curl</button>
+          ${c.quic_pairing ? `<button data-copy="${esc(c.quic_pairing)}" data-what="Encrypted connection string">Copy encrypted connection string</button>` : ""}
+          <button data-copy="${esc(c.pairing)}" data-what="HTTPS connection string">${c.quic_pairing ? "Copy HTTPS string" : "Copy connection string"}</button>
+          <button data-copy="${esc(c.curl)}" data-what="curl example">curl</button>
         </div>
       </div>
-      <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+      <div class="qr" title="${c.quic_pairing ? "Scan to pair (encrypted)" : "Scan to pair"}">${c.qr_svg}</div>
     </div>`).join("");
   $("#connections").innerHTML = o.sharing
     ? (conns || `<div class="note">No network address. Join Wi-Fi, start a hotspot or enable USB tethering.</div>`)
@@ -210,6 +237,9 @@ function renderOverview(o) {
     <li class="client">
       <div class="row spread"><span class="row"><i class="dot ${c.active ? "on" : ""}"></i><b class="mono">${esc(c.address)}</b>
         ${c.authorized ? '<span class="tag ok">paired</span>' : '<span class="tag warn">not paired</span>'}
+        ${(c.transports || []).map((t) => t === "quic"
+          ? '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">QUIC</span>'
+          : '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">HTTPS</span>').join("")}
         ${c.rejected ? `<span class="tag bad">${c.rejected} rejected</span>` : ""}</span>
         <span class="muted small">${ago(c.last_seen_ms)}</span></div>
       <div class="muted small">${c.requests} requests · ↓${bytes(c.bytes_in)} ↑${bytes(c.bytes_out)} · <span class="mono">${esc(c.last_request)}</span></div>
@@ -274,10 +304,22 @@ function renderVolumes(list) {
   }).join("");
 }
 
+function renderPaired(list, quic) {
+  $("#pairing").hidden = !quic;
+  $("#paired").innerHTML = list.length ? list.map((p) => `
+    <li class="client">
+      <div class="row spread"><span class="row"><b>${esc(p.name ?? "(unnamed)")}</b>
+        <span class="tag ${p.role === "client" ? "ok" : ""}">${esc(p.role)}</span>
+        ${p.scopes ? `<span class="tag">${p.scopes.write ? "read/write" : "read-only"}</span>` : ""}</span>
+        <button data-unpair="${esc(p.peer)}" class="small">Remove</button></div>
+      <div class="muted small mono">${esc(p.peer.slice(0, 24))}…</div>
+    </li>`).join("") : '<li class="muted small">No paired devices yet.</li>';
+}
+
 async function refresh() {
   try {
-    const [o, v] = await Promise.all([invoke("overview"), invoke("volumes")]);
-    renderOverview(o); renderVolumes(v);
+    const [o, v, paired] = await Promise.all([invoke("overview"), invoke("volumes"), invoke("paired_devices")]);
+    renderOverview(o); renderVolumes(v); renderPaired(paired, o.quic_peer_id != null);
     if (lastOverview) document.querySelectorAll("[data-move]").forEach((b) => {
       const m = lastOverview.moving; b.disabled = ["scanning","copying","verifying","switching","cleaning"].includes(m.phase);
     });
@@ -319,6 +361,32 @@ $("#rotate").addEventListener("click", async () => {
   toast("New token active"); refresh();
 });
 $("#refresh").addEventListener("click", refresh);
+let invitationTimer;
+$("#pair-invite").addEventListener("click", async () => {
+  try {
+    const inv = await invoke("pair_invite", { readOnly: $("#pair-read-only").checked });
+    $("#invitation").innerHTML = `
+      <div class="note small">One-time code, ${esc(inv.access)}, valid ${esc(inv.valid_minutes)} minutes. On the other device:
+        <code>rbq peer pair join '&lt;string&gt;'</code>. It works once, then this phone lists the device below.</div>
+      ${inv.connections.map((c) => `
+        <div class="conn">
+          <div>
+            <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+            <div class="row small" style="margin-top:6px">
+              <button data-copy="${esc(c.invitation)}" data-what="Pairing string">Copy pairing string</button></div>
+          </div>
+          <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+        </div>`).join("")}`;
+    clearTimeout(invitationTimer);
+    invitationTimer = setTimeout(() => { $("#invitation").innerHTML = ""; refresh(); }, inv.valid_minutes * 60000);
+  } catch (e) { toast(String(e)); }
+});
+document.addEventListener("click", async (event) => {
+  const peer = event.target?.dataset?.unpair;
+  if (!peer) return;
+  if (!confirm("Remove this pairing? The device will need a new code or the token.")) return;
+  try { await invoke("unpair", { peer }); toast("Pairing removed"); refresh(); } catch (e) { toast(String(e)); }
+});
 
 const started = Date.now();
 refresh().finally(() => {

@@ -729,8 +729,8 @@ that a device is trusted. Requested probes that are incomplete exit `2`.
   of the same underlying filesystem; do not sum them as independent disks.
 - **TCP/IP:** use Rebeqah's displayed reachable IP/port on trusted Wi-Fi, a
   hotspot, USB tethering or another explicitly established link. To check only
-  that endpoint: `rbq phone diagnose --peer http://PHONE_IP:PORT --token-file
-  /private/peer-token`. HTTP peer JSON is size-bounded, error bodies are
+  that endpoint: `rbq phone diagnose --peer 'https://PHONE_IP:PORT?peer=ID'
+  --token-file /private/peer-token`. Peer JSON is size-bounded, error bodies are
   suppressed and connection tokens are not included in diagnostic output.
 - **Bluetooth:** print the host pairing/PAN guide. If ChromeOS and Android offer
   Bluetooth tethering/PAN, an established IP link can carry the existing peer
@@ -795,7 +795,7 @@ rbq drive pull stick                                # verifies received snapshot
 card. Pass it through `RBQ_PEER` so the token stays out of shell history:
 
 ```bash
-export RBQ_PEER='rbq+http://192.168.1.42:8787/v1?token=…'
+export RBQ_PEER='rbq+https://192.168.1.42:8787/v1?peer=ID&token=…'
 rbq peer status                  # what the phone holds, per layer
 rbq peer push                    # this machine → phone
 rbq peer pull --layer frog       # phone → this machine, Frog only
@@ -806,7 +806,8 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   ever deleted.
 - **Chunks travel before manifests,** so an interrupted sync never leaves a
   snapshot whose data is missing. Running it again finishes the job; a repeat
-  sync of an up-to-date phone writes no new objects but reads bytes to verify them.
+  sync of an up-to-date phone writes nothing and verifies the phone's copies
+  by their hashes (`--distrust-peer` downloads them instead).
 - **Pulled data is untrusted:**
   - Each chunk is re-hashed against its address.
   - Manifests must parse.
@@ -818,40 +819,137 @@ rbq peer pull --layer frog       # phone → this machine, Frog only
   manifests are not stored; the legacy `quarantined` report field remains empty.
   Owner validation
   (SQLite integrity, edition manifests) is still `rbq <layer> verify ID`.
-- **Plain HTTP on the local network.** Use Wi-Fi you control, the phone's
-  hotspot or USB tethering. Listings page with `after=`, which needs Rebeqah
-  0.2.4 or later; Rebekah installs use an incompatible protocol and are refused.
+- **HTTPS pinned to the phone's key.** Rebeqah serves `rbq-peer/0` over HTTPS
+  with the same key as its QUIC sharing; the connection string's `peer=` pins
+  it, so the token never crosses the network in clear and no other device can
+  pose as the phone. There is no CA: an `https://` string without `peer=` is
+  refused. `http://` still works for old app versions. Listings page with
+  `after=`, which needs Rebeqah 0.2.4 or later; Rebekah installs use an
+  incompatible protocol and are refused.
 
 ### Local transports (`rbq-peer/1`)
 
-For same-host or relayed links, `rbq peer` can also speak a frame protocol
-over TCP, Unix stream sockets and Unix datagram sockets. The sync rules, layer
-filtering and verification are identical; only the wire changes.
+`rbq peer` can also speak a frame protocol over QUIC, TCP, Unix stream
+sockets and Unix datagram sockets. The sync rules, layer filtering and
+verification are identical; only the wire changes.
 
 ```bash
-# Serve this object store to another local process.
+# Serve this object store over the network, encrypted. The output includes
+# quic_peer_id: the hash of this server's key, which clients must pin.
+rbq peer serve --listen quic://0.0.0.0:8788 --token-file ~/.rbq/token
+
+# Or to another local process.
 rbq peer serve --listen unix:///run/user/1000/rbq.sock --token-file ~/.rbq/token
 rbq peer serve --listen tcp://127.0.0.1:8787 --token-file ~/.rbq/token
 
-# Point status/push/pull at a local transport.
-export RBQ_PEER='rbq+tcp://127.0.0.1:8787?token=…'
+# Point status/push/pull at a transport.
+export RBQ_PEER='rbq+quic://192.168.1.42:8788?peer=<quic_peer_id>&token=…'
 rbq peer status
 
-# Exercise TCP, Unix stream and Unix datagram loopback end to end.
+# Exercise QUIC, TCP, Unix stream and Unix datagram loopback end to end.
 rbq peer selftest
 ```
 
 - **Authentication is one shared token.** It is compared in constant time and
   must be 1–256 ASCII letters or digits. `--token-file` refuses a group- or
   world-readable file; Unix sockets are created owner-only.
-- **Encryption is the transport's job.** TCP is not encrypted. `serve` warns
-  when a listen address is reachable beyond this host. Put a tunnel or a
-  loopback-only bridge in front of a public path; rbq does not speak TLS.
+- **Use QUIC beyond this host.** QUIC runs TLS 1.3 to a server whose key the
+  client pins (`peer=`, the SHA-256 of the server's public key): a server
+  with any other key is refused, and the token never crosses the network in
+  clear. There is no CA and no hostname check; the pin is the trust decision,
+  so copy it from `rbq peer serve` over a channel you trust. The server keeps
+  its key owner-only under rbq's state directory (`quic-identity/`, or
+  `--quic-identity DIR`); deleting it creates a new identity and every client
+  must re-pin. QUIC also retransmits and controls congestion, which a lossy
+  relay or mesh link needs.
+- **TCP is not encrypted.** `serve` warns when a TCP listen address is
+  reachable beyond this host (including `0.0.0.0`); prefer `quic://`.
+- **Large objects stream and resume.** A server reads an object body from
+  storage in 1 MiB windows while it sends it, so serving a 64 MiB chunk does
+  not hold 64 MiB in memory. Clients fetch objects in 4 MiB `get_range`
+  windows; if the link drops mid-object (a mesh hop, a phone changing
+  networks), the client reconnects and resumes from the bytes it already has.
+  A peer's own refusal is never retried. Uploads larger than 4 MiB go in
+  parts the server stages on disk (one part in memory at a time); after a
+  break the client asks how much arrived and continues. Nothing is published
+  until the commit verifies the whole staged file (a chunk's SHA-256 against
+  its address, computed while reading), and the object is then created if
+  absent straight from the file. Staging is capped at 1 GiB and stale uploads
+  are removed after a day.
+- **Verified by hash, unless you distrust the peer.** For an object both
+  sides already hold, the peer reports the SHA-256 of its own copy (rbq-peer/1
+  `hash`, Rebeqah's `/v1/hash/`) and rbq compares it with the local copy and,
+  for a chunk, with its address, so a sync with nothing to send moves almost
+  no data. Damaged or different replicas are still reported. This trusts the
+  peer's word about its own copy; `--distrust-peer` (or
+  `RBQ_DISTRUST_PEER=true`) on `rbq peer push|pull` treats it as possibly
+  lying and downloads every copy to compare it byte for byte.
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.
-- **No mesh integration.** A relay must expose one of these sockets; rbq
-  does not talk to OSHI or other mesh APIs directly.
+- **Pair devices instead of sharing a token.** Every device has one key
+  (the QUIC identity). Pairing means each side signs a record about the
+  other's key, ahead of time and without prompts:
+
+  ```bash
+  # On each device: print its card (key, name, addresses), self-signed.
+  rbq peer id --name phone --address quic://100.88.0.7:8788 > phone.card
+  rbq peer id --name laptop > laptop.card
+  # Carry the cards over a channel you trust, then on the server:
+  rbq peer pair add laptop.card --as client            # or --read-only, --expires-days 90
+  # and on the client:
+  rbq peer pair add phone.card --as server
+  # From then on the key authenticates; no token is needed or sent.
+  rbq peer serve --listen quic://0.0.0.0:8788          # --token-file is optional now
+  rbq peer push paired:phone
+  ```
+
+  Or let a device pair itself on first contact with a one-time secret:
+
+  ```bash
+  # On the server (with rbq peer serve running): valid 10 minutes, works once.
+  rbq peer pair invite --name phone          # prints rbq+quic://HOST:8788?peer=ID&pair=SECRET
+  # On the new device, either explicitly or on first use of any peer command:
+  rbq peer pair join 'rbq+quic://100.88.0.7:8788?peer=ID&pair=SECRET'
+  rbq peer push 'rbq+quic://100.88.0.7:8788?peer=ID&pair=SECRET'
+  ```
+
+  The client proves its key in the TLS handshake and sends its card; the
+  server checks the card is for that key, spends the secret (atomically, so
+  it works once; only its hash is stored), records the client and returns
+  its own card, which the client checks against the pin and records. A wrong
+  or reused secret ends the connection and counts towards the failure
+  throttle.
+
+  A server records which client keys may read (and write), optionally until
+  a date; a client records a server's pin and addresses, so `paired:NAME`
+  resolves both. A record only counts if this device's own key signed it and
+  it has not expired; anything else in the directory is ignored, and
+  `rbq peer pair remove PEER` revokes. A card proves its holder has the key,
+  not who the holder is, so exchange cards like SSH host keys. Tokens still
+  work for unpaired clients and for TCP and Unix sockets.
+- **Headless.** Nothing in `rbq peer` prompts. `RBQ_LISTEN`,
+  `RBQ_TOKEN_FILE`, `RBQ_QUIC_IDENTITY` and `RBQ_PEER` configure it, `serve`
+  stops cleanly on SIGTERM, and [docs/HEADLESS.md](docs/HEADLESS.md) covers
+  systemd ([unit](examples/systemd/rbq-peer.service)) and provisioning
+  pairings without anyone at the keyboard.
+- **Tailscale and NetBird.** `rbq peer networks` shows whether this host is
+  on either overlay (its interfaces; Tailscale's `fd7a:115c:a1e0::/48`; and,
+  when installed, `tailscale status --json` / `netbird status --json` for the
+  connection state, overlay name and peers) and suggests a QUIC listen
+  address on it. A plain `100.64.0.0/10` address on an unknown interface is
+  reported as unclassified: carrier-grade NAT uses that range too. When
+  `serve` listens on all interfaces, its `connect` list includes one string
+  per overlay address. When the host is on either overlay, `rbq peer serve`
+  shares over it automatically (one QUIC listener per Tailscale/NetBird
+  address, following overlays that come up or go away; `--no-overlays` to
+  opt out), and `--listen` becomes optional: with none, the server is
+  reachable only over the overlays. The overlay carries packets; rbq still
+  pins keys and checks tokens or pairings. Rebeqah listens on all interfaces,
+  overlays included, and labels them.
+- **No mesh integration.** A relay must carry one of these transports (QUIC
+  over any IP path, including mesh overlays, or a local socket); rbq does not
+  talk to OSHI or other mesh APIs directly.
 
 ## Android compile check
 

@@ -529,12 +529,19 @@ enum GitAction {
 }
 #[derive(Args)]
 struct PeerTargetArgs {
-    /// Connection string from the app (rbq+http://HOST:PORT/v1?token=…);
+    /// Connection string: from the app (rbq+https://HOST:PORT/v1?peer=ID&token=…), or
+    /// rbq+quic://HOST:PORT?peer=ID&token=… / tcp:// / unix:// for `rbq peer serve`;
     /// defaults to $RBQ_PEER so the token stays out of shell history.
     connection: Option<String>,
-    /// File holding the token, when the connection has none.
-    #[arg(long)]
+    /// File holding the token, when the connection has none. Paired QUIC
+    /// devices need none.
+    #[arg(long, env = "RBQ_TOKEN_FILE")]
     token_file: Option<PathBuf>,
+    /// Treat the peer as possibly lying: ignore the hashes it reports for its
+    /// own copies and download every object both sides hold to compare it.
+    /// By default a peer's hash is trusted, which saves the transfer.
+    #[arg(long, env = "RBQ_DISTRUST_PEER")]
+    distrust_peer: bool,
     /// Additional HTTP attempts on transient connection/502/503/504/408 failures.
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=6))]
     retries: u8,
@@ -568,6 +575,25 @@ enum PeerAction {
     Serve(ServeArgs),
     /// Push, pull and verify a tiny snapshot over every local transport.
     Selftest,
+    /// Print this device's signed card (its key, optional name and
+    /// addresses) for another device to pair with. JSON on stdout.
+    Id {
+        /// A name for this device, e.g. "laptop".
+        #[arg(long)]
+        name: Option<String>,
+        /// Where this device can be reached (quic://HOST:PORT); repeatable.
+        #[arg(long = "address")]
+        addresses: Vec<String>,
+    },
+    /// Pair with other devices by their signed cards; no prompts.
+    #[command(subcommand)]
+    Pair(PairAction),
+    /// Detect Tailscale and NetBird overlays and the addresses peers can use.
+    Networks {
+        /// Do not run `tailscale status` / `netbird status`; interfaces only.
+        #[arg(long)]
+        no_probe: bool,
+    },
 }
 #[derive(Args)]
 struct ResticServeArgs {
@@ -610,18 +636,89 @@ struct ResticServeArgs {
     #[arg(long, default_value_t = 4)]
     workers: usize,
 }
+#[derive(Subcommand)]
+enum PairAction {
+    /// Record another device's card (a file, or - for stdin) and print the
+    /// signed record plus this device's card to send back.
+    Add {
+        card: String,
+        /// `client`: it may use this store (as a server). `server`: this
+        /// device connects to it (as a client).
+        #[arg(long = "as", value_parser = ["client", "server"])]
+        role: String,
+        /// A client may read but not write.
+        #[arg(long)]
+        read_only: bool,
+        /// The pairing ends after this many days.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3650))]
+        expires_days: Option<u64>,
+        /// Name to record instead of the card's own.
+        #[arg(long)]
+        name: Option<String>,
+        /// Addresses to record instead of the card's own (servers).
+        #[arg(long = "address")]
+        addresses: Vec<String>,
+    },
+    /// Create a one-time pairing secret. The first device that connects
+    /// with it (rbq peer pair join, or any peer command given the printed
+    /// string) is paired; then it stops working. JSON on stdout.
+    Invite {
+        /// Pair the device read-only.
+        #[arg(long)]
+        read_only: bool,
+        /// Minutes the secret stays valid.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=1440))]
+        minutes: u64,
+        /// This server's name, as the joining device records it.
+        #[arg(long)]
+        name: Option<String>,
+        /// UDP port `rbq peer serve --listen quic://...` uses.
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+    },
+    /// Pair with a server using a connection string that carries a one-time
+    /// secret (rbq+quic://HOST:PORT?peer=ID&pair=SECRET).
+    Join {
+        connection: String,
+        /// Name to record the server under (default: the name it gives).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List valid pairings this device has signed.
+    List,
+    /// Remove every pairing with a peer (by peer id).
+    Remove { peer: String },
+}
 #[derive(Args)]
 struct ServeArgs {
-    /// Listen address; repeat for several. tcp://HOST:PORT, unix:///path or
-    /// unix-dgram:///path.
-    #[arg(long = "listen", required = true)]
+    /// Listen address; repeat for several (or comma-separate in
+    /// $RBQ_LISTEN). quic://HOST:PORT (encrypted, recommended beyond this
+    /// host), tcp://HOST:PORT (plaintext), unix:///path or unix-dgram:///path.
+    /// Optional when this host is on Tailscale or NetBird: the overlays are
+    /// shared automatically.
+    #[arg(long = "listen", env = "RBQ_LISTEN", value_delimiter = ',')]
     listen: Vec<String>,
+    /// Directory holding the QUIC server identity (created on first use,
+    /// owner-only). Default: quic-identity/ under rbq's state directory.
+    #[arg(long, env = "RBQ_QUIC_IDENTITY")]
+    quic_identity: Option<PathBuf>,
     /// File holding the shared token; must not be group- or world-readable.
-    #[arg(long)]
-    token_file: PathBuf,
+    /// Optional for QUIC: paired devices (rbq peer pair) need no token.
+    #[arg(long, env = "RBQ_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
     /// Remove an existing socket path. A live server is never replaced.
     #[arg(long)]
     replace_stale: bool,
+    /// Do not share automatically over this host's Tailscale and NetBird
+    /// addresses. By default each one gets a QUIC listener (unless a
+    /// wildcard listener already reaches it), including overlays that come
+    /// up while serving.
+    #[arg(long, env = "RBQ_NO_OVERLAYS")]
+    no_overlays: bool,
+    /// UDP port for overlay listeners. Default: the first quic:// listen
+    /// port, else 8788.
+    #[arg(long, env = "RBQ_OVERLAY_PORT")]
+    overlay_port: Option<u16>,
 }
 #[derive(Subcommand)]
 enum MnemeAction {
@@ -1506,6 +1603,7 @@ fn drive_action(_: &rebsync_core::Config, _: DriveAction, _: bool) -> Result<i32
 
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
+    use anyhow::Context as _;
     use rebsync_core::{FsObjectStorage, journal::Journal, peer, transport};
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -1522,6 +1620,31 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             .transpose()?;
         Ok((connection, token))
     };
+    // This device's key (created on first use) and the pairings it signed.
+    // One rule for every command: --quic-identity, then $RBQ_QUIC_IDENTITY,
+    // then the default. A non-default identity keeps its pairings next to it,
+    // so a key and the records it signed always travel together.
+    let custom_identity = |explicit: Option<&PathBuf>| -> Option<PathBuf> {
+        explicit
+            .cloned()
+            .or_else(|| std::env::var_os("RBQ_QUIC_IDENTITY").map(PathBuf::from))
+            .filter(|dir| !dir.as_os_str().is_empty())
+    };
+    let identity = |explicit: Option<&PathBuf>| -> Result<Arc<transport::quic::Identity>> {
+        let dir = match custom_identity(explicit) {
+            Some(dir) => dir,
+            None => transport::quic::default_identity_dir(config)?,
+        };
+        Ok(Arc::new(transport::quic::Identity::load_or_create(&dir)?))
+    };
+    let trust_for = |explicit: Option<&PathBuf>, identity: Arc<transport::quic::Identity>| {
+        let dir = match custom_identity(explicit) {
+            Some(dir) => dir.join("paired"),
+            None => transport::pairing::default_trust_dir(config)?,
+        };
+        transport::pairing::TrustStore::open(&dir, identity)
+    };
+    let trust = |identity: Arc<transport::quic::Identity>| trust_for(None, identity);
     let remote = |args: &PeerTargetArgs| -> Result<Box<dyn peer::PeerApi>> {
         let (connection, token) = connection(args)?;
         let trimmed = connection.trim();
@@ -1533,9 +1656,57 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                     .with_retries(args.retries)
                     .with_timeout(std::time::Duration::from_secs(args.timeout_seconds)),
             ))
+        } else if let Some(name) = bare.strip_prefix("paired:") {
+            // A server this device has paired with: its addresses and pin
+            // come from the signed record, the key authenticates.
+            let identity = identity(None)?;
+            let server = trust(identity.clone())?.server(name)?;
+            anyhow::ensure!(
+                !server.addresses.is_empty(),
+                "paired server {name} has no address; pair again with --address quic://HOST:PORT"
+            );
+            let mut last = None;
+            for address in &server.addresses {
+                let mut target = transport::Target::parse(address)?;
+                if let transport::Target::Quic { peer, .. } = &mut target {
+                    *peer = Some(server.peer.clone());
+                }
+                match transport::TransportPeer::connect_paired(&target, token.clone(), &identity) {
+                    Ok(peer) => return Ok(Box::new(peer)),
+                    Err(error) => last = Some(error.context(address.clone())),
+                }
+            }
+            Err(last.expect("at least one address"))
         } else {
-            let (target, token) = transport::parse_connection(&connection, token.as_deref())?;
-            Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
+            let (target, token) = transport::parse_target(&connection, token.as_deref())?;
+            if let transport::Target::Quic {
+                peer: Some(pin), ..
+            } = &target
+            {
+                // Present this device's key: a paired server needs no token.
+                let identity = identity(None)?;
+                // A one-time secret in the string pairs on first use.
+                if let Some(secret) = transport::pairing::pairing_secret(&connection) {
+                    let store = trust(identity.clone())?;
+                    if store.server(pin).is_err() {
+                        let paired = transport::pairing::join(&target, &secret, &store, None)?;
+                        eprintln!(
+                            "rbq: paired with {} ({}…); this device's key now authenticates",
+                            paired.name.as_deref().unwrap_or("the server"),
+                            &paired.peer[..16]
+                        );
+                    }
+                }
+                Ok(Box::new(transport::TransportPeer::connect_paired(
+                    &target, token, &identity,
+                )?))
+            } else {
+                let token = anyhow::Context::context(
+                    token,
+                    "no token: pass --token-file or include ?token=...",
+                )?;
+                Ok(Box::new(transport::TransportPeer::connect(&target, token)?))
+            }
         }
     };
     let prefixes = layer_prefixes;
@@ -1557,54 +1728,431 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
         PeerAction::Push { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
+            let distrusting = peer::Distrusting(remote.as_ref());
+            let remote: &dyn peer::PeerApi = if target.distrust_peer {
+                &distrusting
+            } else {
+                remote.as_ref()
+            };
             let mut journal = Journal::open(&config.rbq_home)?;
-            let report = peer::push(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
+            let report = peer::push(&storage, remote, &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
         PeerAction::Pull { target, layers } => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
             let remote = remote(&target)?;
+            let distrusting = peer::Distrusting(remote.as_ref());
+            let remote: &dyn peer::PeerApi = if target.distrust_peer {
+                &distrusting
+            } else {
+                remote.as_ref()
+            };
             let mut journal = Journal::open(&config.rbq_home)?;
-            let report = peer::pull(&storage, remote.as_ref(), &prefixes(&layers)?, &mut journal)?;
+            let report = peer::pull(&storage, remote, &prefixes(&layers)?, &mut journal)?;
             let code = if report.clean() { 0 } else { 2 };
             (serde_json::to_value(report)?, code)
         }
         PeerAction::Serve(args) => {
             let storage = FsObjectStorage::open(&config.storage.root)?;
-            let token = transport::read_token_file(&args.token_file)?;
-            let service =
-                transport::Service::new(Arc::new(storage), token, Arc::new(AtomicBool::new(false)));
+            let token = args
+                .token_file
+                .as_ref()
+                .map(|path| transport::read_token_file(path))
+                .transpose()?;
+            let quic_only = args.listen.iter().all(|listen| {
+                matches!(
+                    transport::Target::parse(listen),
+                    Ok(transport::Target::Quic { .. })
+                )
+            });
+            anyhow::ensure!(
+                token.is_some() || quic_only,
+                "tcp:// and unix:// listeners need --token-file; only quic:// can rely on pairing"
+            );
+            let device = identity(args.quic_identity.as_ref())?;
+            let store = Arc::new(trust_for(args.quic_identity.as_ref(), device.clone())?);
+            let clients = store
+                .list()
+                .iter()
+                .filter(|paired| paired.role == transport::pairing::Role::Client)
+                .count();
+            if token.is_none() && clients == 0 {
+                eprintln!(
+                    "rbq: warning: no token and no paired clients yet; pair one with \
+                     `rbq peer pair invite` (one-time secret) or `rbq peer pair add CARD --as client`"
+                );
+            }
+            let paused = Arc::new(AtomicBool::new(false));
+            let service = match token {
+                Some(token) => transport::Service::new(Arc::new(storage), token, paused),
+                None => transport::Service::without_token(Arc::new(storage), paused),
+            }
+            .with_trust(store.clone())
+            .with_pairing(store)
+            // Large uploads arrive in parts staged on disk and resume after
+            // a broken link.
+            .with_staging(Arc::new(transport::staging::Staging::open(
+                &transport::staging::default_staging_dir(config)?,
+            )?));
             let mut servers = Vec::new();
+            let mut quic_peer = None;
             for listen in &args.listen {
                 let target = transport::Target::parse(listen)?;
                 if target.is_public() {
                     eprintln!(
-                        "rbq: warning: {} is reachable beyond this host and is not encrypted",
+                        "rbq: warning: {} is reachable beyond this host and is not encrypted; \
+                         prefer quic://",
                         target.describe()
                     );
                 }
-                servers.push(transport::Server::bind(
-                    &target,
-                    service.clone(),
-                    args.replace_stale,
-                )?);
+                let server = match &target {
+                    transport::Target::Quic { host, port, .. } => {
+                        quic_peer = Some(device.peer_id().to_owned());
+                        transport::Server::bind_quic(host, *port, service.clone(), &device)?
+                    }
+                    _ => transport::Server::bind(&target, service.clone(), args.replace_stale)?,
+                };
+                servers.push(server);
+            }
+            // Share over Tailscale / NetBird: a QUIC listener per overlay
+            // address that no wildcard listener already reaches.
+            let overlay_port = args.overlay_port.unwrap_or_else(|| {
+                servers
+                    .iter()
+                    .find_map(|server| match &server.target {
+                        transport::Target::Quic { port, .. } => Some(*port),
+                        _ => None,
+                    })
+                    .unwrap_or(8788)
+            });
+            let wildcard = |any: &str| {
+                servers.iter().any(|server| {
+                    matches!(&server.target, transport::Target::Quic { host, port, .. }
+                        if *port == overlay_port && host == any)
+                })
+            };
+            let (wildcard_v4, wildcard_v6) = (wildcard("0.0.0.0"), wildcard("::"));
+            type Overlay = (std::net::IpAddr, &'static str, transport::Server);
+            let mut overlays: Vec<Overlay> = Vec::new();
+            let mut reported = std::collections::HashSet::new();
+            let mut refresh = |overlays: &mut Vec<Overlay>, announce: bool| {
+                let detected = rebsync_core::overlay::detect(false).addresses;
+                let bound: Vec<std::net::IpAddr> = overlays.iter().map(|(ip, ..)| *ip).collect();
+                let plan = rebsync_core::overlay::plan_listeners(
+                    &detected,
+                    &bound,
+                    wildcard_v4,
+                    wildcard_v6,
+                );
+                for gone in plan.drop {
+                    if let Some(index) = overlays.iter().position(|(ip, ..)| *ip == gone) {
+                        let (_, via, server) = overlays.remove(index);
+                        server.stop();
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"overlay": via, "stopped": gone.to_string()})
+                        );
+                    }
+                }
+                for address in plan.bind {
+                    let via = address.kind.label();
+                    match transport::Server::bind_quic(
+                        &address.address.to_string(),
+                        overlay_port,
+                        service.clone(),
+                        &device,
+                    ) {
+                        Ok(server) => {
+                            if announce {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({"overlay": via, "listening": server.target.describe()})
+                                );
+                            }
+                            reported.remove(&address.address);
+                            overlays.push((address.address, via, server));
+                        }
+                        // Report a failing overlay once; keep retrying quietly.
+                        Err(error) => {
+                            if reported.insert(address.address) {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "overlay": via,
+                                        "address": address.address.to_string(),
+                                        "error": format!("{error:#}"),
+                                    })
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+            if !args.no_overlays {
+                refresh(&mut overlays, false);
+            }
+            if servers.is_empty() && overlays.is_empty() {
+                anyhow::ensure!(
+                    !args.no_overlays,
+                    "nothing to listen on: give --listen (or RBQ_LISTEN), or allow overlays"
+                );
+                eprintln!(
+                    "rbq: no --listen and no Tailscale/NetBird address yet; \
+                     waiting for an overlay to come up"
+                );
+            }
+            if !overlays.is_empty() {
+                quic_peer = Some(device.peer_id().to_owned());
             }
             let serving: Vec<String> = servers
                 .iter()
+                .chain(overlays.iter().map(|(_, _, server)| server))
                 .map(|server| server.target.describe())
                 .collect();
+            // Offer each Tailscale/NetBird address of this host explicitly:
+            // those are usually how a phone or a remote box reaches it.
+            let overlay = rebsync_core::overlay::detect(false);
+            let mut connect: Vec<serde_json::Value> = overlays
+                .iter()
+                .map(|(_, via, server)| {
+                    let transport::Target::Quic { host, port, .. } = &server.target else {
+                        unreachable!("overlay listeners are QUIC")
+                    };
+                    let shown = if host.contains(':') {
+                        format!("[{host}]")
+                    } else {
+                        host.clone()
+                    };
+                    serde_json::json!({
+                        "via": via,
+                        "connection": format!(
+                            "rbq+quic://{shown}:{port}?peer={}&token=…",
+                            device.peer_id()
+                        ),
+                    })
+                })
+                .collect();
+            for server in &servers {
+                let transport::Target::Quic {
+                    host, port, peer, ..
+                } = &server.target
+                else {
+                    continue;
+                };
+                let peer = peer.as_deref().unwrap_or_default();
+                connect.push(serde_json::json!({
+                    "via": "this machine's address",
+                    "connection": format!("rbq+quic://HOST:{port}?peer={peer}&token=…"),
+                }));
+                let wildcard = host == "0.0.0.0" || host == "::";
+                for address in &overlay.addresses {
+                    if !wildcard && address.address.to_string() != *host {
+                        continue;
+                    }
+                    let shown = match address.address {
+                        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                        ip => ip.to_string(),
+                    };
+                    connect.push(serde_json::json!({
+                        "via": address.kind.label(),
+                        "connection": format!("rbq+quic://{shown}:{port}?peer={peer}&token=…"),
+                    }));
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "protocol": transport::PROTOCOL,
                     "serving": serving,
-                    "note": "Additive only: create-if-absent, no overwrite and no delete.",
+                    "quic_peer_id": quic_peer,
+                    "connect": connect,
+                    "note": "Additive only: create-if-absent, no overwrite and no delete. \
+                             A QUIC client must pin quic_peer_id (peer=...); HOST is this \
+                             machine's address as the client reaches it.",
                 }))?
             );
+            // Run until a supervisor (systemd, a container runtime) or the
+            // user asks to stop, then shut down cleanly: QUIC peers get a
+            // close frame instead of an idle timeout, sockets are removed.
+            #[cfg(unix)]
+            {
+                use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+                let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP])?;
+                // Wait for a stop signal; meanwhile follow overlays that come
+                // up or go away (tailscale up after boot, a NetBird reconnect).
+                const OVERLAY_POLL: std::time::Duration = std::time::Duration::from_secs(30);
+                let mut polled = std::time::Instant::now();
+                let signal = loop {
+                    if let Some(signal) = signals.pending().next() {
+                        break signal;
+                    }
+                    if !args.no_overlays && polled.elapsed() >= OVERLAY_POLL {
+                        refresh(&mut overlays, true);
+                        polled = std::time::Instant::now();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                };
+                for server in servers {
+                    server.stop();
+                }
+                for (_, _, server) in overlays {
+                    server.stop();
+                }
+                eprintln!("{}", serde_json::json!({"stopped": true, "signal": signal}));
+                return Ok(0);
+            }
+            #[cfg(not(unix))]
             loop {
                 std::thread::park();
             }
+        }
+        PeerAction::Id { name, addresses } => {
+            let card = transport::pairing::card(&*identity(None)?, name, addresses)?;
+            println!("{}", serde_json::to_string_pretty(&card)?);
+            return Ok(0);
+        }
+        PeerAction::Pair(PairAction::Add {
+            card,
+            role,
+            read_only,
+            expires_days,
+            name,
+            addresses,
+        }) => {
+            let bytes = if card == "-" {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(std::io::stdin(), 64 * 1024),
+                    &mut bytes,
+                )?;
+                bytes
+            } else {
+                anyhow::Context::with_context(std::fs::read(&card), || format!("read card {card}"))?
+            };
+            let card = transport::pairing::Signed::parse(&bytes)?;
+            let device = identity(None)?;
+            let store = trust(device.clone())?;
+            let role = if role == "client" {
+                transport::pairing::Role::Client
+            } else {
+                transport::pairing::Role::Server
+            };
+            let scopes = (role == transport::pairing::Role::Client).then_some(transport::Scopes {
+                read: true,
+                write: !read_only,
+            });
+            let expires_at = expires_days.map(|days| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default()
+                    + days * 86_400
+            });
+            let record = store.add(
+                &card,
+                role,
+                scopes,
+                expires_at,
+                name,
+                (!addresses.is_empty()).then_some(addresses),
+            )?;
+            let own = transport::pairing::card(&device, None, Vec::new())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "paired": record.statement.subject.peer,
+                    "role": record.statement.role,
+                    "record": record,
+                    "send_back": own,
+                    "note": "Give send_back to the other device so it can record this one.",
+                }))?
+            );
+            return Ok(0);
+        }
+        PeerAction::Pair(PairAction::Invite {
+            read_only,
+            minutes,
+            name,
+            port,
+        }) => {
+            let device = identity(None)?;
+            let store = trust(device.clone())?;
+            let secret = store.invite(
+                transport::Scopes {
+                    read: true,
+                    write: !read_only,
+                },
+                minutes * 60,
+                name,
+            )?;
+            let pin = device.peer_id();
+            let mut connect = vec![serde_json::json!({
+                "via": "this machine's address",
+                "connection": format!("rbq+quic://HOST:{port}?peer={pin}&pair={secret}"),
+            })];
+            for address in rebsync_core::overlay::detect(false).addresses {
+                let shown = match address.address {
+                    std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                    ip => ip.to_string(),
+                };
+                connect.push(serde_json::json!({
+                    "via": address.kind.label(),
+                    "connection": format!("rbq+quic://{shown}:{port}?peer={pin}&pair={secret}"),
+                }));
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "secret": secret,
+                    "valid_minutes": minutes,
+                    "access": if read_only { "read-only" } else { "read/write" },
+                    "connect": connect,
+                    "note": "Works once, over quic:// to a running rbq peer serve on this device. \
+                             On the other device: rbq peer pair join 'CONNECTION'.",
+                }))?
+            );
+            return Ok(0);
+        }
+        PeerAction::Pair(PairAction::Join { connection, name }) => {
+            let secret = transport::pairing::pairing_secret(&connection)
+                .context("the connection string carries no &pair= secret")?;
+            let (target, _) = transport::parse_target(&connection, None)?;
+            let store = trust(identity(None)?)?;
+            let paired = transport::pairing::join(&target, &secret, &store, name)?;
+            (
+                serde_json::json!({"kind": "pairings", "device": store.identity().peer_id(), "paired": [paired]}),
+                0,
+            )
+        }
+        PeerAction::Pair(PairAction::List) => {
+            let store = trust(identity(None)?)?;
+            (
+                serde_json::json!({"kind": "pairings", "device": store.identity().peer_id(), "paired": store.list()}),
+                0,
+            )
+        }
+        PeerAction::Pair(PairAction::Remove { peer }) => {
+            let removed = trust(identity(None)?)?.remove(&peer)?;
+            (
+                serde_json::json!({"kind": "pairings", "removed": removed, "peer": peer}),
+                if removed > 0 { 0 } else { 1 },
+            )
+        }
+        PeerAction::Networks { no_probe } => {
+            let report = rebsync_core::overlay::detect(!no_probe);
+            let listen: Vec<String> = report
+                .addresses
+                .iter()
+                .map(|a| match a.address {
+                    std::net::IpAddr::V6(v6) => format!("quic://[{v6}]:8788"),
+                    ip => format!("quic://{ip}:8788"),
+                })
+                .collect();
+            let mut value = serde_json::to_value(&report)?;
+            value["kind"] = serde_json::json!("networks");
+            value["suggested_listen"] = serde_json::json!(listen);
+            (value, 0)
         }
         PeerAction::Selftest => {
             let report = transport::selftest()?;
