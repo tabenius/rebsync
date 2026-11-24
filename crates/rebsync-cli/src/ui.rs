@@ -663,8 +663,54 @@ pub fn print_binary_report(value: &serde_json::Value) {
     print_maybe_paged(&format!("{}\n", lines.join("\n")));
 }
 
+/// `rbq peer networks` in human form.
+#[cfg(feature = "peer")]
+fn networks_report(value: &serde_json::Value) {
+    println!("{}", heading("RBQ / NETWORKS"));
+    for (key, label) in [("tailscale", "Tailscale"), ("netbird", "NetBird")] {
+        let status = &value[key];
+        if status.is_null() {
+            println!("  {label:<10} {}", warning("not detected by its CLI"));
+            continue;
+        }
+        let state = match status["connected"].as_bool() {
+            Some(true) => good("connected"),
+            Some(false) => warning("not connected"),
+            None => warning("state unknown"),
+        };
+        println!(
+            "  {label:<10} {state} · {} · {} of {} peers online",
+            status["name"].as_str().unwrap_or("(no name)"),
+            status["peers_connected"],
+            status["peers"]
+        );
+    }
+    let addresses = value["addresses"].as_array().cloned().unwrap_or_default();
+    if addresses.is_empty() {
+        println!("  No overlay addresses on this host's interfaces.");
+    }
+    for address in &addresses {
+        println!(
+            "  {:<16} {:<28} {}",
+            address["interface"].as_str().unwrap_or_default(),
+            address["address"].as_str().unwrap_or_default(),
+            address["evidence"].as_str().unwrap_or_default()
+        );
+    }
+    for listen in value["suggested_listen"].as_array().into_iter().flatten() {
+        println!(
+            "  serve on it:  rbq peer serve --listen {}",
+            listen.as_str().unwrap_or_default()
+        );
+    }
+    println!("  {}", value["note"].as_str().unwrap_or_default());
+}
+
 #[cfg(feature = "peer")]
 pub fn peer_report(value: &serde_json::Value, code: i32) {
+    if value["kind"] == "networks" {
+        return networks_report(value);
+    }
     println!(
         "{}  {}",
         heading("RBQ / PEER"),

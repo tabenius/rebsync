@@ -862,6 +862,15 @@ rbq peer selftest
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.
+- **Tailscale and NetBird.** `rbq peer networks` shows whether this host is
+  on either overlay (its interfaces; Tailscale's `fd7a:115c:a1e0::/48`; and,
+  when installed, `tailscale status --json` / `netbird status --json` for the
+  connection state, overlay name and peers) and suggests a QUIC listen
+  address on it. A plain `100.64.0.0/10` address on an unknown interface is
+  reported as unclassified: carrier-grade NAT uses that range too. When
+  `serve` listens on all interfaces, its `connect` list includes one string
+  per overlay address. The overlay carries packets; rbq still pins keys and
+  checks tokens or pairings. Rebeqah labels overlay interfaces the same way.
 - **No mesh integration.** A relay must carry one of these transports (QUIC
   over any IP path, including mesh overlays, or a local socket); rbq does not
   talk to OSHI or other mesh APIs directly.

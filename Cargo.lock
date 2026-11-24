@@ -1330,6 +1330,7 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "futures",
+ "if-addrs",
  "libc",
  "mdns-sd",
  "object_store",

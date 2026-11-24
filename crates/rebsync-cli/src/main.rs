@@ -569,6 +569,12 @@ enum PeerAction {
     Serve(ServeArgs),
     /// Push, pull and verify a tiny snapshot over every local transport.
     Selftest,
+    /// Detect Tailscale and NetBird overlays and the addresses peers can use.
+    Networks {
+        /// Do not run `tailscale status` / `netbird status`; interfaces only.
+        #[arg(long)]
+        no_probe: bool,
+    },
 }
 #[derive(Args)]
 struct ResticServeArgs {
@@ -1610,16 +1616,37 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 .iter()
                 .map(|server| server.target.describe())
                 .collect();
-            let connect: Vec<String> = servers
-                .iter()
-                .filter_map(|server| match &server.target {
-                    transport::Target::Quic { port, peer, .. } => Some(format!(
-                        "rbq+quic://HOST:{port}?peer={}&token=…",
-                        peer.as_deref().unwrap_or_default()
-                    )),
-                    _ => None,
-                })
-                .collect();
+            // Offer each Tailscale/NetBird address of this host explicitly:
+            // those are usually how a phone or a remote box reaches it.
+            let overlay = rebsync_core::overlay::detect(false);
+            let mut connect: Vec<serde_json::Value> = Vec::new();
+            for server in &servers {
+                let transport::Target::Quic {
+                    host, port, peer, ..
+                } = &server.target
+                else {
+                    continue;
+                };
+                let peer = peer.as_deref().unwrap_or_default();
+                connect.push(serde_json::json!({
+                    "via": "this machine's address",
+                    "connection": format!("rbq+quic://HOST:{port}?peer={peer}&token=…"),
+                }));
+                let wildcard = host == "0.0.0.0" || host == "::";
+                for address in &overlay.addresses {
+                    if !wildcard && address.address.to_string() != *host {
+                        continue;
+                    }
+                    let shown = match address.address {
+                        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                        ip => ip.to_string(),
+                    };
+                    connect.push(serde_json::json!({
+                        "via": address.kind.label(),
+                        "connection": format!("rbq+quic://{shown}:{port}?peer={peer}&token=…"),
+                    }));
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -1635,6 +1662,21 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             loop {
                 std::thread::park();
             }
+        }
+        PeerAction::Networks { no_probe } => {
+            let report = rebsync_core::overlay::detect(!no_probe);
+            let listen: Vec<String> = report
+                .addresses
+                .iter()
+                .map(|a| match a.address {
+                    std::net::IpAddr::V6(v6) => format!("quic://[{v6}]:8788"),
+                    ip => format!("quic://{ip}:8788"),
+                })
+                .collect();
+            let mut value = serde_json::to_value(&report)?;
+            value["kind"] = serde_json::json!("networks");
+            value["suggested_listen"] = serde_json::json!(listen);
+            (value, 0)
         }
         PeerAction::Selftest => {
             let report = transport::selftest()?;

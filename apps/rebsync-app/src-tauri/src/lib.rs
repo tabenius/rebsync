@@ -60,7 +60,23 @@ struct Connection {
     qr_svg: String,
 }
 
-fn interface_kind(name: &str) -> &'static str {
+/// What kind of network an interface address is on. Overlays come first,
+/// classified by rbq's detector (interface names, and Tailscale's own IPv6
+/// range; Android's VPN apps all appear as `tun0`).
+fn interface_kind(name: &str, ip: std::net::IpAddr) -> &'static str {
+    use rebsync_core::overlay::{self, InterfaceAddress, OverlayKind};
+    let classified = overlay::classify(&[InterfaceAddress {
+        interface: name.to_owned(),
+        address: ip,
+    }]);
+    match classified.first().map(|found| found.kind) {
+        Some(OverlayKind::Tailscale) => return "Tailscale",
+        Some(OverlayKind::Netbird) => return "NetBird",
+        Some(OverlayKind::Unclassified) if name.starts_with("tun") || name.starts_with("wg") => {
+            return "Overlay VPN";
+        }
+        _ => {}
+    }
     match name {
         n if n.starts_with("wlan") => "Wi-Fi",
         n if n.starts_with("swlan") || n.starts_with("ap") || n.starts_with("softap") => "Hotspot",
@@ -111,7 +127,7 @@ fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connect
             let quic_pairing =
                 quic.map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
             Some(Connection {
-                kind: interface_kind(&i.name).into(),
+                kind: interface_kind(&i.name, ip).into(),
                 interface: i.name.clone(),
                 address: host,
                 qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
@@ -126,6 +142,8 @@ fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connect
         (
             match c.kind.as_str() {
                 "Wi-Fi" => 0,
+                // Overlays reach the phone from any network.
+                "Tailscale" | "NetBird" | "Overlay VPN" => 1,
                 "Hotspot" => 1,
                 "USB tethering" => 2,
                 "Ethernet" => 3,
