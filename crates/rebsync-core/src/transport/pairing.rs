@@ -421,6 +421,205 @@ impl TrustStore {
     }
 }
 
+/// A pending one-time pairing invitation, stored under the hash of its
+/// secret (the secret itself is never written to disk).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Invite {
+    expires_at: u64,
+    scopes: Scopes,
+    /// This server's name, put on the card it returns.
+    #[serde(default)]
+    server_name: Option<String>,
+}
+
+/// Longest an invitation may live.
+pub const MAX_INVITE_SECONDS: u64 = 24 * 3600;
+
+impl TrustStore {
+    fn invites(&self) -> PathBuf {
+        self.dir.join(".invites")
+    }
+
+    /// Create a one-time pairing secret valid for `ttl_seconds`. The first
+    /// client that presents it, over QUIC with its key, is paired with
+    /// `scopes`; the secret then stops working. Expired invitations are
+    /// removed.
+    pub fn invite(
+        &self,
+        scopes: Scopes,
+        ttl_seconds: u64,
+        server_name: Option<String>,
+    ) -> Result<String> {
+        ensure!(
+            (1..=MAX_INVITE_SECONDS).contains(&ttl_seconds),
+            "an invitation lives 1 s to 24 h"
+        );
+        ensure!(
+            scopes.read || scopes.write,
+            "an invitation grants read or write"
+        );
+        if let Some(name) = &server_name {
+            validate_name(name)?;
+        }
+        let dir = self.invites();
+        fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
+        // Forget invitations nobody redeemed in time.
+        for entry in fs::read_dir(&dir)?.filter_map(Result::ok) {
+            let expired = fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Invite>(&bytes).ok())
+                .is_none_or(|invite| invite.expires_at <= now());
+            if expired {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let mut bytes = [0_u8; 32];
+        rustls::crypto::ring::default_provider()
+            .secure_random
+            .fill(&mut bytes)
+            .map_err(|_| anyhow::anyhow!("no system randomness"))?;
+        let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        crate::process::write_private(
+            &dir.join(format!(
+                "{}.json",
+                crate::wire::sha256_hex(secret.as_bytes())
+            )),
+            &serde_json::to_vec(&Invite {
+                expires_at: now() + ttl_seconds,
+                scopes,
+                server_name,
+            })?,
+        )?;
+        Ok(secret)
+    }
+
+    /// Take the invitation for `secret` out of the store. Exactly one caller
+    /// can take a given invitation: the rename is atomic.
+    fn take_invite(&self, secret: &str) -> Result<Invite> {
+        ensure!(
+            secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid or expired pairing secret"
+        );
+        let path = self.invites().join(format!(
+            "{}.json",
+            crate::wire::sha256_hex(secret.to_ascii_lowercase().as_bytes())
+        ));
+        let mut nonce = [0_u8; 8];
+        let _ = rustls::crypto::ring::default_provider()
+            .secure_random
+            .fill(&mut nonce);
+        let claimed = path.with_extension(format!(
+            "taken-{}",
+            nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
+        fs::rename(&path, &claimed)
+            .map_err(|_| anyhow::anyhow!("invalid or expired pairing secret"))?;
+        let bytes = fs::read(&claimed);
+        let _ = fs::remove_file(&claimed);
+        let invite: Invite = serde_json::from_slice(&bytes?).context("damaged invitation")?;
+        ensure!(
+            invite.expires_at > now(),
+            "invalid or expired pairing secret"
+        );
+        Ok(invite)
+    }
+}
+
+impl super::PairingAuthority for TrustStore {
+    fn redeem(
+        &self,
+        secret: &str,
+        client_key: &str,
+        card: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let card: Card = serde_json::from_value(card.clone()).context("not a card")?;
+        let described = card.verify().context("the card does not verify")?;
+        // The card must describe the key the TLS handshake just proved, so a
+        // client cannot pair someone else's key.
+        ensure!(
+            described.role == Role::Card && described.subject.peer == client_key,
+            "the card is not for the key this connection presented"
+        );
+        // Only now spend the secret: a malformed request does not burn it.
+        let invite = self.take_invite(secret)?;
+        self.add(&card, Role::Client, Some(invite.scopes), None, None, None)?;
+        Ok(serde_json::to_value(super::pairing::card(
+            &self.identity,
+            invite.server_name,
+            Vec::new(),
+        )?)?)
+    }
+}
+
+/// This machine's host name as a valid pairing name, so the server lists a
+/// joining device by something recognisable. `None` if there is none usable.
+pub fn device_name() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|name| {
+            name.trim()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c))
+                .take(MAX_NAME)
+                .collect::<String>()
+        })
+        .filter(|name| validate_name(name).is_ok())
+}
+
+/// The one-time secret in a connection string (`&pair=...`), if any.
+pub fn pairing_secret(connection: &str) -> Option<String> {
+    connection
+        .split_once('?')?
+        .1
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("pair="))
+        .map(str::to_owned)
+}
+
+/// Pair with the server `target` names by redeeming `secret`, and record it
+/// (as `name`, reachable at `address`) in `store`. Both sides end up with
+/// signed records about each other.
+pub fn join(
+    target: &super::Target,
+    secret: &str,
+    store: &TrustStore,
+    name: Option<String>,
+) -> Result<Paired> {
+    let super::Target::Quic { host, port, peer } = target else {
+        bail!("pairing is only offered over quic://");
+    };
+    let pin = peer
+        .as_deref()
+        .context("a pairing connection must pin the server (&peer=...)")?;
+    let own = card(&store.identity, device_name(), Vec::new())?;
+    let mut link =
+        super::quic::QuicLink::connect_as(host, *port, pin, String::new(), Some(&store.identity))?;
+    let server: Card = serde_json::from_value(link.pair(secret, serde_json::to_value(&own)?)?)
+        .context("the server returned no card")?;
+    let described = server
+        .verify()
+        .context("the server's card does not verify")?;
+    ensure!(
+        described.role == Role::Card && described.subject.peer == pin,
+        "the server's card is not for the key it presented"
+    );
+    let address = super::Target::Quic {
+        host: host.clone(),
+        port: *port,
+        peer: None,
+    }
+    .describe();
+    store.add(&server, Role::Server, None, None, name, Some(vec![address]))?;
+    store.server(pin)
+}
+
 impl super::PeerTrust for TrustStore {
     fn scopes(&self, peer_id: &str) -> Option<Scopes> {
         let path = self.path(peer_id, Role::Client);

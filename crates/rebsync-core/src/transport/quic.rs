@@ -584,6 +584,27 @@ impl QuicLink {
     }
 }
 
+impl QuicLink {
+    /// Redeem a one-time pairing secret with this device's `card`; returns
+    /// the server's card. The link must have been opened with
+    /// [`QuicLink::connect_as`] for the same identity.
+    pub fn pair(&mut self, secret: &str, card: serde_json::Value) -> Result<serde_json::Value> {
+        match self
+            .exchange(
+                Request::Pair {
+                    secret: secret.to_owned(),
+                    card,
+                },
+                None,
+            )?
+            .0
+        {
+            Response::Paired { card } => Ok(card),
+            _ => bail!("peer returned an unexpected pairing reply"),
+        }
+    }
+}
+
 impl Drop for QuicLink {
     fn drop(&mut self) {
         self.conn.close(quinn::VarInt::from_u32(0), b"done");
@@ -828,6 +849,36 @@ async fn serve_stream(
         )
         .await?;
         return Ok(true);
+    }
+    if let Request::Pair { secret, card } = &envelope.request {
+        // First contact: no token or pairing yet. The secret is single-use
+        // and 256-bit; a wrong one ends the connection and counts towards the
+        // observer's throttle like a wrong token.
+        let outcome = match key {
+            Some(key) => service.redeem(secret, key, card),
+            None => Err(anyhow::anyhow!("pairing needs this device's key")),
+        };
+        let (response, paired) = match outcome {
+            Ok(card) => (Response::Paired { card }, true),
+            Err(error) => (
+                error_response(401, format!("pairing refused: {error:#}")),
+                false,
+            ),
+        };
+        let sent = respond(&mut send, response, None).await.unwrap_or(0);
+        service.observe(
+            peer,
+            "quic",
+            Some(&envelope.request),
+            paired,
+            !paired,
+            frame.len() as u64,
+            sent,
+        );
+        if paired {
+            authenticated.store(true, Ordering::SeqCst);
+        }
+        return Ok(paired);
     }
     let scopes = if service.authorize(&envelope.token) {
         Some(Scopes::ALL)
@@ -1226,6 +1277,88 @@ mod tests {
             QuicLink::connect_as("127.0.0.1", port, &pin, String::new(), Some(&writer)).unwrap();
         assert!(revoked.status().is_err());
         drop((write, read, unknown, anonymous, revoked));
+        assert!(server.shutdown(), "the QUIC server thread must not panic");
+    }
+
+    #[test]
+    fn a_one_time_secret_pairs_both_sides_exactly_once() {
+        use super::super::pairing::{Role, TrustStore, card, join};
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+        let server_identity = Arc::new(Identity::generate().unwrap());
+        let server_trust = Arc::new(
+            TrustStore::open(&root.path().join("server-paired"), server_identity.clone()).unwrap(),
+        );
+        let service = Service::without_token(Arc::new(storage), Arc::new(AtomicBool::new(false)))
+            .with_trust(server_trust.clone())
+            .with_pairing(server_trust.clone());
+        let server = Server::bind_quic("127.0.0.1", 0, service, &server_identity).unwrap();
+        let target = Target::Quic {
+            host: "127.0.0.1".into(),
+            port: port(&server),
+            peer: Some(server_identity.peer_id().to_owned()),
+        };
+        let laptop = TrustStore::open(
+            &root.path().join("laptop-paired"),
+            Arc::new(Identity::generate().unwrap()),
+        )
+        .unwrap();
+        let read_write = Scopes::ALL;
+        let secret = server_trust
+            .invite(read_write, 600, Some("phone".into()))
+            .unwrap();
+
+        // A client trying to pair a key it did not present is refused, and
+        // that does not burn the invitation.
+        let impostor = Identity::generate().unwrap();
+        let mut link = QuicLink::connect_as(
+            "127.0.0.1",
+            port(&server),
+            server_identity.peer_id(),
+            String::new(),
+            Some(&impostor),
+        )
+        .unwrap();
+        let someone_else = card(laptop.identity(), None, vec![]).unwrap();
+        let error = link
+            .pair(&secret, serde_json::to_value(&someone_else).unwrap())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not for the key"),
+            "{error:#}"
+        );
+        drop(link);
+
+        // The real client pairs; both sides now hold signed records.
+        let paired = join(&target, &secret, &laptop, None).unwrap();
+        assert_eq!(paired.peer, server_identity.peer_id());
+        assert_eq!(paired.name.as_deref(), Some("phone"));
+        assert_eq!(laptop.server("phone").unwrap().addresses.len(), 1);
+        let recorded = server_trust.list();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].role, Role::Client);
+        assert_eq!(recorded[0].peer, laptop.identity().peer_id());
+
+        // The key alone now works, with no token.
+        let peer =
+            super::super::TransportPeer::connect_paired(&target, None, laptop.identity()).unwrap();
+        let digest = crate::wire::sha256_hex(b"hello");
+        let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
+        assert!(crate::peer::PeerApi::put(&peer, &key, b"hello").unwrap());
+        drop(peer);
+
+        // The secret worked once. Reuse, a wrong secret and an expired one fail.
+        let other = TrustStore::open(
+            &root.path().join("other-paired"),
+            Arc::new(Identity::generate().unwrap()),
+        )
+        .unwrap();
+        assert!(join(&target, &secret, &other, None).is_err());
+        assert!(join(&target, &"0".repeat(64), &other, None).is_err());
+        let short = server_trust.invite(read_write, 1, None).unwrap();
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(join(&target, &short, &other, None).is_err());
+        assert!(other.list().is_empty() && server_trust.list().len() == 1);
         assert!(server.shutdown(), "the QUIC server thread must not panic");
     }
 

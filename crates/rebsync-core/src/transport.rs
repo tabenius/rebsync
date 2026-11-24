@@ -318,6 +318,12 @@ pub enum Request {
         key: String,
         size: u64,
     },
+    /// Redeem a one-time pairing secret (QUIC only): `card` is the client's
+    /// self-signed card, whose key must be the one the TLS handshake proved.
+    Pair {
+        secret: String,
+        card: Value,
+    },
 }
 
 fn default_limit() -> usize {
@@ -332,6 +338,7 @@ fn describe_request(request: &Request) -> String {
         Request::List { prefix, .. } => format!("list {}", short(prefix)),
         Request::Get { key } => format!("get {}", short(key)),
         Request::Put { key, size } => format!("put {} ({size} bytes)", short(key)),
+        Request::Pair { .. } => "pair (one-time secret)".into(),
     }
 }
 
@@ -374,6 +381,10 @@ pub enum Response {
     Stored {
         created: bool,
         size: u64,
+    },
+    /// A redeemed pairing: the server's self-signed card.
+    Paired {
+        card: Value,
     },
     Error {
         code: u16,
@@ -466,8 +477,16 @@ impl Scopes {
         match request {
             Request::Put { .. } => self.write,
             Request::Status | Request::List { .. } | Request::Get { .. } => self.read,
+            // Pairing is decided by its secret, never by an existing grant.
+            Request::Pair { .. } => false,
         }
     }
+}
+
+/// Redeems one-time pairing secrets: records the client's key and returns
+/// this server's card (see `pairing`).
+pub trait PairingAuthority: Send + Sync {
+    fn redeem(&self, secret: &str, client_key: &str, card: &Value) -> Result<Value>;
 }
 
 /// Decides which proven peer keys may use a [`Service`] without a token,
@@ -483,6 +502,7 @@ pub struct Service {
     /// `None`: no token is accepted; only trusted peer keys get in.
     token: Option<Arc<String>>,
     trust: Option<Arc<dyn PeerTrust>>,
+    pairing: Option<Arc<dyn PairingAuthority>>,
     writes_paused: Arc<AtomicBool>,
     listing: Arc<Mutex<Option<CachedListing>>>,
     observer: Option<Arc<dyn Observer>>,
@@ -513,6 +533,7 @@ impl Service {
             storage,
             token: Some(Arc::new(token)),
             trust: None,
+            pairing: None,
             writes_paused,
             listing: Arc::default(),
             observer: None,
@@ -532,6 +553,20 @@ impl Service {
     pub fn with_trust(mut self, trust: Arc<dyn PeerTrust>) -> Self {
         self.trust = Some(trust);
         self
+    }
+
+    /// Accept one-time pairing secrets (QUIC) through `authority`.
+    pub fn with_pairing(mut self, authority: Arc<dyn PairingAuthority>) -> Self {
+        self.pairing = Some(authority);
+        self
+    }
+
+    /// Redeem a pairing secret for the proven `client_key`.
+    pub fn redeem(&self, secret: &str, client_key: &str, card: &Value) -> Result<Value> {
+        self.pairing
+            .as_ref()
+            .context("this server does not accept pairing")?
+            .redeem(secret, client_key, card)
     }
 
     /// Scopes a proven peer key is granted, if any.
@@ -634,6 +669,10 @@ impl Service {
     /// Handle one validated request. Returns an optional body for `get`.
     fn handle(&self, request: &Request, body: Option<&[u8]>) -> (Response, Option<Vec<u8>>) {
         match request {
+            Request::Pair { .. } => (
+                error_response(400, "pairing is only offered over quic://"),
+                None,
+            ),
             Request::Status => (Response::Status(self.status()), None),
             Request::List {
                 prefix,

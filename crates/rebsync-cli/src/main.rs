@@ -653,6 +653,31 @@ enum PairAction {
         #[arg(long = "address")]
         addresses: Vec<String>,
     },
+    /// Create a one-time pairing secret. The first device that connects
+    /// with it (rbq peer pair join, or any peer command given the printed
+    /// string) is paired; then it stops working. JSON on stdout.
+    Invite {
+        /// Pair the device read-only.
+        #[arg(long)]
+        read_only: bool,
+        /// Minutes the secret stays valid.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=1440))]
+        minutes: u64,
+        /// This server's name, as the joining device records it.
+        #[arg(long)]
+        name: Option<String>,
+        /// UDP port `rbq peer serve --listen quic://...` uses.
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+    },
+    /// Pair with a server using a connection string that carries a one-time
+    /// secret (rbq+quic://HOST:PORT?peer=ID&pair=SECRET).
+    Join {
+        connection: String,
+        /// Name to record the server under (default: the name it gives).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// List valid pairings this device has signed.
     List,
     /// Remove every pairing with a peer (by peer id).
@@ -1560,6 +1585,7 @@ fn drive_action(_: &rebsync_core::Config, _: DriveAction, _: bool) -> Result<i32
 
 #[cfg(feature = "peer")]
 fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) -> Result<i32> {
+    use anyhow::Context as _;
     use rebsync_core::{FsObjectStorage, journal::Journal, peer, transport};
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -1624,9 +1650,24 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             Err(last.expect("at least one address"))
         } else {
             let (target, token) = transport::parse_target(&connection, token.as_deref())?;
-            if matches!(target, transport::Target::Quic { .. }) {
+            if let transport::Target::Quic {
+                peer: Some(pin), ..
+            } = &target
+            {
                 // Present this device's key: a paired server needs no token.
                 let identity = identity(None)?;
+                // A one-time secret in the string pairs on first use.
+                if let Some(secret) = transport::pairing::pairing_secret(&connection) {
+                    let store = trust(identity.clone())?;
+                    if store.server(pin).is_err() {
+                        let paired = transport::pairing::join(&target, &secret, &store, None)?;
+                        eprintln!(
+                            "rbq: paired with {} ({}…); this device's key now authenticates",
+                            paired.name.as_deref().unwrap_or("the server"),
+                            &paired.peer[..16]
+                        );
+                    }
+                }
                 Ok(Box::new(transport::TransportPeer::connect_paired(
                     &target, token, &identity,
                 )?))
@@ -1689,7 +1730,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 "tcp:// and unix:// listeners need --token-file; only quic:// can rely on pairing"
             );
             let device = identity(args.quic_identity.as_ref())?;
-            let store = trust(device.clone())?;
+            let store = Arc::new(trust(device.clone())?);
             let clients = store
                 .list()
                 .iter()
@@ -1698,7 +1739,7 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
             if token.is_none() && clients == 0 {
                 eprintln!(
                     "rbq: warning: no token and no paired clients yet; pair one with \
-                     `rbq peer pair add CARD --as client`"
+                     `rbq peer pair invite` (one-time secret) or `rbq peer pair add CARD --as client`"
                 );
             }
             let paused = Arc::new(AtomicBool::new(false));
@@ -1706,7 +1747,8 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 Some(token) => transport::Service::new(Arc::new(storage), token, paused),
                 None => transport::Service::without_token(Arc::new(storage), paused),
             }
-            .with_trust(Arc::new(store));
+            .with_trust(store.clone())
+            .with_pairing(store);
             let mut servers = Vec::new();
             let mut quic_peer = None;
             for listen in &args.listen {
@@ -1840,6 +1882,61 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 }))?
             );
             return Ok(0);
+        }
+        PeerAction::Pair(PairAction::Invite {
+            read_only,
+            minutes,
+            name,
+            port,
+        }) => {
+            let device = identity(None)?;
+            let store = trust(device.clone())?;
+            let secret = store.invite(
+                transport::Scopes {
+                    read: true,
+                    write: !read_only,
+                },
+                minutes * 60,
+                name,
+            )?;
+            let pin = device.peer_id();
+            let mut connect = vec![serde_json::json!({
+                "via": "this machine's address",
+                "connection": format!("rbq+quic://HOST:{port}?peer={pin}&pair={secret}"),
+            })];
+            for address in rebsync_core::overlay::detect(false).addresses {
+                let shown = match address.address {
+                    std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                    ip => ip.to_string(),
+                };
+                connect.push(serde_json::json!({
+                    "via": address.kind.label(),
+                    "connection": format!("rbq+quic://{shown}:{port}?peer={pin}&pair={secret}"),
+                }));
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "secret": secret,
+                    "valid_minutes": minutes,
+                    "access": if read_only { "read-only" } else { "read/write" },
+                    "connect": connect,
+                    "note": "Works once, over quic:// to a running rbq peer serve on this device. \
+                             On the other device: rbq peer pair join 'CONNECTION'.",
+                }))?
+            );
+            return Ok(0);
+        }
+        PeerAction::Pair(PairAction::Join { connection, name }) => {
+            let secret = transport::pairing::pairing_secret(&connection)
+                .context("the connection string carries no &pair= secret")?;
+            let (target, _) = transport::parse_target(&connection, None)?;
+            let store = trust(identity(None)?)?;
+            let paired = transport::pairing::join(&target, &secret, &store, name)?;
+            (
+                serde_json::json!({"kind": "pairings", "device": store.identity().peer_id(), "paired": [paired]}),
+                0,
+            )
         }
         PeerAction::Pair(PairAction::List) => {
             let store = trust(identity(None)?)?;

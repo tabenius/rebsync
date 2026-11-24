@@ -879,6 +879,23 @@ rbq peer selftest
   rbq peer push paired:phone
   ```
 
+  Or let a device pair itself on first contact with a one-time secret:
+
+  ```bash
+  # On the server (with rbq peer serve running): valid 10 minutes, works once.
+  rbq peer pair invite --name phone          # prints rbq+quic://HOST:8788?peer=ID&pair=SECRET
+  # On the new device, either explicitly or on first use of any peer command:
+  rbq peer pair join 'rbq+quic://100.88.0.7:8788?peer=ID&pair=SECRET'
+  rbq peer push 'rbq+quic://100.88.0.7:8788?peer=ID&pair=SECRET'
+  ```
+
+  The client proves its key in the TLS handshake and sends its card; the
+  server checks the card is for that key, spends the secret (atomically, so
+  it works once; only its hash is stored), records the client and returns
+  its own card, which the client checks against the pin and records. A wrong
+  or reused secret ends the connection and counts towards the failure
+  throttle.
+
   A server records which client keys may read (and write), optionally until
   a date; a client records a server's pin and addresses, so `paired:NAME`
   resolves both. A record only counts if this device's own key signed it and
