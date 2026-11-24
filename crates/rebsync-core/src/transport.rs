@@ -79,12 +79,10 @@ const DATAGRAM_PAGE: usize = 32;
 const MAX_ASSEMBLIES: usize = 16;
 const ASSEMBLY_TTL: Duration = Duration::from_secs(60);
 const DATAGRAM_TIMEOUT: Duration = Duration::from_secs(30);
+/// A reply that cannot be queued within this is dropped. Without a bound the
+/// single serving thread blocks forever on a client that never reads, and
+/// `Server::stop` cannot complete.
 const DATAGRAM_SEND_TIMEOUT: Duration = Duration::from_millis(250);
-/// How long a client whose reply could not be delivered is ignored. Without
-/// this, a client that queues many requests and never reads costs the server
-/// one send timeout per request and starves everyone else.
-const DATAGRAM_STALL: Duration = Duration::from_secs(10);
-const MAX_STALLED: usize = 1024;
 const MAX_BODY_CHUNKS: u32 = (MAX_OBJECT as usize).div_ceil(CHUNK) as u32;
 
 /// A parsed connection target. Tokens are carried separately so they never end
@@ -1291,7 +1289,11 @@ impl Server {
         socket.set_read_timeout(Some(Duration::from_millis(200)))?;
         // One thread serves every client. A client that stops reading fills
         // its receive queue and would block `send_to` forever; give up on that
-        // reply instead.
+        // reply instead. This bounds the thread, not fairness: replies a client
+        // has not read are charged to this socket's send buffer, so a same-user
+        // process that floods requests and never reads can delay replies to
+        // everyone until it reads or exits. The socket is owner-only (0600);
+        // use `unix://` where clients must be isolated from each other.
         socket.set_write_timeout(Some(DATAGRAM_SEND_TIMEOUT))?;
         let stop = Arc::new(AtomicBool::new(false));
         let join = {
@@ -1462,7 +1464,6 @@ fn serve_datagrams(
 ) {
     let mut assemblies: std::collections::HashMap<PathBuf, Assembly> =
         std::collections::HashMap::new();
-    let mut stalled: std::collections::HashMap<PathBuf, Instant> = std::collections::HashMap::new();
     let mut buffer = vec![0_u8; MAX_DATAGRAM];
     while !stop.load(Ordering::Relaxed) {
         let (size, addr) = match socket.recv_from(&mut buffer) {
@@ -1474,7 +1475,6 @@ fn serve_datagrams(
                 ) =>
             {
                 purge_assemblies(&mut assemblies);
-                stalled.retain(|_, until| *until > Instant::now());
                 continue;
             }
             Err(_) => break,
@@ -1485,12 +1485,6 @@ fn serve_datagrams(
         let Some(key) = addr.as_pathname().map(Path::to_path_buf) else {
             continue;
         };
-        if let Some(until) = stalled.get(&key) {
-            if *until > Instant::now() {
-                continue;
-            }
-            stalled.remove(&key);
-        }
         let (kind, id, seq, total, payload) = match parse_datagram(&buffer[..size]) {
             Ok(parsed) => parsed,
             Err(_) => continue,
@@ -1501,8 +1495,7 @@ fn serve_datagrams(
                 let envelope: RequestEnvelope = match serde_json::from_slice(payload) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        reply(
-                            &mut stalled,
+                        let _ = send_datagram(
                             socket,
                             &addr,
                             id,
@@ -1513,8 +1506,7 @@ fn serve_datagrams(
                     }
                 };
                 if envelope.schema != PROTOCOL {
-                    reply(
-                        &mut stalled,
+                    let _ = send_datagram(
                         socket,
                         &addr,
                         id,
@@ -1524,8 +1516,7 @@ fn serve_datagrams(
                     continue;
                 }
                 if !service.authorize(&envelope.token) {
-                    reply(
-                        &mut stalled,
+                    let _ = send_datagram(
                         socket,
                         &addr,
                         id,
@@ -1536,8 +1527,7 @@ fn serve_datagrams(
                 }
                 if let Request::Put { size, .. } = &envelope.request {
                     if *size > MAX_OBJECT {
-                        reply(
-                            &mut stalled,
+                        let _ = send_datagram(
                             socket,
                             &addr,
                             id,
@@ -1549,7 +1539,7 @@ fn serve_datagrams(
                     let expected = *size as usize;
                     if expected == 0 {
                         let (response, out) = service.handle(&envelope.request, Some(&[]));
-                        reply(&mut stalled, socket, &addr, id, response, out);
+                        let _ = send_datagram(socket, &addr, id, response, out);
                         continue;
                     }
                     let total = expected.div_ceil(CHUNK) as u32;
@@ -1577,7 +1567,7 @@ fn serve_datagrams(
                     continue;
                 }
                 let (response, out) = service.handle(&envelope.request, None);
-                reply(&mut stalled, socket, &addr, id, response, out);
+                let _ = send_datagram(socket, &addr, id, response, out);
             }
             KIND_CHUNK => {
                 let Some(assembly) = assemblies.get_mut(&key) else {
@@ -1600,14 +1590,7 @@ fn serve_datagrams(
                 };
                 if let Some(message) = reject {
                     assemblies.remove(&key);
-                    reply(
-                        &mut stalled,
-                        socket,
-                        &addr,
-                        id,
-                        error_response(400, message),
-                        None,
-                    );
+                    let _ = send_datagram(socket, &addr, id, error_response(400, message), None);
                     continue;
                 }
                 let assembly = assemblies.get_mut(&key).expect("checked above");
@@ -1617,7 +1600,7 @@ fn serve_datagrams(
                 if assembly.body.len() == assembly.expected {
                     let assembly = assemblies.remove(&key).expect("checked above");
                     let (response, out) = service.handle(&assembly.request, Some(&assembly.body));
-                    reply(&mut stalled, socket, &addr, id, response, out);
+                    let _ = send_datagram(socket, &addr, id, response, out);
                 }
             }
             _ => {}
@@ -1629,30 +1612,6 @@ fn serve_datagrams(
 fn purge_assemblies(assemblies: &mut std::collections::HashMap<PathBuf, Assembly>) {
     let now = Instant::now();
     assemblies.retain(|_, assembly| now.duration_since(assembly.at) < ASSEMBLY_TTL);
-}
-
-/// Send a reply; if the client is not reading, suspend it (and drop any
-/// upload it had in progress on the next datagram it sends).
-#[cfg(unix)]
-fn reply(
-    stalled: &mut std::collections::HashMap<PathBuf, Instant>,
-    socket: &std::os::unix::net::UnixDatagram,
-    addr: &std::os::unix::net::SocketAddr,
-    id: u32,
-    response: Response,
-    body: Option<Vec<u8>>,
-) {
-    if send_datagram(socket, addr, id, response, body).is_err()
-        && let Some(path) = addr.as_pathname()
-    {
-        if stalled.len() >= MAX_STALLED {
-            let now = Instant::now();
-            stalled.retain(|_, until| *until > now);
-        }
-        if stalled.len() < MAX_STALLED {
-            stalled.insert(path.to_path_buf(), Instant::now() + DATAGRAM_STALL);
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -2127,14 +2086,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_datagram_client_that_never_reads_cannot_starve_others() {
+    fn a_datagram_client_that_never_reads_cannot_wedge_the_server() {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
         let service = Service::new(Arc::new(storage), token(), Arc::new(AtomicBool::new(false)));
         let path = root.path().join("dgram.sock");
         let server =
             Server::bind(&Target::UnixDatagram { path: path.clone() }, service, false).unwrap();
-        // The hog asks for status over and over and never reads a reply.
+        // The hog asks for status over and over, never reads a reply, and
+        // stays alive. Its unread replies fill its queue (and the server's
+        // send buffer), so without a send timeout the serving thread blocks in
+        // `send_to` forever and `stop` never returns.
         let hog = std::os::unix::net::UnixDatagram::bind(root.path().join("hog")).unwrap();
         hog.connect(&path).unwrap();
         hog.set_nonblocking(true).unwrap();
@@ -2144,19 +2106,19 @@ mod tests {
             request: Request::Status,
         })
         .unwrap();
-        for id in 1..=2000 {
+        for id in 1..=4000 {
             let _ = hog.send(&datagram(KIND_CONTROL, id, 0, 0, &request));
         }
-        let started = Instant::now();
-        let mut honest = DatagramLink::connect(&path, token()).unwrap();
-        honest.status().unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+        thread::sleep(Duration::from_millis(500));
+        let (done, stopped) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            server.stop();
+            let _ = done.send(());
+        });
+        stopped
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the serving thread must not block forever on a client that never reads");
         drop(hog);
-        server.stop();
     }
 
     #[test]
