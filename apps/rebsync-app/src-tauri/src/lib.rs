@@ -6,6 +6,7 @@
 
 mod datastore;
 mod peer;
+mod quic_share;
 mod volumes;
 
 use datastore::{MoveStatus, Settings};
@@ -27,6 +28,10 @@ struct App {
     settings: Arc<Mutex<Settings>>,
     storage: SharedStorage,
     peer: Mutex<Option<Peer>>,
+    /// The encrypted QUIC share, running whenever sharing is on and it could
+    /// start; `quic_error` says why not otherwise.
+    quic: Mutex<Option<quic_share::QuicShare>>,
+    quic_error: Mutex<Option<String>>,
     clients: Arc<Clients>,
     writes_paused: Arc<AtomicBool>,
     moving: Arc<Mutex<MoveStatus>>,
@@ -47,7 +52,11 @@ struct Connection {
     kind: String,
     address: String,
     url: String,
+    /// Plaintext `rbq-peer/0` over HTTP, for older clients.
     pairing: String,
+    /// Encrypted `rbq-peer/1` over QUIC, pinned to this phone's key. The QR
+    /// code carries this one when it exists.
+    quic_pairing: Option<String>,
     qr_svg: String,
 }
 
@@ -81,7 +90,7 @@ fn qr(text: &str) -> String {
         .unwrap_or_default()
 }
 
-fn connections(port: u16, token: &str) -> Vec<Connection> {
+fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
     let mut list: Vec<Connection> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
@@ -99,13 +108,16 @@ fn connections(port: u16, token: &str) -> Vec<Connection> {
             };
             let url = format!("http://{host}:{port}");
             let pairing = format!("rbq+{url}/v1?token={token}");
+            let quic_pairing =
+                quic.map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
             Some(Connection {
                 kind: interface_kind(&i.name).into(),
                 interface: i.name.clone(),
                 address: host,
-                qr_svg: qr(&pairing),
+                qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
                 url,
                 pairing,
+                quic_pairing,
             })
         })
         .collect();
@@ -133,6 +145,9 @@ struct Overview {
     data_root: PathBuf,
     sharing: bool,
     port: u16,
+    quic_port: Option<u16>,
+    /// The phone's key fingerprint that QUIC clients pin.
+    quic_peer_id: Option<String>,
     token_hint: String,
     connections: Vec<Connection>,
     clients: Vec<peer::Client>,
@@ -157,7 +172,20 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         .lock()
         .ok()
         .and_then(|p| p.as_ref().map(|p| p.port));
+    let quic = app
+        .quic
+        .lock()
+        .ok()
+        .and_then(|q| q.as_ref().map(|q| (q.port, q.peer_id.clone())));
     let mut warnings = Vec::new();
+    if peer_port.is_some()
+        && quic.is_none()
+        && let Some(error) = app.quic_error.lock().ok().and_then(|e| e.clone())
+    {
+        warnings.push(format!(
+            "Encrypted sharing (QUIC) could not start, so only plain HTTP is offered: {error}"
+        ));
+    }
     if !caps.atomic_create_if_absent {
         warnings.push("This volume has no hard links (typical for SD cards and USB drives): writes are safe with one writer at a time, which Rebeqah ensures.".into());
     }
@@ -179,9 +207,17 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         data_root: settings.objects(),
         sharing: peer_port.is_some(),
         port: peer_port.unwrap_or(settings.port),
+        quic_port: quic.as_ref().map(|(port, _)| *port),
+        quic_peer_id: quic.as_ref().map(|(_, id)| id.clone()),
         token_hint: format!("{}…", &settings.token[..6]),
         connections: peer_port
-            .map(|port| connections(port, &settings.token))
+            .map(|port| {
+                connections(
+                    port,
+                    &settings.token,
+                    quic.as_ref().map(|(port, id)| (*port, id.as_str())),
+                )
+            })
             .unwrap_or_default(),
         clients: app.clients.snapshot(),
         capabilities: serde_json::json!({
@@ -219,12 +255,33 @@ fn start_peer(app: &App, settings: &Settings) -> Result<u16, String> {
     )?;
     let port = peer.port;
     *slot = Some(peer);
+    // Encrypted sharing next to HTTP, on the same port number over UDP. A
+    // failure leaves HTTP running and is shown as a warning.
+    let quic = quic_share::QuicShare::start(
+        settings.port,
+        settings.token.clone(),
+        app.storage.clone(),
+        app.writes_paused.clone(),
+        &app.internal.join("quic-identity"),
+    );
+    if let (Ok(mut quic_slot), Ok(mut error)) = (app.quic.lock(), app.quic_error.lock()) {
+        match quic {
+            Ok(share) => {
+                *quic_slot = Some(share);
+                *error = None;
+            }
+            Err(message) => *error = Some(message),
+        }
+    }
     Ok(port)
 }
 
 fn stop_peer(app: &App) {
     if let Some(peer) = app.peer.lock().ok().and_then(|mut slot| slot.take()) {
         peer.stop();
+    }
+    if let Some(share) = app.quic.lock().ok().and_then(|mut slot| slot.take()) {
+        share.stop();
     }
 }
 
@@ -402,6 +459,8 @@ pub fn run() {
                 settings: Arc::new(Mutex::new(settings.clone())),
                 storage: Arc::new(RwLock::new(storage)),
                 peer: Mutex::new(None),
+                quic: Mutex::new(None),
+                quic_error: Mutex::new(None),
                 clients: Arc::new(Clients::default()),
                 writes_paused: Arc::new(AtomicBool::new(false)),
                 moving: Arc::new(Mutex::new(MoveStatus {

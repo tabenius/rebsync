@@ -22,6 +22,17 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   - Requests need `Authorization: Bearer TOKEN`, or `?token=` in the URL. The
     token is 192 bits from the system RNG, compared in constant time and
     rotatable from the app.
+  - **Encrypted sharing (QUIC).** Alongside HTTP, the same object store is
+    served as `rbq-peer/1` over QUIC on the same port number (UDP). Each
+    interface also gets `rbq+quic://ADDRESS:PORT?peer=ID&token=…`, and the QR
+    code carries it. `peer=` is this phone's key fingerprint, which the client
+    pins: a device presenting another key is refused, and the token never
+    crosses the network in clear. The key lives in the app's private storage
+    (`quic-identity/`), so the fingerprint survives restarts and token
+    rotation. Use `rbq peer status|push|pull` with that string; plain HTTP
+    remains for older clients. If QUIC cannot start, the app says why and
+    keeps HTTP running. QUIC clients are not yet listed under Connected
+    clients.
   - After ten failed attempts in a minute, an address is throttled.
 - **Connected clients.** Each peer address shows when it was first and last
   seen, an active marker for the last 60 seconds, and request counts. It also

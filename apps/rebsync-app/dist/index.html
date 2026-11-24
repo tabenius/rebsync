@@ -113,9 +113,9 @@
     <div id="share-on" hidden>
       <div class="row spread small"><span>Token <code id="token">••••••</code></span>
         <span class="row"><button id="reveal">Show</button><button id="copy-token">Copy</button><button id="rotate">New token</button></span></div>
+      <div id="quic-id" class="small muted" hidden></div>
       <div id="connections"></div>
-      <div class="note small">Plain HTTP on the local network: anyone on the same network can see the token.
-        Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.</div>
+      <div class="note small" id="share-note"></div>
     </div>
   </section>
 
@@ -190,17 +190,32 @@ function renderOverview(o) {
   $("#share-on").hidden = !o.sharing;
   $("#share-off").hidden = o.sharing;
   $("#token").textContent = revealed ?? `${o.token_hint}`;
+  // The QR code and the first button carry the encrypted QUIC string when it
+  // exists; plain HTTP stays available for older clients.
+  const quic = o.quic_peer_id != null;
+  $("#quic-id").hidden = !quic;
+  $("#quic-id").innerHTML = quic
+    ? `Encrypted sharing on UDP port ${esc(o.quic_port)}. Phone key <code class="mono">${esc(o.quic_peer_id.slice(0, 16))}…</code>
+       — check it matches <code>peer=</code> on the other device.`
+    : "";
+  $("#share-note").textContent = quic
+    ? "Use the encrypted (QUIC) connection string: clients pin this phone's key and the token never crosses the network in clear. "
+      + "Plain HTTP is for older clients only: anyone on the same network can see its token. Mobile-data addresses are usually unreachable."
+    : "Plain HTTP on the local network: anyone on the same network can see the token. "
+      + "Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.";
   const conns = o.connections.map((c) => `
     <div class="conn">
       <div>
-        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span>
+          ${c.quic_pairing ? '<span class="tag ok">encrypted</span>' : '<span class="tag warn">plain HTTP</span>'}</div>
         <div style="margin:6px 0"><code>${esc(c.url)}</code></div>
         <div class="row small">
-          <button data-copy="${esc(c.pairing)}" data-what="Connection string">Copy connection string</button>
+          ${c.quic_pairing ? `<button data-copy="${esc(c.quic_pairing)}" data-what="Encrypted connection string">Copy encrypted connection string</button>` : ""}
+          <button data-copy="${esc(c.pairing)}" data-what="HTTP connection string">${c.quic_pairing ? "Copy HTTP (older clients)" : "Copy connection string"}</button>
           <button data-copy="curl -H 'Authorization: Bearer TOKEN' ${esc(c.url)}/v1/status" data-what="curl example">curl</button>
         </div>
       </div>
-      <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+      <div class="qr" title="${c.quic_pairing ? "Scan to pair (encrypted)" : "Scan to pair"}">${c.qr_svg}</div>
     </div>`).join("");
   $("#connections").innerHTML = o.sharing
     ? (conns || `<div class="note">No network address. Join Wi-Fi, start a hotspot or enable USB tethering.</div>`)
