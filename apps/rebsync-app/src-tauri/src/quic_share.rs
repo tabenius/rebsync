@@ -80,6 +80,10 @@ impl ObjectStorage for FollowStorage {
     fn delete(&self, key: &ObjectKey) -> Result<(), StorageError> {
         self.current()?.delete(key)
     }
+
+    fn put_if_absent_file(&self, key: &ObjectKey, file: &Path) -> Result<PutOutcome, StorageError> {
+        self.current()?.put_if_absent_file(key, file)
+    }
 }
 
 /// A running QUIC share.
@@ -121,7 +125,15 @@ impl QuicShare {
         // Paired devices connect with their key alone; invitations pair new
         // ones on first contact.
         .with_trust(trust.clone())
-        .with_pairing(trust.clone());
+        .with_pairing(trust.clone())
+        // Large uploads are staged on disk in parts and resume after a
+        // dropped connection (phones change networks often).
+        .with_staging(Arc::new(
+            transport::staging::Staging::open(
+                &trust_dir.parent().unwrap_or(trust_dir).join("staging"),
+            )
+            .map_err(|e| format!("{e:#}"))?,
+        ));
         let server = transport::Server::bind_quic("0.0.0.0", port, service.clone(), &identity)
             .or_else(|_| transport::Server::bind_quic("0.0.0.0", 0, service, &identity))
             .map_err(|e| format!("{e:#}"))?;

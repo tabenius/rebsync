@@ -686,6 +686,10 @@ impl Link for QuicLink {
         super::range_reply(reply, offset)
     }
 
+    fn call(&mut self, request: Request, body: Option<&[u8]>) -> Result<Response> {
+        Ok(self.exchange(request, body)?.0)
+    }
+
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
         match self
             .exchange(
@@ -946,18 +950,13 @@ async fn serve_stream(
         );
         return Ok(true);
     }
-    let body = match &envelope.request {
-        Request::Put { size, .. } => {
-            if *size > MAX_OBJECT {
-                respond(
-                    &mut send,
-                    error_response(413, "object exceeds 64 MiB"),
-                    None,
-                )
-                .await?;
+    let body = match super::body_length(&envelope.request) {
+        Some(size) => {
+            if size > super::body_limit(&envelope.request) {
+                respond(&mut send, error_response(413, "body too large"), None).await?;
                 return Ok(true);
             }
-            match tokio::time::timeout(IO_TIMEOUT, read_frame(&mut recv, *size as usize)).await {
+            match tokio::time::timeout(IO_TIMEOUT, read_frame(&mut recv, size as usize)).await {
                 Ok(Ok(Some(body))) => Some(body),
                 _ => {
                     respond(
@@ -970,7 +969,7 @@ async fn serve_stream(
                 }
             }
         }
-        _ => None,
+        None => None,
     };
     let received = (frame.len() + body.as_ref().map_or(0, Vec::len)) as u64;
     let request = envelope.request;

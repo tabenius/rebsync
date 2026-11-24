@@ -864,8 +864,13 @@ rbq peer selftest
   not hold 64 MiB in memory. Clients fetch objects in 4 MiB `get_range`
   windows; if the link drops mid-object (a mesh hop, a phone changing
   networks), the client reconnects and resumes from the bytes it already has.
-  A peer's own refusal is never retried. Uploads are still sent whole (at most
-  64 MiB each, at most eight in flight per server).
+  A peer's own refusal is never retried. Uploads larger than 4 MiB go in
+  parts the server stages on disk (one part in memory at a time); after a
+  break the client asks how much arrived and continues. Nothing is published
+  until the commit verifies the whole staged file (a chunk's SHA-256 against
+  its address, computed while reading), and the object is then created if
+  absent straight from the file. Staging is capped at 1 GiB and stale uploads
+  are removed after a day.
 - **Bounded and additive.** Frames, listings, datagrams and reassembly have
   explicit size and time limits. `put` is still create-if-absent, and the
   server re-checks keys and chunk digests before writing.

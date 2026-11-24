@@ -51,6 +51,7 @@ pub const PROTOCOL: &str = "rbq-peer/1";
 pub mod pairing;
 #[cfg(feature = "peer-quic")]
 pub mod quic;
+pub mod staging;
 /// Metadata frames (a request/response envelope) are bounded independently
 /// from object bodies. A 10 000-key listing with long keys needs a few MiB.
 const MAX_CONTROL: usize = 8 * 1024 * 1024;
@@ -326,6 +327,24 @@ pub enum Request {
         key: String,
         size: u64,
     },
+    /// Begin or resume a staged upload of `size` bytes. Replies `staged`
+    /// with the bytes already received (resume from there), or `stored` if
+    /// the object already exists.
+    PutStart {
+        key: String,
+        size: u64,
+    },
+    /// Append `length` bytes (the body that follows) at `offset`.
+    PutPart {
+        key: String,
+        offset: u64,
+        length: u64,
+    },
+    /// Verify the staged upload and create the object if absent.
+    PutCommit {
+        key: String,
+        size: u64,
+    },
     /// Redeem a one-time pairing secret (QUIC only): `card` is the client's
     /// self-signed card, whose key must be the one the TLS handshake proved.
     Pair {
@@ -351,6 +370,13 @@ fn describe_request(request: &Request) -> String {
             length,
         } => format!("get {} [{offset}+{length}]", short(key)),
         Request::Put { key, size } => format!("put {} ({size} bytes)", short(key)),
+        Request::PutStart { key, size } => format!("put {} ({size} bytes, staged)", short(key)),
+        Request::PutPart {
+            key,
+            offset,
+            length,
+        } => format!("put {} [{offset}+{length}]", short(key)),
+        Request::PutCommit { key, .. } => format!("put {} (commit)", short(key)),
         Request::Pair { .. } => "pair (one-time secret)".into(),
     }
 }
@@ -372,6 +398,9 @@ pub struct Capabilities {
     /// The server answers `get_range` (absent from older servers).
     #[serde(default)]
     pub ranged_get: bool,
+    /// The server accepts staged, resumable uploads.
+    #[serde(default)]
+    pub staged_put: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -401,6 +430,10 @@ pub enum Response {
     Stored {
         created: bool,
         size: u64,
+    },
+    /// Bytes of a staged upload received so far.
+    Staged {
+        offset: u64,
     },
     /// A redeemed pairing: the server's self-signed card.
     Paired {
@@ -442,6 +475,26 @@ impl std::fmt::Display for PeerError {
 }
 
 impl std::error::Error for PeerError {}
+
+/// Largest part of a staged upload; a server holds one part in memory.
+pub const MAX_PART: u64 = 8 * 1024 * 1024;
+
+/// How many body bytes follow a request, if any. Servers read exactly this.
+pub(crate) fn body_length(request: &Request) -> Option<u64> {
+    match request {
+        Request::Put { size, .. } => Some(*size),
+        Request::PutPart { length, .. } => Some(*length),
+        _ => None,
+    }
+}
+
+/// The largest body a request may announce.
+pub(crate) fn body_limit(request: &Request) -> u64 {
+    match request {
+        Request::PutPart { .. } => MAX_PART,
+        _ => MAX_OBJECT,
+    }
+}
 
 /// Largest range one `get_range` reply carries.
 const MAX_RANGE: u64 = 16 * 1024 * 1024;
@@ -584,7 +637,10 @@ impl Scopes {
 
     pub fn allows(self, request: &Request) -> bool {
         match request {
-            Request::Put { .. } => self.write,
+            Request::Put { .. }
+            | Request::PutStart { .. }
+            | Request::PutPart { .. }
+            | Request::PutCommit { .. } => self.write,
             Request::Status
             | Request::List { .. }
             | Request::Get { .. }
@@ -615,6 +671,7 @@ pub struct Service {
     token: Option<Arc<String>>,
     trust: Option<Arc<dyn PeerTrust>>,
     pairing: Option<Arc<dyn PairingAuthority>>,
+    staging: Option<Arc<staging::Staging>>,
     writes_paused: Arc<AtomicBool>,
     listing: Arc<Mutex<Option<CachedListing>>>,
     observer: Option<Arc<dyn Observer>>,
@@ -646,6 +703,7 @@ impl Service {
             token: Some(Arc::new(token)),
             trust: None,
             pairing: None,
+            staging: None,
             writes_paused,
             listing: Arc::default(),
             observer: None,
@@ -664,6 +722,12 @@ impl Service {
     /// Let peers whose keys `trust` vouches for in without a token (QUIC).
     pub fn with_trust(mut self, trust: Arc<dyn PeerTrust>) -> Self {
         self.trust = Some(trust);
+        self
+    }
+
+    /// Accept staged, resumable uploads, staged in `staging`.
+    pub fn with_staging(mut self, staging: Arc<staging::Staging>) -> Self {
+        self.staging = Some(staging);
         self
     }
 
@@ -775,7 +839,39 @@ impl Service {
                 max_object_bytes: MAX_OBJECT,
                 datagram_chunk_bytes: CHUNK as u64,
                 ranged_get: true,
+                staged_put: self.staging.is_some(),
             },
+        }
+    }
+
+    /// Common checks for the staged-upload requests, then `step`.
+    fn staged(
+        &self,
+        key: &str,
+        size: u64,
+        step: impl FnOnce(&staging::Staging) -> Result<Response, staging::Refusal>,
+    ) -> (Response, Option<Body>) {
+        let Some(staging) = &self.staging else {
+            return (
+                error_response(501, "this server does not stage uploads"),
+                None,
+            );
+        };
+        if self.writes_paused.load(Ordering::Relaxed) {
+            return (
+                error_response(503, "data is being moved; retry later"),
+                None,
+            );
+        }
+        if size > MAX_OBJECT {
+            return (error_response(413, "object exceeds 64 MiB"), None);
+        }
+        if let Err(error) = peer::admissible_key(key) {
+            return (error_response(400, format!("{error:#}")), None);
+        }
+        match step(staging) {
+            Ok(response) => (response, None),
+            Err(refusal) => (error_response(refusal.code, refusal.message), None),
         }
     }
 
@@ -897,6 +993,47 @@ impl Service {
                 ),
                 Err(response) => (response, None),
             },
+            Request::PutStart { key, size } => self.staged(key, *size, |staging| {
+                if let Ok(object) = ObjectKey::parse(key)
+                    && let Ok(meta) = self.storage.head(&object)
+                {
+                    return Ok(Response::Stored {
+                        created: false,
+                        size: meta.size,
+                    });
+                }
+                Ok(Response::Staged {
+                    offset: staging.start(key, *size)?,
+                })
+            }),
+            Request::PutPart {
+                key,
+                offset,
+                length,
+            } => self.staged(key, 0, |staging| {
+                let body = body.unwrap_or_default();
+                if body.len() as u64 != *length || *length > MAX_PART {
+                    return Err(staging::Refusal {
+                        code: 400,
+                        message: "part length does not match".into(),
+                    });
+                }
+                Ok(Response::Staged {
+                    offset: staging.append(key, *offset, body)?,
+                })
+            }),
+            Request::PutCommit { key, size } => self.staged(key, *size, |staging| {
+                Ok(match staging.commit(key, *size, self.storage.as_ref())? {
+                    PutOutcome::Created(meta) => Response::Stored {
+                        created: true,
+                        size: meta.size,
+                    },
+                    PutOutcome::AlreadyExists(meta) => Response::Stored {
+                        created: false,
+                        size: meta.size,
+                    },
+                })
+            }),
             Request::Put { key, size } => {
                 let Some(body) = body else {
                     return (error_response(400, "put without a body"), None);
@@ -952,6 +1089,9 @@ pub trait Link: Send {
     /// Up to `length` bytes of `key` from `offset`, and the object's size.
     /// Servers advertise support with `capabilities.ranged_get`.
     fn get_range(&mut self, key: &str, offset: u64, length: u64) -> Result<(Vec<u8>, u64)>;
+    /// One request and its reply, for operations without a dedicated method
+    /// (staged uploads).
+    fn call(&mut self, request: Request, body: Option<&[u8]>) -> Result<Response>;
 }
 
 /// Shared by every link: decode a `get_range` exchange.
@@ -1318,6 +1458,10 @@ impl Link for StreamLink {
         range_reply(reply, offset)
     }
 
+    fn call(&mut self, request: Request, body: Option<&[u8]>) -> Result<Response> {
+        Ok(self.exchange(request, body)?.0)
+    }
+
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
         match self
             .exchange(
@@ -1579,6 +1723,10 @@ impl Link for DatagramLink {
         range_reply(reply, offset)
     }
 
+    fn call(&mut self, request: Request, body: Option<&[u8]>) -> Result<Response> {
+        Ok(self.exchange(request, body)?.0)
+    }
+
     fn put(&mut self, key: &str, bytes: &[u8]) -> Result<bool> {
         match self
             .exchange(
@@ -1610,8 +1758,8 @@ pub struct TransportPeer {
     link: Mutex<Box<dyn Link>>,
     description: String,
     reconnect: Option<Reconnect>,
-    /// Whether the server answers `get_range`, learned once.
-    ranged: std::sync::OnceLock<bool>,
+    /// What the server supports (ranged gets, staged uploads), learned once.
+    capabilities: std::sync::OnceLock<Capabilities>,
 }
 
 impl TransportPeer {
@@ -1648,7 +1796,7 @@ impl TransportPeer {
             link: Mutex::new(link),
             description,
             reconnect,
-            ranged: std::sync::OnceLock::new(),
+            capabilities: std::sync::OnceLock::new(),
         }
     }
 
@@ -1679,15 +1827,109 @@ impl TransportPeer {
         }
     }
 
-    fn ranged(&self) -> Result<bool> {
-        if let Some(ranged) = self.ranged.get() {
-            return Ok(*ranged);
+    fn capabilities(&self) -> Result<&Capabilities> {
+        if let Some(capabilities) = self.capabilities.get() {
+            return Ok(capabilities);
         }
-        let ranged = self
-            .with_retry(|link| link.status())?
-            .capabilities
-            .ranged_get;
-        Ok(*self.ranged.get_or_init(|| ranged))
+        let capabilities = self.with_retry(|link| link.status())?.capabilities;
+        Ok(self.capabilities.get_or_init(|| capabilities))
+    }
+
+    fn ranged(&self) -> Result<bool> {
+        Ok(self.capabilities()?.ranged_get)
+    }
+
+    /// Upload in [`CLIENT_WINDOW`] parts that the server stages on disk. A
+    /// broken link is replaced and the upload continues from what the
+    /// server already has; nothing is published until the commit verifies.
+    fn put_resumable(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        let size = bytes.len() as u64;
+        let start = || -> Result<Option<u64>> {
+            match self.with_retry(|link| {
+                link.call(
+                    Request::PutStart {
+                        key: key.into(),
+                        size,
+                    },
+                    None,
+                )
+            })? {
+                Response::Staged { offset } if offset <= size => Ok(Some(offset)),
+                // Already stored: nothing to send.
+                Response::Stored { .. } => Ok(None),
+                _ => bail!("peer returned an unexpected upload reply"),
+            }
+        };
+        let Some(mut offset) = start()? else {
+            return Ok(false);
+        };
+        let mut resyncs = 0;
+        while offset < size {
+            let end = (offset + CLIENT_WINDOW.min(MAX_PART)).min(size);
+            let part = &bytes[offset as usize..end as usize];
+            let sent = self.with_retry(|link| {
+                link.call(
+                    Request::PutPart {
+                        key: key.into(),
+                        offset,
+                        length: part.len() as u64,
+                    },
+                    Some(part),
+                )
+            });
+            match sent {
+                Ok(Response::Staged { offset: next }) if next > offset && next <= size => {
+                    offset = next;
+                }
+                Ok(_) => bail!("peer returned an unexpected upload reply"),
+                // The server has a different offset (a part landed but its
+                // reply was lost, or the staging was reset): ask and resume.
+                Err(error)
+                    if error
+                        .downcast_ref::<PeerError>()
+                        .is_some_and(|e| e.code == 409)
+                        && resyncs < WINDOW_ATTEMPTS =>
+                {
+                    resyncs += 1;
+                    match start()? {
+                        Some(staged) => offset = staged,
+                        None => return Ok(false),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        match self.with_retry(|link| {
+            link.call(
+                Request::PutCommit {
+                    key: key.into(),
+                    size,
+                },
+                None,
+            )
+        }) {
+            Ok(Response::Stored {
+                created,
+                size: stored,
+            }) => {
+                ensure!(stored == size, "peer stored a different size");
+                Ok(created)
+            }
+            Ok(_) => bail!("peer returned an unexpected commit reply"),
+            // A commit that landed but whose reply was lost: the staging is
+            // gone and the object exists.
+            Err(error)
+                if error
+                    .downcast_ref::<PeerError>()
+                    .is_some_and(|e| e.code == 409) =>
+            {
+                match start()? {
+                    None => Ok(false),
+                    Some(_) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Fetch an object in [`CLIENT_WINDOW`] pieces. If the link breaks
@@ -1737,7 +1979,7 @@ impl PeerApi for TransportPeer {
 
     fn status(&self) -> Result<Value> {
         let status = self.with_retry(|link| link.status())?;
-        let _ = self.ranged.set(status.capabilities.ranged_get);
+        let _ = self.capabilities.set(status.capabilities.clone());
         Ok(serde_json::json!({
             "protocol": status.protocol,
             "version": status.version,
@@ -1799,7 +2041,11 @@ impl PeerApi for TransportPeer {
     /// Create-if-absent, so retrying after a lost reply is safe: a put that
     /// did land reports "already present" and push compares the bytes.
     fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
-        self.with_retry(|link| link.put(key, bytes))
+        if bytes.len() as u64 > CLIENT_WINDOW && self.capabilities()?.staged_put {
+            self.put_resumable(key, bytes)
+        } else {
+            self.with_retry(|link| link.put(key, bytes))
+        }
     }
 }
 
@@ -2085,18 +2331,17 @@ fn serve_connection(
             return;
         }
         authenticated = true;
-        let body = match &envelope.request {
-            Request::Put { size, .. } => {
-                if *size > MAX_OBJECT {
+        let body = match body_length(&envelope.request) {
+            Some(size) => {
+                if size > body_limit(&envelope.request) {
                     // The client has already written its body frame; the stream
                     // cannot be resynchronised, so answer and close.
-                    let _ =
-                        send_response(stream, None, error_response(413, "object exceeds 64 MiB"));
+                    let _ = send_response(stream, None, error_response(413, "body too large"));
                     return;
                 }
                 // The declared size bounds the read, not the protocol maximum:
                 // a 10-byte put cannot make the server buffer 64 MiB.
-                match read_frame(stream, *size as usize) {
+                match read_frame(stream, size as usize) {
                     Ok(Some(body)) => Some(body),
                     _ => {
                         let _ = send_response(stream, None, error_response(400, "missing body"));
@@ -2104,7 +2349,7 @@ fn serve_connection(
                     }
                 }
             }
-            _ => None,
+            None => None,
         };
         let (response, out) = service.handle(&envelope.request, body.as_deref());
         let received = (frame.len() + body.as_ref().map_or(0, Vec::len)) as u64;
@@ -2247,18 +2492,18 @@ fn serve_datagrams(
                     );
                     continue;
                 }
-                if let Request::Put { size, .. } = &envelope.request {
-                    if *size > MAX_OBJECT {
+                if let Some(size) = body_length(&envelope.request) {
+                    if size > body_limit(&envelope.request) {
                         let _ = send_datagram(
                             socket,
                             &addr,
                             id,
-                            error_response(413, "object exceeds 64 MiB"),
+                            error_response(413, "body too large"),
                             None,
                         );
                         continue;
                     }
-                    let expected = *size as usize;
+                    let expected = size as usize;
                     if expected == 0 {
                         let (response, out) = service.handle(&envelope.request, Some(&[]));
                         reply_body(socket, &addr, id, service, response, out);
@@ -2828,6 +3073,9 @@ mod tests {
         fn get_range(&mut self, _: &str, _: u64, _: u64) -> Result<(Vec<u8>, u64)> {
             bail!("unused")
         }
+        fn call(&mut self, _: Request, _: Option<&[u8]>) -> Result<Response> {
+            bail!("unused")
+        }
     }
 
     fn listing(page: ListingPage) -> Result<BTreeMap<String, u64>> {
@@ -3151,43 +3399,45 @@ mod tests {
         }
     }
 
-    /// A TCP relay that cuts its first connection after `cut_after` bytes
-    /// from the server, like a mesh link dropping mid-transfer. Returns the
-    /// relay port and a count of connections it accepted.
-    fn flaky_relay(upstream: u16, cut_after: usize) -> (u16, Arc<AtomicUsize>) {
+    /// A TCP relay that cuts its first connection after `cut_after` bytes in
+    /// one direction (server to client, or client to server when `upload`),
+    /// like a mesh link dropping mid-transfer. Returns the relay port and a
+    /// count of connections it accepted.
+    fn flaky_relay(upstream: u16, cut_after: usize, upload: bool) -> (u16, Arc<AtomicUsize>) {
+        fn pump(mut from: TcpStream, mut to: TcpStream, cut: Option<usize>) {
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut relayed = 0;
+            loop {
+                let n = match from.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if cut.is_some_and(|cut| relayed + n > cut) {
+                    break;
+                }
+                if to.write_all(&buffer[..n]).is_err() {
+                    break;
+                }
+                relayed += n;
+            }
+            let _ = from.shutdown(Shutdown::Both);
+            let _ = to.shutdown(Shutdown::Both);
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let accepted = Arc::new(AtomicUsize::new(0));
         let count = accepted.clone();
         thread::spawn(move || {
             for client in listener.incoming() {
-                let Ok(mut client) = client else { return };
+                let Ok(client) = client else { return };
                 let first = count.fetch_add(1, Ordering::SeqCst) == 0;
-                let mut server = TcpStream::connect(("127.0.0.1", upstream)).unwrap();
-                let (mut client_read, mut server_write) =
+                let server = TcpStream::connect(("127.0.0.1", upstream)).unwrap();
+                let cut = first.then_some(cut_after);
+                let (client_copy, server_copy) =
                     (client.try_clone().unwrap(), server.try_clone().unwrap());
-                thread::spawn(move || {
-                    let _ = std::io::copy(&mut client_read, &mut server_write);
-                });
-                thread::spawn(move || {
-                    let mut buffer = [0_u8; 64 * 1024];
-                    let mut relayed = 0;
-                    loop {
-                        let n = match server.read(&mut buffer) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => n,
-                        };
-                        if first && relayed + n > cut_after {
-                            break;
-                        }
-                        if client.write_all(&buffer[..n]).is_err() {
-                            break;
-                        }
-                        relayed += n;
-                    }
-                    let _ = client.shutdown(Shutdown::Both);
-                    let _ = server.shutdown(Shutdown::Both);
-                });
+                let (up_cut, down_cut) = if upload { (cut, None) } else { (None, cut) };
+                thread::spawn(move || pump(client_copy, server_copy, up_cut));
+                thread::spawn(move || pump(server, client, down_cut));
             }
         });
         (port, accepted)
@@ -3224,7 +3474,7 @@ mod tests {
             unreachable!()
         };
         // The relay drops the first connection 6 MiB into the download.
-        let (relay, accepted) = flaky_relay(port, 6 * 1024 * 1024);
+        let (relay, accepted) = flaky_relay(port, 6 * 1024 * 1024, false);
         let peer = TransportPeer::connect(
             &Target::Tcp {
                 host: "127.0.0.1".into(),
@@ -3249,6 +3499,273 @@ mod tests {
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
         drop(peer);
         server.stop();
+    }
+
+    fn staged_service(root: &Path) -> (Arc<crate::FsObjectStorage>, Service) {
+        let storage = Arc::new(crate::FsObjectStorage::open(root.join("store")).unwrap());
+        let staging = Arc::new(staging::Staging::open(&root.join("staging")).unwrap());
+        let service = Service::new(storage.clone(), token(), Arc::new(AtomicBool::new(false)))
+            .with_staging(staging);
+        (storage, service)
+    }
+
+    fn staging_is_empty(root: &Path) -> bool {
+        fs::read_dir(root.join("staging")).unwrap().next().is_none()
+    }
+
+    #[test]
+    fn large_uploads_are_staged_and_arrive_whole_over_every_transport() {
+        let (key, bytes) = big_chunk(20 * 1024 * 1024 + 77);
+        let mut targets = vec![Target::Tcp {
+            host: "127.0.0.1".into(),
+            port: 0,
+        }];
+        #[cfg(unix)]
+        {
+            targets.push(Target::Unix {
+                path: PathBuf::from("s.sock"),
+            });
+            targets.push(Target::UnixDatagram {
+                path: PathBuf::from("d.sock"),
+            });
+        }
+        #[cfg(feature = "peer-quic")]
+        targets.push(Target::Quic {
+            host: "127.0.0.1".into(),
+            port: 0,
+            peer: None,
+        });
+        for target in targets {
+            let root = tempfile::tempdir().unwrap();
+            let target = match target {
+                #[cfg(unix)]
+                Target::Unix { path } => Target::Unix {
+                    path: root.path().join(path),
+                },
+                #[cfg(unix)]
+                Target::UnixDatagram { path } => Target::UnixDatagram {
+                    path: root.path().join(path),
+                },
+                other => other,
+            };
+            let (storage, service) = staged_service(root.path());
+            let server = match &target {
+                #[cfg(feature = "peer-quic")]
+                Target::Quic { host, port, .. } => {
+                    Server::bind_quic(host, *port, service, &quic::Identity::generate().unwrap())
+                        .unwrap()
+                }
+                _ => Server::bind(&target, service, false).unwrap(),
+            };
+            let peer = TransportPeer::connect(&server.target, token()).unwrap();
+            assert!(
+                peer.capabilities().unwrap().staged_put,
+                "{}",
+                target.describe()
+            );
+            assert!(peer.put(&key, &bytes).unwrap(), "{}", target.describe());
+            assert!(!peer.put(&key, &bytes).unwrap(), "create-if-absent");
+            assert!(
+                storage.get(&ObjectKey::parse(&key).unwrap()).unwrap() == bytes,
+                "{}",
+                target.describe()
+            );
+            assert!(staging_is_empty(root.path()), "{}", target.describe());
+            drop(peer);
+            assert!(server.shutdown());
+        }
+    }
+
+    #[test]
+    fn an_upload_resumes_after_the_link_breaks() {
+        #[derive(Default)]
+        struct Requests(Mutex<Vec<String>>);
+        impl Observer for Requests {
+            fn request(&self, r: &RequestRecord<'_>) {
+                self.0.lock().unwrap().push(r.request.clone());
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (storage, service) = staged_service(root.path());
+        let requests = Arc::new(Requests::default());
+        let server = Server::bind(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            service.with_observer(requests.clone()),
+            false,
+        )
+        .unwrap();
+        let Target::Tcp { port, .. } = server.target else {
+            unreachable!()
+        };
+        // The relay drops the first connection 6 MiB into the upload.
+        let (relay, accepted) = flaky_relay(port, 6 * 1024 * 1024, true);
+        let (key, bytes) = big_chunk(18 * 1024 * 1024);
+        let peer = TransportPeer::connect(
+            &Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: relay,
+            },
+            token(),
+        )
+        .unwrap();
+        assert!(peer.put(&key, &bytes).unwrap());
+        assert!(storage.get(&ObjectKey::parse(&key).unwrap()).unwrap() == bytes);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "one reconnect");
+        let seen = requests.0.lock().unwrap().clone();
+        let parts = seen
+            .iter()
+            .filter(|r| r.contains("] ") || r.ends_with(']'))
+            .count();
+        // 18 MiB in 4 MiB parts is 5; after the break the client resumed from
+        // the server's offset instead of starting over.
+        assert!((5..=6).contains(&parts), "{seen:?}");
+        assert!(seen.iter().any(|r| r.ends_with("(commit)")));
+        assert!(staging_is_empty(root.path()));
+        drop(peer);
+        server.stop();
+    }
+
+    #[test]
+    fn put_start_reports_what_is_already_staged() {
+        let root = tempfile::tempdir().unwrap();
+        let (storage, service) = staged_service(root.path());
+        let (key, bytes) = big_chunk(3 * 1024 * 1024);
+        let size = bytes.len() as u64;
+        let call = |request: Request, body: Option<&[u8]>| service.handle(&request, body).0;
+        let start = || {
+            call(
+                Request::PutStart {
+                    key: key.clone(),
+                    size,
+                },
+                None,
+            )
+        };
+        assert!(matches!(start(), Response::Staged { offset: 0 }));
+        let first = &bytes[..1024 * 1024];
+        call(
+            Request::PutPart {
+                key: key.clone(),
+                offset: 0,
+                length: first.len() as u64,
+            },
+            Some(first),
+        );
+        // A client that lost the reply (or the link) asks again and resumes.
+        assert!(matches!(start(), Response::Staged { offset } if offset == 1024 * 1024));
+        let rest = &bytes[1024 * 1024..];
+        call(
+            Request::PutPart {
+                key: key.clone(),
+                offset: 1024 * 1024,
+                length: rest.len() as u64,
+            },
+            Some(rest),
+        );
+        assert!(matches!(
+            call(
+                Request::PutCommit {
+                    key: key.clone(),
+                    size
+                },
+                None
+            ),
+            Response::Stored { created: true, .. }
+        ));
+        assert_eq!(
+            storage.get(&ObjectKey::parse(&key).unwrap()).unwrap(),
+            bytes
+        );
+        // Once stored, starting again says so instead of staging anew.
+        assert!(matches!(start(), Response::Stored { created: false, .. }));
+    }
+
+    #[test]
+    fn a_staged_upload_that_does_not_verify_is_never_published() {
+        let root = tempfile::tempdir().unwrap();
+        let (storage, service) = staged_service(root.path());
+        let (key, bytes) = big_chunk(5 * 1024 * 1024);
+        let size = bytes.len() as u64;
+        let call = |request: Request, body: Option<&[u8]>| service.handle(&request, body).0;
+        assert!(matches!(
+            call(
+                Request::PutStart {
+                    key: key.clone(),
+                    size
+                },
+                None
+            ),
+            Response::Staged { offset: 0 }
+        ));
+        let wrong = vec![0_u8; bytes.len()];
+        assert!(matches!(
+            call(
+                Request::PutPart {
+                    key: key.clone(),
+                    offset: 0,
+                    length: size
+                },
+                Some(&wrong)
+            ),
+            Response::Staged { .. }
+        ));
+        // A part at the wrong offset is refused with the real one.
+        assert!(matches!(
+            call(
+                Request::PutPart {
+                    key: key.clone(),
+                    offset: 3,
+                    length: 1
+                },
+                Some(b"x")
+            ),
+            Response::Error { code: 409, .. }
+        ));
+        assert!(matches!(
+            call(
+                Request::PutCommit {
+                    key: key.clone(),
+                    size
+                },
+                None
+            ),
+            Response::Error { code: 400, .. }
+        ));
+        assert!(storage.head(&ObjectKey::parse(&key).unwrap()).is_err());
+        assert!(
+            staging_is_empty(root.path()),
+            "a failed upload is discarded"
+        );
+    }
+
+    #[test]
+    fn put_if_absent_file_never_replaces_an_object() {
+        for hard_links in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut storage = crate::FsObjectStorage::open(root.path().join("store")).unwrap();
+            if !hard_links {
+                storage = storage.without_hard_links();
+            }
+            let (key, bytes) = big_chunk(1000);
+            let key = ObjectKey::parse(&key).unwrap();
+            let file = root.path().join("upload");
+            fs::write(&file, &bytes).unwrap();
+            assert!(matches!(
+                storage.put_if_absent_file(&key, &file).unwrap(),
+                PutOutcome::Created(_)
+            ));
+            fs::write(&file, vec![1_u8; 1000]).unwrap();
+            assert!(matches!(
+                storage.put_if_absent_file(&key, &file).unwrap(),
+                PutOutcome::AlreadyExists(_)
+            ));
+            assert_eq!(storage.get(&key).unwrap(), bytes);
+            // No temporaries are left beside the object, or listed.
+            assert_eq!(storage.list_prefix("mneme/", 0).unwrap().len(), 1);
+        }
     }
 
     #[test]

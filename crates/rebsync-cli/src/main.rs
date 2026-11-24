@@ -1765,7 +1765,12 @@ fn peer_action(config: &rebsync_core::Config, action: PeerAction, json: bool) ->
                 None => transport::Service::without_token(Arc::new(storage), paused),
             }
             .with_trust(store.clone())
-            .with_pairing(store);
+            .with_pairing(store)
+            // Large uploads arrive in parts staged on disk and resume after
+            // a broken link.
+            .with_staging(Arc::new(transport::staging::Staging::open(
+                &transport::staging::default_staging_dir(config)?,
+            )?));
             let mut servers = Vec::new();
             let mut quic_peer = None;
             for listen in &args.listen {
