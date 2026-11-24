@@ -16,7 +16,7 @@ use crate::peer::{Clients, SharedStorage};
 use rebsync_core::{
     ObjectKey, ObjectStorage, PutOutcome, StorageError,
     storage::{ObjectMeta, StorageCapabilities},
-    transport::{self, quic::Identity},
+    transport::{self, pairing::TrustStore, quic::Identity},
 };
 use std::{
     ops::Range,
@@ -87,28 +87,41 @@ pub struct QuicShare {
     server: transport::Server,
     pub port: u16,
     pub peer_id: String,
+    /// The phone's signed pairings: devices that connect with their key and
+    /// no token, and one-time invitations for new ones.
+    pub trust: Arc<TrustStore>,
 }
 
 impl QuicShare {
     /// Serve on UDP `port` (falling back to any free port), as the identity
     /// kept in `identity_dir` (created on first use, owner-only).
+    /// `trust_dir` holds the phone's signed pairings (created owner-only).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         port: u16,
         token: String,
         storage: SharedStorage,
         writes_paused: Arc<AtomicBool>,
         identity_dir: &Path,
+        trust_dir: &Path,
         clients: Arc<Clients>,
     ) -> Result<Self, String> {
         transport::validate_token(&token).map_err(|e| e.to_string())?;
-        let identity = Identity::load_or_create(identity_dir).map_err(|e| format!("{e:#}"))?;
+        let identity =
+            Arc::new(Identity::load_or_create(identity_dir).map_err(|e| format!("{e:#}"))?);
+        let trust =
+            Arc::new(TrustStore::open(trust_dir, identity.clone()).map_err(|e| format!("{e:#}"))?);
         // QUIC clients appear in the same Connected clients list as HTTP ones.
         let service = transport::Service::new(
             Arc::new(FollowStorage(storage)),
             token,
             writes_paused,
         )
-        .with_observer(clients);
+        .with_observer(clients)
+        // Paired devices connect with their key alone; invitations pair new
+        // ones on first contact.
+        .with_trust(trust.clone())
+        .with_pairing(trust.clone());
         let server = transport::Server::bind_quic("0.0.0.0", port, service.clone(), &identity)
             .or_else(|_| transport::Server::bind_quic("0.0.0.0", 0, service, &identity))
             .map_err(|e| format!("{e:#}"))?;
@@ -120,6 +133,7 @@ impl QuicShare {
             server,
             port,
             peer_id: identity.peer_id().to_owned(),
+            trust,
         })
     }
 
@@ -131,4 +145,10 @@ impl QuicShare {
 /// The connection string a client pastes or scans.
 pub fn pairing(host: &str, port: u16, peer_id: &str, token: &str) -> String {
     format!("rbq+quic://{host}:{port}?peer={peer_id}&token={token}")
+}
+
+/// A one-time pairing string: no token, a secret that pairs the scanning
+/// device's key on first use and then stops working.
+pub fn invitation(host: &str, port: u16, peer_id: &str, secret: &str) -> String {
+    format!("rbq+quic://{host}:{port}?peer={peer_id}&pair={secret}")
 }

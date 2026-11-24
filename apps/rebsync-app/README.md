@@ -31,7 +31,11 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
     (`quic-identity/`), so the fingerprint survives restarts and token
     rotation. Use `rbq peer status|push|pull` with that string; plain HTTP
     remains for older clients. If QUIC cannot start, the app says why and
-    keeps HTTP running. QUIC clients are listed under Connected clients with
+    keeps HTTP running. **Pair a device** shows a one-time code (QR and
+    string, 10 minutes, optionally read-only); `rbq peer pair join` on the
+    other device redeems it, and from then on that device connects with its
+    key alone, no token. Paired devices are listed with Remove (revocation).
+    Tailscale and NetBird interfaces are labelled as such. QUIC clients are listed under Connected clients with
     HTTP ones, tagged by how they connected, and the same failure throttle
     applies: after ten wrong tokens in a minute an address cannot connect
     over either.

@@ -52,6 +52,7 @@ fn push_to_the_phone_and_pull_elsewhere_over_quic() {
         shared.clone(),
         Arc::new(AtomicBool::new(false)),
         &t.path().join("identity"),
+        &t.path().join("paired"),
         clients.clone(),
     )
     .unwrap();
@@ -111,6 +112,7 @@ fn the_phone_keeps_its_identity_and_refuses_a_wrong_pin() {
             shared.clone(),
             Arc::new(AtomicBool::new(false)),
             &t.path().join("identity"),
+            &t.path().join("paired"),
             clients.clone(),
         )
         .unwrap()
@@ -141,4 +143,60 @@ fn the_phone_keeps_its_identity_and_refuses_a_wrong_pin() {
     let (target, token) = transport::parse_connection(&guess, None).unwrap();
     assert!(TransportPeer::connect(&target, token).is_err(), "throttled");
     second.stop();
+}
+
+#[test]
+fn a_laptop_pairs_with_the_phone_by_invitation_and_then_needs_no_token() {
+    use rebsync_core::transport::{Scopes, pairing, quic::Identity};
+    let t = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStorage> =
+        Arc::new(FsObjectStorage::open(t.path().join("phone")).unwrap());
+    let shared: SharedStorage = Arc::new(RwLock::new(store));
+    let clients = Arc::new(Clients::default());
+    let share = quic_share::QuicShare::start(
+        0,
+        TOKEN.into(),
+        shared,
+        Arc::new(AtomicBool::new(false)),
+        &t.path().join("identity"),
+        &t.path().join("paired"),
+        clients.clone(),
+    )
+    .unwrap();
+    // The phone shows a one-time invitation (as a QR code); the laptop joins.
+    let secret = share
+        .trust
+        .invite(Scopes::ALL, 600, Some("rebeqah".into()))
+        .unwrap();
+    let invitation = quic_share::invitation("127.0.0.1", share.port, &share.peer_id, &secret);
+    assert!(!invitation.contains(TOKEN), "an invitation carries no token");
+    let laptop = pairing::TrustStore::open(
+        &t.path().join("laptop-paired"),
+        Arc::new(Identity::generate().unwrap()),
+    )
+    .unwrap();
+    let (target, _) = transport::parse_target(&invitation, None).unwrap();
+    let secret = pairing::pairing_secret(&invitation).unwrap();
+    let paired = pairing::join(&target, &secret, &laptop, None).unwrap();
+    assert_eq!(paired.peer, share.peer_id);
+    assert_eq!(paired.name.as_deref(), Some("rebeqah"));
+    assert_eq!(share.trust.list().len(), 1, "the phone recorded the laptop");
+
+    // From now on the laptop's key is enough.
+    let phone = TransportPeer::connect_paired(&target, None, laptop.identity()).unwrap();
+    assert!(phone.status().is_ok());
+    // The invitation was single use.
+    let other = pairing::TrustStore::open(
+        &t.path().join("other-paired"),
+        Arc::new(Identity::generate().unwrap()),
+    )
+    .unwrap();
+    assert!(pairing::join(&target, &secret, &other, None).is_err());
+    // Unpairing on the phone revokes the laptop's key.
+    assert_eq!(share.trust.remove(laptop.identity().peer_id()).unwrap(), 1);
+    drop(phone);
+    let revoked = TransportPeer::connect_paired(&target, None, laptop.identity()).unwrap();
+    assert!(revoked.status().is_err());
+    drop(revoked);
+    share.stop();
 }

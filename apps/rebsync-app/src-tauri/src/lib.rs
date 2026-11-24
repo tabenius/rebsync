@@ -106,8 +106,11 @@ fn qr(text: &str) -> String {
         .unwrap_or_default()
 }
 
-fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
-    let mut list: Vec<Connection> = if_addrs::get_if_addrs()
+/// Reachable addresses of this phone: (interface, kind, host as written in
+/// a URL), best first: local networks and overlays before mobile data, IPv4
+/// before IPv6.
+fn hosts() -> Vec<(String, &'static str, String)> {
+    let mut list: Vec<(String, &'static str, String)> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .filter(|i| !i.is_loopback())
@@ -122,25 +125,12 @@ fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connect
                 }
                 _ => return None,
             };
-            let url = format!("http://{host}:{port}");
-            let pairing = format!("rbq+{url}/v1?token={token}");
-            let quic_pairing =
-                quic.map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
-            Some(Connection {
-                kind: interface_kind(&i.name, ip).into(),
-                interface: i.name.clone(),
-                address: host,
-                qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
-                url,
-                pairing,
-                quic_pairing,
-            })
+            Some((i.name.clone(), interface_kind(&i.name, ip), host))
         })
         .collect();
-    // Prefer local-network interfaces over mobile data, IPv4 first.
-    let rank = |c: &Connection| {
+    list.sort_by_key(|(_, kind, host)| {
         (
-            match c.kind.as_str() {
+            match *kind {
                 "Wi-Fi" => 0,
                 // Overlays reach the phone from any network.
                 "Tailscale" | "NetBird" | "Overlay VPN" => 1,
@@ -150,11 +140,102 @@ fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connect
                 "Mobile data" => 9,
                 _ => 5,
             },
-            c.address.starts_with('['),
+            host.starts_with('['),
         )
-    };
-    list.sort_by_key(rank);
+    });
     list
+}
+
+fn connections(port: u16, token: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
+    hosts()
+        .into_iter()
+        .map(|(interface, kind, host)| {
+            let url = format!("http://{host}:{port}");
+            let pairing = format!("rbq+{url}/v1?token={token}");
+            let quic_pairing =
+                quic.map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
+            Connection {
+                kind: kind.into(),
+                interface,
+                address: host,
+                qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
+                url,
+                pairing,
+                quic_pairing,
+            }
+        })
+        .collect()
+}
+
+/// A one-time pairing invitation, one string and QR code per address.
+#[derive(Serialize)]
+struct Invitation {
+    valid_minutes: u64,
+    access: &'static str,
+    connections: Vec<InvitationConnection>,
+}
+
+#[derive(Serialize)]
+struct InvitationConnection {
+    interface: String,
+    kind: String,
+    address: String,
+    invitation: String,
+    qr_svg: String,
+}
+
+const INVITATION_MINUTES: u64 = 10;
+
+/// Create a one-time pairing secret (encrypted sharing must be running).
+#[tauri::command]
+fn pair_invite(app: State<'_, App>, read_only: bool) -> Result<Invitation, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    let share = quic
+        .as_ref()
+        .ok_or("Turn sharing on first: pairing uses encrypted (QUIC) sharing")?;
+    let secret = share
+        .trust
+        .invite(
+            rebsync_core::transport::Scopes {
+                read: true,
+                write: !read_only,
+            },
+            INVITATION_MINUTES * 60,
+            Some("rebeqah".into()),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(Invitation {
+        valid_minutes: INVITATION_MINUTES,
+        access: if read_only { "read-only" } else { "read/write" },
+        connections: hosts()
+            .into_iter()
+            .map(|(interface, kind, host)| {
+                let invitation = quic_share::invitation(&host, share.port, &share.peer_id, &secret);
+                InvitationConnection {
+                    interface,
+                    kind: kind.into(),
+                    address: host,
+                    qr_svg: qr(&invitation),
+                    invitation,
+                }
+            })
+            .collect(),
+    })
+}
+
+/// Devices this phone has paired with (signed records it holds).
+#[tauri::command]
+fn paired_devices(app: State<'_, App>) -> Result<Vec<rebsync_core::transport::pairing::Paired>, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    Ok(quic.as_ref().map(|share| share.trust.list()).unwrap_or_default())
+}
+
+/// Revoke a pairing; the device needs a new invitation or the token.
+#[tauri::command]
+fn unpair(app: State<'_, App>, peer: String) -> Result<usize, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    let share = quic.as_ref().ok_or("Turn sharing on first")?;
+    share.trust.remove(&peer).map_err(|e| format!("{e:#}"))
 }
 
 #[derive(Serialize)]
@@ -281,6 +362,7 @@ fn start_peer(app: &App, settings: &Settings) -> Result<u16, String> {
         app.storage.clone(),
         app.writes_paused.clone(),
         &app.internal.join("quic-identity"),
+        &app.internal.join("paired"),
         app.clients.clone(),
     );
     if let (Ok(mut quic_slot), Ok(mut error)) = (app.quic.lock(), app.quic_error.lock()) {
@@ -499,7 +581,10 @@ pub fn run() {
             set_sharing,
             reveal_token,
             rotate_token,
-            move_data
+            move_data,
+            pair_invite,
+            paired_devices,
+            unpair
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
