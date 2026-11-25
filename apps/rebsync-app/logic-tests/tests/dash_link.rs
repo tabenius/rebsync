@@ -12,6 +12,10 @@ struct Fake {
     claimed: bool,
     cancelled: bool,
     token: Option<String>,
+    /// The scopes the device asked for, issued as asked.
+    scopes: serde_json::Value,
+    /// The repository: key → bytes.
+    objects: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 const KEY: &str = "11111111-2222-4333-8444-555555555555";
@@ -30,10 +34,16 @@ fn fake_dash() -> (String, Arc<Mutex<Fake>>) {
     let (shared, base) = (state.clone(), origin.clone());
     std::thread::spawn(move || {
         for mut request in server.incoming_requests() {
-            let mut body = String::new();
-            let _ = request.as_reader().read_to_string(&mut body);
+            let mut raw = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut raw);
+            let body = String::from_utf8_lossy(&raw).into_owned();
             let url = request.url().to_owned();
             let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let authorized = |fake: &Fake| {
+                let auth = request.headers().iter().find(|h| h.field.equiv("authorization")).map(|h| h.value.to_string());
+                fake.token.is_some() && auth == fake.token.as_ref().map(|t| format!("Bearer {t}"))
+            };
+            let repository = format!("/api/rbq/{KEY}");
             let mut fake = shared.lock().unwrap();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -45,6 +55,7 @@ fn fake_dash() -> (String, Arc<Mutex<Fake>>) {
                     let hash = json["nonce_sha256"].as_str().unwrap().to_owned();
                     assert!(body.len() < 2048 && !body.contains("nonce\":"), "only the nonce's hash is sent");
                     fake.nonce_sha256 = Some(hash.clone());
+                    fake.scopes = json["scopes"].clone();
                     (201, serde_json::json!({"pairing_id": id, "state": "pending", "expires_at": now + 600,
                         "matching_code": matching_code(&id, &hash), "approval_url": format!("{base}/pair/{id}")}))
                 }
@@ -60,7 +71,7 @@ fn fake_dash() -> (String, Arc<Mutex<Fake>>) {
                         let token = format!("rbs_{}", "ab".repeat(32));
                         fake.token = Some(token.clone());
                         (201, serde_json::json!({"key_id": KEY, "token": token, "token_type": "bearer",
-                            "scopes": ["describe", "list", "read"], "expires_at": now + 86400,
+                            "scopes": fake.scopes.clone(), "expires_at": now + 86400,
                             "device_label": "phone", "repository_id": REPO}))
                     } else {
                         (409, serde_json::json!({"error": "not_claimable"}))
@@ -70,13 +81,45 @@ fn fake_dash() -> (String, Arc<Mutex<Fake>>) {
                     fake.cancelled = true;
                     (200, serde_json::json!({"state": "cancelled"}))
                 }
-                ("GET", path) if path == format!("/api/rbq/{KEY}") => {
-                    let auth = request.headers().iter().find(|h| h.field.equiv("authorization")).map(|h| h.value.to_string());
-                    if auth == fake.token.as_ref().map(|t| format!("Bearer {t}")) {
-                        (200, serde_json::json!({"schema": "ragbaz.rbq-repository.v1", "private": true, "repository_id": REPO,
-                            "capabilities": {"list": true, "read": true, "append": false}}))
+                (_, path) if path.starts_with(&repository) && !authorized(&fake) => {
+                    (401, serde_json::json!({"error": "authentication_required"}))
+                }
+                ("GET", path) if path == repository => {
+                    (200, serde_json::json!({"schema": "ragbaz.rbq-repository.v1", "private": true, "repository_id": REPO,
+                        "capabilities": {"list": true, "read": true, "append": true}}))
+                }
+                ("GET", path) if path.starts_with(&format!("{repository}/objects?")) => {
+                    let query: std::collections::HashMap<String, String> = url::form_urlencoded::parse(path.split_once('?').unwrap().1.as_bytes()).into_owned().collect();
+                    let prefix = query.get("prefix").cloned().unwrap_or_default();
+                    let after = query.get("after").cloned().unwrap_or_default();
+                    let limit: usize = query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20);
+                    let keys: Vec<(&String, &Vec<u8>)> = fake.objects.iter().filter(|(k, _)| k.starts_with(&prefix) && k.as_str() > after.as_str()).collect();
+                    let page: Vec<serde_json::Value> = keys.iter().take(limit).map(|(k, v)| serde_json::json!({"key": k, "sha256": rebsync_core::wire::sha256_hex(v), "size_bytes": v.len(), "created_at": 1})).collect();
+                    let next = (keys.len() > limit).then(|| keys[limit - 1].0.clone());
+                    (200, serde_json::json!({"objects": page, "next_after": next}))
+                }
+                ("GET", path) if path.starts_with(&format!("{repository}/objects/")) => {
+                    let key = &path[repository.len() + "/objects/".len()..];
+                    match fake.objects.get(key) {
+                        Some(bytes) => {
+                            let response = tiny_http::Response::from_data(bytes.clone()).with_header(
+                                format!("x-content-sha256: {}", rebsync_core::wire::sha256_hex(bytes)).parse::<tiny_http::Header>().unwrap(),
+                            );
+                            drop(fake);
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                        None => (404, serde_json::json!({"error": "not_found"})),
+                    }
+                }
+                ("PUT", path) if path.starts_with(&format!("{repository}/objects/")) => {
+                    let key = path[repository.len() + "/objects/".len()..].to_owned();
+                    let created = !fake.objects.contains_key(&key);
+                    if !created && fake.objects[&key] != raw {
+                        (409, serde_json::json!({"error": "immutable_key_conflict"}))
                     } else {
-                        (401, serde_json::json!({"error": "authentication_required"}))
+                        fake.objects.entry(key.clone()).or_insert_with(|| raw.clone());
+                        (if created { 201 } else { 200 }, serde_json::json!({"key": key, "sha256": rebsync_core::wire::sha256_hex(&raw), "size_bytes": raw.len(), "created": created}))
                     }
                 }
                 _ => (404, serde_json::json!({"error": "not_found"})),
@@ -159,4 +202,60 @@ fn a_cancelled_pairing_ends_cleanly_and_a_bad_dash_is_refused() {
         let mode = std::fs::metadata(dir.path().join("dash-credentials")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
     }
+}
+
+fn publish(storage: &dyn rebsync_core::ObjectStorage, dir: &std::path::Path, layer: &str, name: &str, body: &[u8]) -> String {
+    std::fs::write(dir.join(name), body).unwrap();
+    rebsync_core::layer::publish_files(storage, layer, "phone", 4096, dir, &[name.to_owned()], serde_json::json!({"note": "fixture"}), None)
+        .unwrap()
+        .id
+}
+
+#[test]
+fn the_phone_sends_its_snapshots_to_dash_as_one_stable_source() {
+    let (dash, fake) = fake_dash();
+    let dir = tempfile::tempdir().unwrap();
+    let phone = rebsync_core::FsObjectStorage::open(dir.path().join("objects")).unwrap();
+    let export = dir.path().join("export");
+    std::fs::create_dir_all(&export).unwrap();
+    publish(&phone, &export, "frog", "board.json", &vec![7_u8; 20_000]);
+
+    let link = DashLink::open(&dir.path().join("app"), None).unwrap();
+    let begun = link.begin(&dash, "Rebeqah phone", false, 30).unwrap();
+    fake.lock().unwrap().approved = true;
+    let credential = link.poll(&begun.pairing_id).unwrap().credential.unwrap();
+    assert!(credential.scopes.contains(&rebsync_core::credentials::Scope::Append));
+
+    let report = link.send(KEY, &phone, "Rebeqah phone").unwrap();
+    assert!(report.complete, "{report:?}");
+    assert!(report.transferred > 0 && report.verified_snapshots == 1, "{report:?}");
+    let keys: Vec<String> = fake.lock().unwrap().objects.keys().cloned().collect();
+    let source = keys.iter().find(|k| k.ends_with("/source.json")).expect("a source descriptor");
+    assert!(source.starts_with("sources/v1/phone-"), "{source}");
+    assert!(keys.iter().any(|k| k.contains("/objects/frog/v1/snapshots/")), "{keys:?}");
+
+    // Again: nothing new is sent, and it is the same source.
+    let again = link.send(KEY, &phone, "a different name is ignored").unwrap();
+    assert!(again.complete && again.transferred == 0 && again.already_present > 0, "{again:?}");
+    assert_eq!(fake.lock().unwrap().objects.keys().filter(|k| k.ends_with("/source.json")).count(), 1);
+
+    // Revoked in Dash: the send is refused and the phone forgets the credential.
+    fake.lock().unwrap().token = Some(format!("rbs_{}", "ef".repeat(32)));
+    let refused = link.send(KEY, &phone, "Rebeqah phone").unwrap_err();
+    assert!(refused.contains("no longer accepts"), "{refused}");
+    assert!(link.credentials().unwrap()[0].disabled);
+}
+
+#[test]
+fn a_read_only_credential_cannot_send() {
+    let (dash, fake) = fake_dash();
+    let dir = tempfile::tempdir().unwrap();
+    let phone = rebsync_core::FsObjectStorage::open(dir.path().join("objects")).unwrap();
+    let link = DashLink::open(&dir.path().join("app"), None).unwrap();
+    let begun = link.begin(&dash, "phone", true, 30).unwrap();
+    fake.lock().unwrap().approved = true;
+    link.poll(&begun.pairing_id).unwrap().credential.unwrap();
+    let refused = link.send(KEY, &phone, "phone").unwrap_err();
+    assert!(refused.contains("Append"), "{refused}");
+    assert!(fake.lock().unwrap().objects.is_empty(), "refused before any request");
 }

@@ -93,8 +93,18 @@ repository at Dash, without typing or copying a token:
 1. The phone shows a matching code and an approval link (and its QR code).
 2. Open the link in Dash on any device where you are signed in, check that Dash
    shows the same code, and approve with your passkey.
-3. The phone collects its credential once and lists it with **Check** (asks
-   Dash to describe the repository) and **Forget** (stops using it here).
+3. The phone collects its credential once and lists it with **Send to Dash**,
+   **Check** (asks Dash to describe the repository) and **Forget** (stops
+   using it here).
+
+**Send to Dash** pushes the phone's snapshots (Mneme, Frog, agenda, Git) to
+your Dash repository as this phone's source: a random source id and the
+phone's name, chosen at the first send and kept. It is additive and
+resumable; objects already in Dash are verified, never replaced, and a second
+send transfers nothing new. Dash holds objects up to 256 KiB: larger ones are
+refused, not split, and the report says how many. It needs a read/write
+credential. If Dash answers that the credential is revoked or expired, the
+phone forgets it and asks you to pair again.
 
 Read-only leaves out `append`. Credentials last 30 days. They are kept in the
 app's private storage (`dash-credentials/`), and each secret is encrypted

@@ -337,6 +337,7 @@ function renderPaired(list, quic) {
 
 // ── Dash pairing ──
 let dashActive = null, dashTimer = null;
+const dashReports = {}; // credential id → last send report, kept across refreshes
 const dashWhen = (seconds) => new Date(seconds * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 function renderDashPairing(p) {
   if (!p) { $("#dash-pairing").innerHTML = ""; return; }
@@ -360,9 +361,10 @@ function renderDash(status) {
       <div class="row spread"><span class="row"><b>Paired with ${esc(new URL(c.audience.endpoint).host)}</b>
         <span class="tag ${c.disabled || expired ? "warn" : "ok"}">${c.disabled ? "forgotten" : expired ? "expired" : "active"}</span>
         <span class="tag">${c.scopes.includes("append") ? "read/write" : "read-only"}</span></span>
-        ${c.disabled ? "" : `<span class="row"><button data-dash-check="${esc(c.id)}" class="small">Check</button>
+        ${c.disabled ? "" : `<span class="row">${c.scopes.includes("append") ? `<button data-dash-send="${esc(c.id)}" class="small primary">Send to Dash</button>` : ""}<button data-dash-check="${esc(c.id)}" class="small">Check</button>
           <button data-dash-forget="${esc(c.id)}" class="small">Forget</button></span>`}</div>
       <div class="muted small">Expires ${esc(dashWhen(c.expires_at))}</div>
+      <div class="small" data-dash-report="${esc(c.id)}">${esc(dashReports[c.id] ?? "")}</div>
     </li>`;
   }).join("") : "";
   // A pairing left unfinished (app closed): offer to resume it.
@@ -396,6 +398,19 @@ document.addEventListener("click", async (event) => {
   const d = event.target?.dataset ?? {};
   try {
     if (d.dashCancel) { await invoke("dash_pair_cancel", { pairingId: d.dashCancel }); stopDashPoll(); toast("Pairing cancelled"); refresh(); }
+    else if (d.dashSend) {
+      const id = d.dashSend, button = event.target;
+      const show = (text) => { dashReports[id] = text; const el = document.querySelector(`[data-dash-report="${CSS.escape(id)}"]`); if (el) el.textContent = text; };
+      button.disabled = true; show("Sending… (objects already in Dash are checked, not sent again)");
+      try {
+        const r = await invoke("dash_send", { keyId: d.dashSend, name: $("#dash-label").value });
+        const mib = (r.transferred_bytes / 1048576).toFixed(1);
+        show(`${r.complete ? "Sent" : "Partly sent"}: ${r.transferred} new objects (${mib} MiB), ${r.already_present} already there`
+          + (r.rejected.length ? `, ${r.rejected.length} refused (over Dash's 256 KiB object limit or not a snapshot)` : "")
+          + (r.conflicts.length ? `, ${r.conflicts.length} conflicting` : "") + ".");
+        toast(r.complete ? "Sent to Dash" : "Sent, with some objects refused");
+      } catch (e) { show(""); toast(String(e)); refresh(); } finally { button.disabled = false; }
+    }
     else if (d.dashCheck) {
       const r = await invoke("dash_check", { keyId: d.dashCheck });
       toast(r.matches ? "Dash accepts this phone's credential" : "Dash answered for a different repository");

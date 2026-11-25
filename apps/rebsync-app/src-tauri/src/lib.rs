@@ -339,6 +339,18 @@ async fn dash_check(app: State<'_, App>, key_id: String) -> Result<serde_json::V
     with_dash(app, move |link| link.check(&key_id)).await
 }
 
+/// Send this phone's snapshots to the owner's Dash repository.
+#[tauri::command]
+async fn dash_send(
+    app: State<'_, App>,
+    key_id: String,
+    name: String,
+) -> Result<rebsync_core::repository_sync::Report, String> {
+    // Read through the current data root (it can move between volumes).
+    let storage = quic_share::FollowStorage(app.storage.clone());
+    with_dash(app, move |link| link.send(&key_id, &storage, &name)).await
+}
+
 /// Stop using a credential on this phone (revoke it in Dash too).
 #[tauri::command]
 async fn dash_forget(app: State<'_, App>, key_id: String) -> Result<(), String> {
@@ -715,6 +727,7 @@ pub fn run() {
             dash_pair_poll,
             dash_pair_cancel,
             dash_check,
+            dash_send,
             dash_forget
         ])
         .run(tauri::generate_context!())
