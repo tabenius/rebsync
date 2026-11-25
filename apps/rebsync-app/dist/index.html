@@ -412,6 +412,7 @@ async function refresh() {
       invoke("dash_status").catch((e) => ({ error: String(e), pending: [], credentials: [] }))]);
     renderOverview(o); renderVolumes(v); renderPaired(paired, o.quic_peer_id != null); renderDash(dash);
     if (dash.error) $("#dash-note").textContent = `Dash pairing is unavailable: ${dash.error}`;
+    else if (dash.protection) $("#dash-note").textContent = `${dash.protection} Revoke a credential in Dash if this phone is lost.`;
     if (lastOverview) document.querySelectorAll("[data-move]").forEach((b) => {
       const m = lastOverview.moving; b.disabled = ["scanning","copying","verifying","switching","cleaning"].includes(m.phase);
     });

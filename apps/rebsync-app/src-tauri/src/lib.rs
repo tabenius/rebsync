@@ -4,6 +4,8 @@
 //! drive), shares it with peers on trusted local networks, and shows what is
 //! connected and how much space remains.
 
+#[cfg(target_os = "android")]
+mod android_keystore;
 mod dash_link;
 mod datastore;
 mod peer;
@@ -268,6 +270,22 @@ async fn with_dash<T: Send + 'static>(
 struct DashStatus {
     pending: Vec<rebsync_core::dash_pairing::PendingSummary>,
     credentials: Vec<rebsync_core::credentials::Descriptor>,
+    /// How stored credentials are protected at rest, for the screen.
+    protection: String,
+}
+
+fn protection(link: &dash_link::DashLink) -> String {
+    match link.sealer_id() {
+        #[cfg(target_os = "android")]
+        Some(_) => match android_keystore::KeystoreSealer::hardware_backed() {
+            Some(true) => "Encrypted with a key in this phone's secure hardware (Android Keystore).".into(),
+            Some(false) => "Encrypted with a key in the Android Keystore (software; this phone reports no secure hardware).".into(),
+            None => "Encrypted with a key in the Android Keystore.".into(),
+        },
+        #[cfg(not(target_os = "android"))]
+        Some(id) => format!("Encrypted at rest ({id})."),
+        None => "Kept in this app's private storage, not encrypted at rest by the app.".into(),
+    }
 }
 
 /// Pairings in progress and stored Dash credentials (metadata only).
@@ -277,6 +295,7 @@ async fn dash_status(app: State<'_, App>) -> Result<DashStatus, String> {
         Ok(DashStatus {
             pending: link.pending(),
             credentials: link.credentials()?,
+            protection: protection(link),
         })
     })
     .await
@@ -653,7 +672,12 @@ pub fn run() {
             if !settings_path.exists() {
                 datastore::save(&settings_path, &settings).map_err(std::io::Error::other)?;
             }
-            let dash = dash_link::DashLink::open(&internal).map(Arc::new);
+            #[cfg(target_os = "android")]
+            let sealer: Option<Arc<dyn rebsync_core::credentials::files::Sealer>> =
+                Some(Arc::new(android_keystore::KeystoreSealer));
+            #[cfg(not(target_os = "android"))]
+            let sealer = None;
+            let dash = dash_link::DashLink::open(&internal, sealer).map(Arc::new);
             let state = App {
                 internal,
                 settings_path,

@@ -96,7 +96,7 @@ fn fake_dash() -> (String, Arc<Mutex<Fake>>) {
 fn the_phone_pairs_collects_its_credential_once_and_can_use_it() {
     let (dash, fake) = fake_dash();
     let dir = tempfile::tempdir().unwrap();
-    let link = DashLink::open(dir.path()).unwrap();
+    let link = DashLink::open(dir.path(), None).unwrap();
     let begun = link.begin(&dash, "Rebeqah phone", true, 30).unwrap();
     assert_eq!(begun.approval_url, format!("{dash}/pair/{}", begun.pairing_id));
     assert_eq!(begun.matching_code.len(), 9);
@@ -134,7 +134,7 @@ fn the_phone_pairs_collects_its_credential_once_and_can_use_it() {
 fn a_cancelled_pairing_ends_cleanly_and_a_bad_dash_is_refused() {
     let (dash, fake) = fake_dash();
     let dir = tempfile::tempdir().unwrap();
-    let link = DashLink::open(dir.path()).unwrap();
+    let link = DashLink::open(dir.path(), None).unwrap();
     let begun = link.begin(&dash, "phone", false, 1).unwrap();
     assert_eq!(link.cancel(&begun.pairing_id).unwrap(), State::Cancelled);
     assert!(fake.lock().unwrap().cancelled);

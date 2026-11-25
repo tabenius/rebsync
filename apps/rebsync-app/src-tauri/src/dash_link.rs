@@ -7,11 +7,11 @@
 //! view: commands return metadata only.
 //!
 //! Credentials live in the app's private storage (`dash-credentials/`, owner
-//! only). On Android that is the app sandbox; it is **not** encrypted at rest
-//! by the app. A platform-keystore backend can replace the file store behind
-//! the same trait.
+//! only). On Android each secret is also sealed by a key in the Android
+//! Keystore (`android_keystore.rs`), so the files hold ciphertext; elsewhere
+//! (desktop builds, tests) the caller may pass no sealer.
 
-use rebsync_core::credentials::files::FileStore;
+use rebsync_core::credentials::files::{FileStore, Sealer};
 use rebsync_core::credentials::{CredentialStore, Descriptor, Scope};
 use rebsync_core::dash_pairing::{
     self as pairing, Dash, Outcome, PendingStore, PendingSummary, State,
@@ -41,10 +41,17 @@ fn now() -> u64 {
 }
 
 impl DashLink {
-    /// The store in `internal/dash-credentials` (created owner-only).
-    pub fn open(internal: &Path) -> Result<Self, String> {
-        let store = pairing::open_store(&internal.join("dash-credentials"))
+    /// The store in `internal/dash-credentials` (created owner-only), its
+    /// secrets sealed by `sealer` when given.
+    pub fn open(
+        internal: &Path,
+        sealer: Option<std::sync::Arc<dyn Sealer>>,
+    ) -> Result<Self, String> {
+        let mut store = pairing::open_store(&internal.join("dash-credentials"))
             .map_err(|e| format!("{e:#}"))?;
+        if let Some(sealer) = sealer {
+            store = store.with_sealer(sealer);
+        }
         let pending = PendingStore::open(&store).map_err(|e| format!("{e:#}"))?;
         Ok(Self { store, pending })
     }
@@ -102,6 +109,11 @@ impl DashLink {
             .remove(pairing_id)
             .map_err(|e| format!("{e:#}"))?;
         Ok(state)
+    }
+
+    /// Which sealer protects stored secrets, if any.
+    pub fn sealer_id(&self) -> Option<&str> {
+        self.store.sealer_id()
     }
 
     pub fn pending(&self) -> Vec<PendingSummary> {

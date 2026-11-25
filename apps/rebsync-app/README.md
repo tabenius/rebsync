@@ -97,9 +97,11 @@ repository at Dash, without typing or copying a token:
    Dash to describe the repository) and **Forget** (stops using it here).
 
 Read-only leaves out `append`. Credentials last 30 days. They are kept in the
-app's private storage (`dash-credentials/`), which Android isolates per app;
-**the app does not encrypt them at rest**, so revoke one under *Paired
-devices* in Dash if the phone is lost. If the approval response is lost on the
+app's private storage (`dash-credentials/`), and each secret is encrypted
+(AES-256-GCM) with a key generated in the **Android Keystore**, which never
+leaves it; the app shows whether this phone keeps that key in secure hardware.
+Revoke a credential under *Paired devices* in Dash if the phone is lost.
+If the approval response is lost on the
 way, the phone cancels the pairing, which revokes the credential; pair again.
 Same flow as `rbq dash pair` (see `docs/DASH-CLI.md`).
 
