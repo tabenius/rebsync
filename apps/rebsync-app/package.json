@@ -1,7 +1,7 @@
 {
   "name": "rebsync-app",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Tauri shell for the rbq preservation core",
   "scripts": {
     "tauri": "tauri"
