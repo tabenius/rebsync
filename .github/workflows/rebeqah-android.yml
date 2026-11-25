@@ -76,6 +76,8 @@ jobs:
         run: |
           cargo test --manifest-path apps/rebsync-app/logic-tests/Cargo.toml
           python3 scripts/test_android_release.py
+          python3 scripts/test_android_signing.py
+          python3 scripts/test_sign_android_release.py
       - name: Build release APK
         if: inputs.signing_preflight_only != true
         working-directory: apps/rebsync-app
@@ -89,12 +91,24 @@ jobs:
           export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           npm ci
           npx tauri android build --apk --target aarch64 --target armv7 --target x86_64
+      - name: Explicitly sign the final APK with the approved release key
+        if: inputs.signing_preflight_only != true
+        env:
+          RBQ_STORE_PASSWORD: ${{ secrets.RBQ_STORE_PASSWORD }}
+          RBQ_KEY_PASSWORD: ${{ secrets.RBQ_KEY_PASSWORD }}
+          RBQ_KEY_ALIAS: ${{ secrets.RBQ_KEY_ALIAS || 'rbq' }}
+        run: |
+          python3 scripts/sign_android_release.py \
+            --apk apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+            --output "$RUNNER_TEMP/rebeqah-final-release.apk" \
+            --keystore "$RUNNER_TEMP/rbq-release.jks" \
+            --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
+            --aapt "$ANDROID_HOME/build-tools/37.0.0/aapt"
       - name: Verify signature and collect
         if: inputs.signing_preflight_only != true
         run: |
           set -euo pipefail
-          apk=apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
-          python3 scripts/prepare_android_release.py --apk "$apk" --dist dist \
+          python3 scripts/prepare_android_release.py --apk "$RUNNER_TEMP/rebeqah-final-release.apk" --dist dist \
             --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
             --aapt "$ANDROID_HOME/build-tools/37.0.0/aapt"
       - name: Remove temporary keystore

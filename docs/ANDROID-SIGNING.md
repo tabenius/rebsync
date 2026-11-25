@@ -43,7 +43,13 @@ build, artifact upload or publication. The normal release workflow also performs
 the same check before installing build toolchains. It writes a new runner-only
 mode-0600 keystore and always removes it, including on failure.
 
-Then dispatch the ordinary workflow on the immutable app version tag. The source
+Then dispatch the ordinary workflow on the immutable app version tag. The final
+build output is explicitly signed with `apksigner` using that already-checked
+key, rather than relying on implicit Gradle/Tauri signing behavior. Package,
+version, non-debug state and universal ABI shape are checked **before** applying
+the approved key. Existing output files are never overwritten; passwords are
+passed to apksigner by environment-variable names, not their values.
+The source
 commit, tag, app version, package and APK certificate must all agree. The final
 APK is verified again, independently of the preflight, before inventory,
 Sigstore signing and candidate publication. Failed tags are not moved to smuggle

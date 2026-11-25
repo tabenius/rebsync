@@ -18,17 +18,14 @@ def run(args, cwd=None):
     return subprocess.check_output(args, cwd=cwd, text=True, stderr=subprocess.PIPE)
 
 
-def apk_metadata(badging, certificates, expected, version):
+def apk_shape(badging, expected, version):
     package = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)' versionName='([^']+)'", badging, re.M)
-    signers = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]+)$", certificates, re.M)
     if not package or package[1] != expected['packageName'] or package[3] != version:
         raise ValueError('APK package/version does not match the release')
     if not 0 < int(package[2]) <= 2100000000:
         raise ValueError('APK versionCode is outside the Android/Play update range')
     if 'application-debuggable' in badging:
         raise ValueError('Debuggable APK is not a release')
-    if len(signers) != 1 or signers[0].lower() != expected['certificateSha256']:
-        raise ValueError('APK signing certificate differs from the pinned release identity')
     minimum = re.search(r"^sdkVersion:'([0-9]+)'", badging, re.M)
     target = re.search(r"^targetSdkVersion:'([0-9]+)'", badging, re.M)
     native = re.search(r"^native-code: (.+)$", badging, re.M)
@@ -38,8 +35,16 @@ def apk_metadata(badging, certificates, expected, version):
     return {'schema': 'ragbaz.android-release/1', 'packageName': package[1],
             'versionCode': int(package[2]), 'versionName': package[3],
             'minSdk': int(minimum[1]), 'targetSdk': int(target[1]), 'abis': sorted(abis),
-            'certificateSha256': signers[0].lower(),
             'openpgpFingerprint': expected['openpgpFingerprint']}
+
+
+def apk_metadata(badging, certificates, expected, version):
+    metadata = apk_shape(badging, expected, version)
+    signers = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*$", certificates, re.M)
+    if len(signers) != 1 or signers[0].lower() != expected['certificateSha256']:
+        observed = ', '.join(value.lower() for value in signers) or 'no readable signer digest'
+        raise ValueError(f"APK signing certificate differs from the pinned release identity: expected {expected['certificateSha256']}; observed {observed}")
+    return dict(metadata, certificateSha256=signers[0].lower())
 
 
 def write_new(path, data):
