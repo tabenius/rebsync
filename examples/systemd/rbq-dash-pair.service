@@ -1,0 +1,39 @@
+# Keep this device paired with Dash: a systemd *user* service, run by
+# rbq-dash-pair.timer at login and daily. See docs/DASH-CLI.md, "Pairing
+# automatically".
+#
+# Each run is `rbq dash ensure`: nothing to do while a usable credential has
+# more than --renew-days left; otherwise it starts (or resumes) a pairing and
+# waits up to 10 minutes for YOU to approve it in Dash with your passkey.
+# Approval is never automatic. The matching code and approval link go to the
+# journal (journalctl --user -u rbq-dash-pair) and, with --notify, to a
+# desktop notification.
+#
+# Install for the logged-in user (here xyzzy on kali):
+#   mkdir -p ~/.config/systemd/user ~/.config/rbq
+#   cp rbq-dash-pair.service rbq-dash-pair.timer ~/.config/systemd/user/
+#   cp rbq-dash.env ~/.config/rbq/dash.env      # then edit it
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rbq-dash-pair.timer
+[Unit]
+Description=Keep this device paired with Dash (rbq dash ensure)
+Documentation=https://github.com/tabenius/rebsync/blob/main/docs/DASH-CLI.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=RBQ_CREDENTIAL_STORE=%h/.config/rbq/credentials
+# RBQ_DASH, RBQ_DASH_LABEL, RBQ_CREDENTIAL_SEAL (and optionally
+# RBQ_CREDENTIAL_STORE); values here override the line above.
+EnvironmentFile=%h/.config/rbq/dash.env
+# Exit 2 means "still awaiting approval": not a failure, the timer retries.
+SuccessExitStatus=2
+ExecStart=%h/.local/bin/rbq dash ensure --notify
+# Bounded by --timeout (600 s) plus slack.
+TimeoutStartSec=15min
+# The service needs only its own credential store.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.config/rbq
+UMask=0077

@@ -78,6 +78,42 @@ rbq repository --credential KEY_ID push --store "$HOME/.rbq/objects" --source-id
 The credential's endpoint is `/api/rbq/KEY_ID`; it reaches only your account
 repository, never MCP or artifacts.
 
+## Pairing automatically (systemd)
+
+`rbq dash ensure` keeps a device paired without anyone typing a command; a
+person still approves each pairing in Dash with a passkey. Each run:
+
+1. does nothing if the store holds a usable credential for this Dash, with
+   the requested scopes and more than `--renew-days` (default 7) left;
+2. otherwise resumes a pairing for this Dash still awaiting approval (it
+   never piles up requests), or starts one;
+3. waits up to `--timeout` seconds (default 600) for approval. `--notify`
+   also shows the matching code and approval link as a desktop notification.
+
+It exits `0` when paired and `2` while a request still awaits approval (run
+it again later). Renewal pairs again before expiry, so the credential id
+changes: use `rbq repository --credential auto`, which picks the newest usable
+credential allowing the command.
+
+`examples/systemd/` has a user service and timer that run it at login and
+daily. For user `xyzzy` on host `kali`, with `rbq` in `~/.local/bin`:
+
+```sh
+mkdir -p ~/.config/systemd/user ~/.config/rbq
+cp examples/systemd/rbq-dash-pair.service examples/systemd/rbq-dash-pair.timer ~/.config/systemd/user/
+cp examples/systemd/rbq-dash.env ~/.config/rbq/dash.env   # RBQ_DASH_LABEL=xyzzy@kali
+systemctl --user daemon-reload
+systemctl --user enable --now rbq-dash-pair.timer
+systemctl --user start rbq-dash-pair      # pair now instead of in 2 minutes
+journalctl --user -u rbq-dash-pair -f     # the matching code and approval link
+```
+
+Open the link in Dash, check the code matches, approve with your passkey; the
+service collects the credential. `RBQ_CREDENTIAL_SEAL=secret-service` needs an
+unlocked keyring in that session (a desktop login); on a headless machine set
+`none` in `dash.env` (owner-only files, not encrypted at rest) and run
+`loginctl enable-linger xyzzy` so the timer runs without a login.
+
 ## Immutable object operations
 
 ```sh
