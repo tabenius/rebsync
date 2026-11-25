@@ -18,7 +18,7 @@
 # Extra local files: RBQ_EXTRA_APKS / RBQ_EXTRA_DEBS (directories).
 #
 # Environment (defaults in brackets):
-#   APT_SIGNING_KEY      [release OpenPGP fingerprint from release/android-signing.json]
+#   APT_SIGNING_KEY      [aptOpenpgpFingerprint from release/android-signing.json]
 #   FDROID_KEYSTORE      [~/.config/rebeqah-signing/fdroid-repo.jks]
 #   FDROID_KEY_ALIAS     [ragbaz-fdroid]
 #   FDROID_KEYSTORE_PASS, FDROID_KEY_PASS   [prompted, not echoed]
@@ -39,7 +39,7 @@ die() { printf '  ✗ %s\n' "$1" >&2; [ -n "${2:-}" ] && printf '      fix: %s\n
 : "${FDROID_KEY_ALIAS:=ragbaz-fdroid}"
 : "${ANDROID_HOME:=$HOME/Android/Sdk}"
 : "${R2_BUCKET:=ragbaz-releases}"
-: "${APT_SIGNING_KEY:=$(python3 -c "import json;print(json.load(open('$root/release/android-signing.json'))['openpgpFingerprint'])")}"
+: "${APT_SIGNING_KEY:=$(python3 -c "import json;print(json.load(open('$root/release/android-signing.json'))['aptOpenpgpFingerprint'])")}"
 export FDROID_KEYSTORE FDROID_KEY_ALIAS ANDROID_HOME APT_SIGNING_KEY
 
 ask() { # ask VAR prompt: read a secret without echo unless already set
