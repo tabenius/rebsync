@@ -4,6 +4,9 @@
 //! drive), shares it with peers on trusted local networks, and shows what is
 //! connected and how much space remains.
 
+#[cfg(target_os = "android")]
+mod android_keystore;
+mod dash_link;
 mod datastore;
 mod peer;
 mod quic_share;
@@ -35,6 +38,9 @@ struct App {
     clients: Arc<Clients>,
     writes_paused: Arc<AtomicBool>,
     moving: Arc<Mutex<MoveStatus>>,
+    /// This phone's link to Dash (passkey-approved credential), or why the
+    /// app's private credential store is unusable.
+    dash: Result<Arc<dash_link::DashLink>, String>,
 }
 
 fn open_storage(settings: &Settings) -> Result<Arc<dyn ObjectStorage>, String> {
@@ -247,6 +253,108 @@ fn unpair(app: State<'_, App>, peer: String) -> Result<usize, String> {
     let quic = app.quic.lock().map_err(|_| "share lock")?;
     let share = quic.as_ref().ok_or("Turn sharing on first")?;
     share.trust.remove(&peer).map_err(|e| format!("{e:#}"))
+}
+
+/// Run blocking Dash work off the main thread.
+async fn with_dash<T: Send + 'static>(
+    app: State<'_, App>,
+    work: impl FnOnce(&dash_link::DashLink) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let link = app.dash.clone()?;
+    tauri::async_runtime::spawn_blocking(move || work(&link))
+        .await
+        .map_err(|e| format!("Dash task failed: {e}"))?
+}
+
+#[derive(Serialize)]
+struct DashStatus {
+    pending: Vec<rebsync_core::dash_pairing::PendingSummary>,
+    credentials: Vec<rebsync_core::credentials::Descriptor>,
+    /// How stored credentials are protected at rest, for the screen.
+    protection: String,
+}
+
+fn protection(link: &dash_link::DashLink) -> String {
+    match link.sealer_id() {
+        #[cfg(target_os = "android")]
+        Some(_) => match android_keystore::KeystoreSealer::hardware_backed() {
+            Some(true) => "Encrypted with a key in this phone's secure hardware (Android Keystore).".into(),
+            Some(false) => "Encrypted with a key in the Android Keystore (software; this phone reports no secure hardware).".into(),
+            None => "Encrypted with a key in the Android Keystore.".into(),
+        },
+        #[cfg(not(target_os = "android"))]
+        Some(id) => format!("Encrypted at rest ({id})."),
+        None => "Kept in this app's private storage, not encrypted at rest by the app.".into(),
+    }
+}
+
+/// Pairings in progress and stored Dash credentials (metadata only).
+#[tauri::command]
+async fn dash_status(app: State<'_, App>) -> Result<DashStatus, String> {
+    with_dash(app, |link| {
+        Ok(DashStatus {
+            pending: link.pending(),
+            credentials: link.credentials()?,
+            protection: protection(link),
+        })
+    })
+    .await
+}
+
+/// Ask Dash to pair this phone. Returns the matching code and approval URL.
+#[tauri::command]
+async fn dash_pair_begin(
+    app: State<'_, App>,
+    dash: String,
+    label: String,
+    read_only: bool,
+    days: u64,
+) -> Result<serde_json::Value, String> {
+    let summary = with_dash(app, move |link| link.begin(&dash, &label, read_only, days)).await?;
+    let mut value = serde_json::to_value(&summary).map_err(|e| e.to_string())?;
+    value["qr_svg"] = qr(&summary.approval_url).into();
+    Ok(value)
+}
+
+/// Check a pairing once; collects and stores the credential once approved.
+#[tauri::command]
+async fn dash_pair_poll(
+    app: State<'_, App>,
+    pairing_id: String,
+) -> Result<dash_link::Progress, String> {
+    with_dash(app, move |link| link.poll(&pairing_id)).await
+}
+
+#[tauri::command]
+async fn dash_pair_cancel(
+    app: State<'_, App>,
+    pairing_id: String,
+) -> Result<rebsync_core::dash_pairing::State, String> {
+    with_dash(app, move |link| link.cancel(&pairing_id)).await
+}
+
+/// Describe the repository a stored credential reaches.
+#[tauri::command]
+async fn dash_check(app: State<'_, App>, key_id: String) -> Result<serde_json::Value, String> {
+    with_dash(app, move |link| link.check(&key_id)).await
+}
+
+/// Send this phone's snapshots to the owner's Dash repository.
+#[tauri::command]
+async fn dash_send(
+    app: State<'_, App>,
+    key_id: String,
+    name: String,
+) -> Result<rebsync_core::repository_sync::Report, String> {
+    // Read through the current data root (it can move between volumes).
+    let storage = quic_share::FollowStorage(app.storage.clone());
+    with_dash(app, move |link| link.send(&key_id, &storage, &name)).await
+}
+
+/// Stop using a credential on this phone (revoke it in Dash too).
+#[tauri::command]
+async fn dash_forget(app: State<'_, App>, key_id: String) -> Result<(), String> {
+    with_dash(app, move |link| link.forget(&key_id)).await
 }
 
 #[derive(Serialize)]
@@ -576,6 +684,12 @@ pub fn run() {
             if !settings_path.exists() {
                 datastore::save(&settings_path, &settings).map_err(std::io::Error::other)?;
             }
+            #[cfg(target_os = "android")]
+            let sealer: Option<Arc<dyn rebsync_core::credentials::files::Sealer>> =
+                Some(Arc::new(android_keystore::KeystoreSealer));
+            #[cfg(not(target_os = "android"))]
+            let sealer = None;
+            let dash = dash_link::DashLink::open(&internal, sealer).map(Arc::new);
             let state = App {
                 internal,
                 settings_path,
@@ -590,6 +704,7 @@ pub fn run() {
                     phase: "idle".into(),
                     ..Default::default()
                 })),
+                dash,
             };
             if settings.sharing {
                 let _ = start_peer(&state, &settings);
@@ -606,7 +721,14 @@ pub fn run() {
             move_data,
             pair_invite,
             paired_devices,
-            unpair
+            unpair,
+            dash_status,
+            dash_pair_begin,
+            dash_pair_poll,
+            dash_pair_cancel,
+            dash_check,
+            dash_send,
+            dash_forget
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

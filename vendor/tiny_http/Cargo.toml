@@ -74,3 +74,8 @@ ssl-rustls = [
     "rustls-pki-types",
     "zeroize",
 ]
+
+# Vendored (rebsync): upstream's own warnings are not ours to fix; crates.io
+# dependencies get the same cap.
+[lints.rust]
+unused = "allow"

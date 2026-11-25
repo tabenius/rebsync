@@ -19,3 +19,5 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# Called from Rust over JNI (src-tauri/src/android_keystore.rs) by name.
+-keep class com.tabenius.rebeqah.KeystoreSealer { public static *; }

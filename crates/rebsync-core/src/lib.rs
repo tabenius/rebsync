@@ -6,6 +6,8 @@ pub mod artifacts;
 pub mod binaries;
 pub mod config;
 pub mod credentials;
+#[cfg(feature = "peer-http")]
+pub mod dash_pairing;
 #[cfg(feature = "storage-object-store")]
 pub mod drive;
 pub mod frog;
@@ -22,6 +24,8 @@ pub mod peer;
 pub mod phone;
 #[cfg(feature = "peer-http")]
 mod private_http;
+#[cfg(feature = "peer-http")]
+pub use private_http::{Unauthorized, is_unauthorized};
 pub mod process;
 pub mod rbq_contract;
 #[cfg(feature = "peer-http")]

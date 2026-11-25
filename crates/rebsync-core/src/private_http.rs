@@ -26,6 +26,25 @@ pub fn status_message(code: u16) -> Option<&'static str> {
     })
 }
 
+/// Dash refused the credential (HTTP 401): revoked, expired or unknown. Not
+/// transient, so callers holding a stored credential disable it rather than
+/// retry. Find it with `error.chain().any(|e| e.is::<Unauthorized>())`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unauthorized;
+
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(status_message(401).unwrap_or("credential refused"))
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
+/// Whether `error` (or anything it wraps) is Dash refusing the credential.
+pub fn is_unauthorized(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<Unauthorized>())
+}
+
 pub(crate) fn read_token(path: &Path) -> Result<String> {
     let metadata = std::fs::symlink_metadata(path).context("inspect private token file")?;
     ensure!(
@@ -120,6 +139,7 @@ impl PrivateHttp {
             Ok(response) if (200..300).contains(&response.status()) => Ok(response),
             Ok(_) => bail!("private endpoint redirect refused"),
             // Never include the response body: it is server-controlled text.
+            Err(ureq::Error::Status(401, _)) => Err(Unauthorized.into()),
             Err(ureq::Error::Status(code, _)) => match status_message(code) {
                 Some(message) => bail!("{message}"),
                 None => bail!("private request failed (HTTP {code})"),

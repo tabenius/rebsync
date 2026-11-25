@@ -13,11 +13,18 @@ publish = false
 name = "rebsync_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[target.'cfg(target_os = "android")'.dependencies]
+# The Android Keystore credential sealer (src/android_keystore.rs); the same
+# versions Tauri already links.
+jni = "0.21"
+ndk-context = "0.1"
+
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store", "peer-quic"] }
+rebsync-core = { path = "../../../crates/rebsync-core", default-features = false, features = ["storage-object-store", "peer-quic", "peer-http"] }
+anyhow = "1"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
