@@ -137,7 +137,7 @@ following the [signing ceremony](../../docs/ANDROID-SIGNING.md), explicitly sign
 the final APK with `scripts/sign_android_release.py`. Then prepare its inventory:
 
 ```bash
-RELEASE_TAG=v0.2.6 python3 scripts/prepare_android_release.py \
+RELEASE_TAG=v0.2.7 python3 scripts/prepare_android_release.py \
   --apk /path/to/approved-final-release.apk \
   --dist /path/to/new-release-directory \
   --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
