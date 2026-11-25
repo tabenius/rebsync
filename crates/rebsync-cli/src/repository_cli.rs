@@ -10,8 +10,10 @@ pub struct RepositoryArgs {
     /// Owner-only file containing the bearer token used for your Dash MCP URL.
     #[arg(long, requires = "endpoint")]
     token_file: Option<PathBuf>,
-    /// A credential from `rbq dash pair`, by key id. Its stored grant must
-    /// cover the command (describe, list, read or append).
+    /// A credential from `rbq dash pair`, by key id, or `auto` for the
+    /// newest usable one in the store (what a renewing `rbq dash ensure`
+    /// keeps current). Its stored grant must cover the command (describe,
+    /// list, read or append).
     #[arg(
         long,
         requires = "credential_store",
@@ -204,13 +206,37 @@ fn stored(
 ) -> Result<rebsync_core::repository::Repository> {
     use rebsync_core::credentials::CredentialStore;
     let store = crate::dash_cli::credential_store(dir, seal)?;
-    let descriptor = store
-        .descriptor(id)
-        .map_err(|e| anyhow::anyhow!("no usable credential {id} ({e:?})"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
+    // `auto`: the newest credential that may do this now.
+    let chosen;
+    let id = if id == "auto" {
+        chosen = store
+            .list()
+            .map_err(|e| anyhow::anyhow!("credential store: {e:?}"))?
+            .into_iter()
+            .filter(|c| {
+                !c.disabled
+                    && c.created_at <= now
+                    && now < c.expires_at
+                    && c.scopes.contains(&scope)
+            })
+            .max_by_key(|c| c.expires_at)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no usable credential for {scope:?} in the store; run `rbq dash ensure`"
+                )
+            })?
+            .id;
+        chosen.as_str()
+    } else {
+        id
+    };
+    let descriptor = store
+        .descriptor(id)
+        .map_err(|e| anyhow::anyhow!("no usable credential {id} ({e:?})"))?;
     let secret = store
         .use_secret(id, &descriptor.audience, &scope, now)
         .map_err(|error| {

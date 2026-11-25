@@ -70,6 +70,35 @@ enum DashAction {
         #[arg(long)]
         no_wait: bool,
     },
+    /// Make sure this device is paired, for unattended use (a systemd timer):
+    /// does nothing if a usable credential for this Dash has at least
+    /// --renew-days left; otherwise resumes a pairing still awaiting approval,
+    /// or starts one, and waits for you to approve it in Dash. Exit 0 when
+    /// paired, 2 when still awaiting approval (run again later).
+    Ensure {
+        /// Dash origin.
+        #[arg(long, env = "RBQ_DASH", default_value = "https://dash.ragbaz.cc")]
+        dash: String,
+        /// How this device appears in Dash (default: the host name).
+        #[arg(long, env = "RBQ_DASH_LABEL")]
+        label: Option<String>,
+        /// Scopes to require and request; repeat. Default: all four.
+        #[arg(long = "scope", value_enum)]
+        scopes: Vec<ScopeArg>,
+        /// Credential lifetime in days when a new pairing is needed (1..90).
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Pair again when the current credential has fewer days left.
+        #[arg(long, default_value_t = 7)]
+        renew_days: u64,
+        /// Seconds to wait for approval in this run.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Also show the matching code and approval link as a desktop
+        /// notification (notify-send), when a pairing awaits approval.
+        #[arg(long)]
+        notify: bool,
+    },
     /// Wait for approval of a pairing started earlier, then claim and store it.
     Wait {
         pairing_id: String,
@@ -91,7 +120,7 @@ enum DashAction {
 #[cfg(feature = "peer")]
 pub fn run(args: &DashArgs) -> Result<i32> {
     use anyhow::{anyhow, bail};
-    use rebsync_core::credentials::{CredentialStore, Scope};
+    use rebsync_core::credentials::CredentialStore;
     use rebsync_core::dash_pairing::{self as pairing, Dash, Outcome, PendingStore};
     use std::time::Duration;
 
@@ -157,19 +186,7 @@ pub fn run(args: &DashArgs) -> Result<i32> {
                 Some(label) => label.clone(),
                 None => default_label(),
             };
-            let scopes: Vec<Scope> = if scopes.is_empty() {
-                vec![Scope::Describe, Scope::List, Scope::Read, Scope::Append]
-            } else {
-                scopes
-                    .iter()
-                    .map(|scope| match scope {
-                        ScopeArg::Describe => Scope::Describe,
-                        ScopeArg::List => Scope::List,
-                        ScopeArg::Read => Scope::Read,
-                        ScopeArg::Append => Scope::Append,
-                    })
-                    .collect()
-            };
+            let scopes = requested_scopes(scopes);
             if *days > 90 {
                 bail!("a paired credential lives at most 90 days");
             }
@@ -197,6 +214,73 @@ pub fn run(args: &DashArgs) -> Result<i32> {
             print(serde_json::json!({ "pairing_id": pairing_id, "state": state }))?;
             Ok(0)
         }
+        DashAction::Ensure {
+            dash,
+            label,
+            scopes,
+            days,
+            renew_days,
+            timeout,
+            notify,
+        } => {
+            let dash = Dash::new(dash)?;
+            let scopes = requested_scopes(scopes);
+            if *days == 0 || *days > 90 {
+                bail!("a paired credential lives 1 to 90 days");
+            }
+            if *renew_days >= *days {
+                bail!("--renew-days must be less than --days, or every run would pair again");
+            }
+            let now = now();
+            // 1. Already paired, with enough life left: nothing to do.
+            let current = store
+                .list()
+                .map_err(|e| anyhow!("credential store: {e:?}"))?
+                .into_iter()
+                .filter(|c| {
+                    c.audience.account_id == dash.origin()
+                        && !c.disabled
+                        && scopes.iter().all(|s| c.scopes.contains(s))
+                        && c.expires_at > now + renew_days * 86_400
+                })
+                .max_by_key(|c| c.expires_at);
+            if let Some(credential) = current {
+                print(
+                    serde_json::json!({ "paired": true, "action": "none", "credential": credential }),
+                )?;
+                return Ok(0);
+            }
+            // 2. A pairing for this Dash still awaiting approval: keep waiting
+            //    on it, rather than piling up requests. Expired ones are gone
+            //    at Dash; forget them here.
+            let mut resumable = None;
+            for summary in pending_store
+                .list()
+                .into_iter()
+                .filter(|p| p.dash == dash.origin())
+            {
+                if summary.expires_at > now + 30 && resumable.is_none() {
+                    resumable = Some(pending_store.load(&summary.pairing_id)?);
+                } else if summary.expires_at <= now {
+                    pending_store.remove(&summary.pairing_id)?;
+                }
+            }
+            // 3. Otherwise start one.
+            let pending = match resumable {
+                Some(pending) => pending,
+                None => {
+                    let label = label.clone().unwrap_or_else(default_label);
+                    let pending = pairing::begin(&dash, &label, &scopes, days * 86_400)?;
+                    pending_store.save(&pending)?;
+                    pending
+                }
+            };
+            print(serde_json::to_value(pending.summary())?)?;
+            if *notify {
+                notify_approval(&pending);
+            }
+            wait(&pending, *timeout)
+        }
         DashAction::Pending => {
             print(serde_json::json!({ "pending": pending_store.list() }))?;
             Ok(0)
@@ -216,6 +300,56 @@ pub fn run(args: &DashArgs) -> Result<i32> {
             print(serde_json::json!({ "key_id": key_id, "disabled": true }))?;
             Ok(0)
         }
+    }
+}
+
+/// The requested scopes, or all four by default.
+#[cfg(feature = "peer")]
+fn requested_scopes(scopes: &[ScopeArg]) -> Vec<rebsync_core::credentials::Scope> {
+    use rebsync_core::credentials::Scope;
+    if scopes.is_empty() {
+        return vec![Scope::Describe, Scope::List, Scope::Read, Scope::Append];
+    }
+    scopes
+        .iter()
+        .map(|scope| match scope {
+            ScopeArg::Describe => Scope::Describe,
+            ScopeArg::List => Scope::List,
+            ScopeArg::Read => Scope::Read,
+            ScopeArg::Append => Scope::Append,
+        })
+        .collect()
+}
+
+#[cfg(feature = "peer")]
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// A desktop notification with what you need to approve: the matching code
+/// and the approval link. Neither is a secret (the claim nonce stays here).
+/// Best effort: no notification daemon is not an error.
+#[cfg(feature = "peer")]
+fn notify_approval(pending: &rebsync_core::dash_pairing::Pending) {
+    let body = format!(
+        "Approve '{}' in Dash if it shows code {}:\n{}",
+        pending.device_label, pending.matching_code, pending.approval_url
+    );
+    let shown = rebsync_core::process::run(
+        rebsync_core::process::command("notify-send").args([
+            "--",
+            "RAGBAZ: pair this device",
+            &body,
+        ]),
+        5,
+        None,
+    )
+    .is_ok_and(|output| output.success);
+    if !shown {
+        eprintln!("(no desktop notification: notify-send unavailable)");
     }
 }
 

@@ -1,0 +1,14 @@
+# Runs rbq-dash-pair.service shortly after login and once a day, so the
+# device pairs (and re-pairs before its credential expires) without anyone
+# typing a command. You still approve each pairing in Dash.
+[Unit]
+Description=Keep this device paired with Dash, daily
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
