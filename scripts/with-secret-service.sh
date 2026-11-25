@@ -6,6 +6,9 @@
 set -euo pipefail
 if [ -z "${RBQ_IN_SECRET_SERVICE:-}" ]; then
   export RBQ_IN_SECRET_SERVICE=1
+  # Toolchains are found under HOME unless these say otherwise: pin them
+  # before HOME moves to the throwaway keyring's directory.
+  export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   HOME="$(mktemp -d)"
   export HOME
   exec dbus-run-session -- "$0" "$@"
