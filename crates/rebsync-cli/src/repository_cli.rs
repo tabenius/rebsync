@@ -84,8 +84,33 @@ enum RepositoryAction {
     },
 }
 
+/// Run the command. If Dash refuses a stored credential (revoked, expired
+/// or unknown), it is disabled here so it is not tried again.
 #[cfg(feature = "peer")]
 pub fn run(args: &RepositoryArgs) -> Result<i32> {
+    let result = run_command(args);
+    if let (Err(error), Some(id), Some(dir)) = (&result, &args.credential, &args.credential_store)
+        && rebsync_core::is_unauthorized(error)
+    {
+        use rebsync_core::credentials::CredentialStore;
+        // Disabling needs no key, so it works even while a keyring is locked.
+        let disabled = rebsync_core::dash_pairing::open_store(dir)
+            .ok()
+            .is_some_and(|store| store.disable(id).is_ok());
+        anyhow::bail!(
+            "Dash no longer accepts credential {id} (revoked or expired). {} Pair again with `rbq dash pair`.",
+            if disabled {
+                "It is disabled on this device."
+            } else {
+                "It could not be marked disabled here; run `rbq dash disable` for it."
+            }
+        );
+    }
+    result
+}
+
+#[cfg(feature = "peer")]
+fn run_command(args: &RepositoryArgs) -> Result<i32> {
     use rebsync_core::repository::{Repository, read_input, write_output};
     use rebsync_core::{FsObjectStorage, repository_sync};
     let repository = match (

@@ -125,6 +125,13 @@ fn the_phone_pairs_collects_its_credential_once_and_can_use_it() {
     assert_eq!(checked["matches"], true);
     assert!(!checked.to_string().contains(&token));
 
+    // Revoked in Dash: the next call is refused with 401, and the phone
+    // stops using the credential.
+    fake.lock().unwrap().token = Some(format!("rbs_{}", "cd".repeat(32)));
+    let refused = link.check(KEY).unwrap_err();
+    assert!(refused.contains("no longer accepts"), "{refused}");
+    assert!(link.credentials().unwrap()[0].disabled);
+    assert!(link.check(KEY).unwrap_err().contains("cannot be used now"));
     // Forgotten on the phone: no further use.
     link.forget(KEY).unwrap();
     assert!(link.check(KEY).is_err());

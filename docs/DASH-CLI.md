@@ -70,7 +70,9 @@ rbq repository --credential KEY_ID push --store "$HOME/.rbq/objects" --source-id
   run uses them. Pending pairings (with their 10-minute claim nonces) are kept
   in `pending/`, owner-only and not sealed.
 - **Stopping.** `rbq dash disable KEY_ID` stops this device from using it;
-  revoke it in Dash too, which works everywhere at once.
+  revoke it in Dash too, which works everywhere at once. When Dash refuses a
+  stored credential (revoked or expired: HTTP 401), `rbq repository` disables
+  it on this device, says so, and asks you to pair again; it is not retried.
 - Output is JSON on stdout. No command prints a token or nonce.
 
 The credential's endpoint is `/api/rbq/KEY_ID`; it reaches only your account

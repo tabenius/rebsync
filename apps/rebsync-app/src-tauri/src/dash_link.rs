@@ -149,7 +149,18 @@ impl DashLink {
         let repository =
             rebsync_core::repository::Repository::connect(&descriptor.audience.endpoint, token)
                 .map_err(|e| format!("{e:#}"))?;
-        let described = repository.describe().map_err(|e| format!("{e:#}"))?;
+        // If Dash refuses the credential (revoked, expired or unknown), stop
+        // using it here, so it is not tried again.
+        let described = repository.describe().map_err(|error| {
+            if rebsync_core::is_unauthorized(&error) {
+                let _ = self.forget(key_id);
+                "Dash no longer accepts this phone's credential (revoked or expired). \
+                 It is forgotten here; pair again."
+                    .to_owned()
+            } else {
+                format!("{error:#}")
+            }
+        })?;
         Ok(serde_json::json!({
             "key_id": key_id,
             "repository_id": described.get("repository_id"),
