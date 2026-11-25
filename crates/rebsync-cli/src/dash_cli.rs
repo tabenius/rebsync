@@ -43,10 +43,31 @@ enum ScopeArg {
     List,
     Read,
     Append,
+    Connector,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConnectorActionArg {
+    Pending,
+    Push,
+    Results,
 }
 
 #[derive(Subcommand)]
 enum DashAction {
+    /// Send one bounded connector request using a connector-only paired grant.
+    /// Push/results read JSON from stdin. Output contains no credential.
+    Connector {
+        #[arg(long)]
+        credential: String,
+        /// Exact existing Dash instance; a mismatching grant is refused.
+        #[arg(long)]
+        instance: String,
+        #[arg(long, env = "RBQ_DASH", default_value = "https://dash.ragbaz.cc")]
+        dash: String,
+        #[arg(value_enum)]
+        action: ConnectorActionArg,
+    },
     /// Ask Dash to pair this device, then wait for passkey approval in Dash
     /// and store the issued credential. Prints the matching code and approval
     /// URL first; compare the code with the one Dash shows before approving.
@@ -173,6 +194,40 @@ pub fn run(args: &DashArgs) -> Result<i32> {
     };
 
     match &args.command {
+        DashAction::Connector {
+            credential,
+            instance,
+            dash,
+            action,
+        } => {
+            use pairing::ConnectorAction;
+            use std::io::Read;
+            let operation = match action {
+                ConnectorActionArg::Pending => ConnectorAction::Pending,
+                ConnectorActionArg::Push => ConnectorAction::Push,
+                ConnectorActionArg::Results => ConnectorAction::Results,
+            };
+            let body = if matches!(action, ConnectorActionArg::Pending) {
+                None
+            } else {
+                let mut raw = Vec::new();
+                std::io::stdin()
+                    .take(512 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+                anyhow::ensure!(
+                    raw.len() <= 512 * 1024,
+                    "connector request exceeds size limit"
+                );
+                Some(
+                    serde_json::from_slice(&raw)
+                        .map_err(|_| anyhow!("connector stdin must be JSON"))?,
+                )
+            };
+            print(serde_json::to_value(pairing::connector_request(
+                &store, credential, dash, instance, operation, body,
+            )?)?)?;
+            Ok(0)
+        }
         DashAction::Pair {
             dash,
             label,
@@ -239,8 +294,12 @@ pub fn run(args: &DashArgs) -> Result<i32> {
                 .into_iter()
                 .filter(|c| {
                     c.audience.account_id == dash.origin()
+                        && c.kind == rebsync_core::credentials::CredentialKind::DashBearer
+                        && c.created_at <= now
                         && !c.disabled
                         && scopes.iter().all(|s| c.scopes.contains(s))
+                        && (!scopes.contains(&rebsync_core::credentials::Scope::Connector)
+                            || c.scopes == [rebsync_core::credentials::Scope::Connector])
                         && c.expires_at > now + renew_days * 86_400
                 })
                 .max_by_key(|c| c.expires_at);
@@ -254,11 +313,11 @@ pub fn run(args: &DashArgs) -> Result<i32> {
             //    on it, rather than piling up requests. Expired ones are gone
             //    at Dash; forget them here.
             let mut resumable = None;
-            for summary in pending_store
-                .list()
-                .into_iter()
-                .filter(|p| p.dash == dash.origin())
-            {
+            for summary in pending_store.list().into_iter().filter(|p| {
+                p.dash == dash.origin()
+                    && p.scopes.iter().all(|s| scopes.contains(s))
+                    && scopes.iter().all(|s| p.scopes.contains(s))
+            }) {
                 if summary.expires_at > now + 30 && resumable.is_none() {
                     resumable = Some(pending_store.load(&summary.pairing_id)?);
                 } else if summary.expires_at <= now {
@@ -317,6 +376,7 @@ fn requested_scopes(scopes: &[ScopeArg]) -> Vec<rebsync_core::credentials::Scope
             ScopeArg::List => Scope::List,
             ScopeArg::Read => Scope::Read,
             ScopeArg::Append => Scope::Append,
+            ScopeArg::Connector => Scope::Connector,
         })
         .collect()
 }

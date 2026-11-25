@@ -42,6 +42,8 @@ pub enum Scope {
     List,
     Read,
     Append,
+    /// Existing Rebekah instance connector only; no object-storage authority.
+    Connector,
 }
 
 /// An exact, opaque binding established by enrollment, never a URL prefix match.
