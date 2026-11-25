@@ -1,6 +1,6 @@
 [package]
 name = "rebsync-app"
-version = "0.2.5"
+version = "0.2.6"
 description = "RAGBAZ Rebeqah: Android companion for the rbq preservation core"
 authors = ["rbq contributors"]
 license = "GPL-3.0-or-later"
