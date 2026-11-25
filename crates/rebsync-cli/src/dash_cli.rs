@@ -43,10 +43,31 @@ enum ScopeArg {
     List,
     Read,
     Append,
+    Connector,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConnectorActionArg {
+    Pending,
+    Push,
+    Results,
 }
 
 #[derive(Subcommand)]
 enum DashAction {
+    /// Send one bounded connector request using a connector-only paired grant.
+    /// Push/results read JSON from stdin. Output contains no credential.
+    Connector {
+        #[arg(long)]
+        credential: String,
+        /// Exact existing Dash instance; a mismatching grant is refused.
+        #[arg(long)]
+        instance: String,
+        #[arg(long, env = "RBQ_DASH", default_value = "https://dash.ragbaz.cc")]
+        dash: String,
+        #[arg(value_enum)]
+        action: ConnectorActionArg,
+    },
     /// Ask Dash to pair this device, then wait for passkey approval in Dash
     /// and store the issued credential. Prints the matching code and approval
     /// URL first; compare the code with the one Dash shows before approving.
@@ -173,6 +194,40 @@ pub fn run(args: &DashArgs) -> Result<i32> {
     };
 
     match &args.command {
+        DashAction::Connector {
+            credential,
+            instance,
+            dash,
+            action,
+        } => {
+            use pairing::ConnectorAction;
+            use std::io::Read;
+            let operation = match action {
+                ConnectorActionArg::Pending => ConnectorAction::Pending,
+                ConnectorActionArg::Push => ConnectorAction::Push,
+                ConnectorActionArg::Results => ConnectorAction::Results,
+            };
+            let body = if matches!(action, ConnectorActionArg::Pending) {
+                None
+            } else {
+                let mut raw = Vec::new();
+                std::io::stdin()
+                    .take(512 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+                anyhow::ensure!(
+                    raw.len() <= 512 * 1024,
+                    "connector request exceeds size limit"
+                );
+                Some(
+                    serde_json::from_slice(&raw)
+                        .map_err(|_| anyhow!("connector stdin must be JSON"))?,
+                )
+            };
+            print(serde_json::to_value(pairing::connector_request(
+                &store, credential, dash, instance, operation, body,
+            )?)?)?;
+            Ok(0)
+        }
         DashAction::Pair {
             dash,
             label,
@@ -317,6 +372,7 @@ fn requested_scopes(scopes: &[ScopeArg]) -> Vec<rebsync_core::credentials::Scope
             ScopeArg::List => Scope::List,
             ScopeArg::Read => Scope::Read,
             ScopeArg::Append => Scope::Append,
+            ScopeArg::Connector => Scope::Connector,
         })
         .collect()
 }

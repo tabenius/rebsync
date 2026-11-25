@@ -238,6 +238,10 @@ pub fn begin(dash: &Dash, label: &str, scopes: &[Scope], lifetime_seconds: u64) 
     );
     ensure!(!scopes.is_empty(), "request at least one scope");
     ensure!(
+        !scopes.contains(&Scope::Connector) || scopes == [Scope::Connector],
+        "connector pairing cannot include object-storage scopes"
+    );
+    ensure!(
         (MIN_LIFETIME..=MAX_LIFETIME).contains(&lifetime_seconds),
         "a credential lives between 1 hour and 90 days"
     );
@@ -303,7 +307,154 @@ fn scope_order(scope: &Scope) -> u8 {
         Scope::List => 1,
         Scope::Read => 2,
         Scope::Append => 3,
+        Scope::Connector => 4,
     }
+}
+
+/// Closed set of connector operations; never an arbitrary authenticated URL.
+#[derive(Clone, Copy, Debug)]
+pub enum ConnectorAction {
+    Pending,
+    Push,
+    Results,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectorResponse {
+    pub status: u16,
+    pub body: Option<serde_json::Value>,
+    pub retry_after: Option<u64>,
+}
+
+/// Keep the bearer inside the RBQ credential boundary. The gateway receives
+/// only connector protocol data, never a token export or a generic HTTP proxy.
+pub fn connector_request(
+    store: &FileStore,
+    id: &str,
+    expected_dash: &str,
+    instance_id: &str,
+    action: ConnectorAction,
+    body: Option<serde_json::Value>,
+) -> Result<ConnectorResponse> {
+    let expected = Dash::new(expected_dash)?;
+    ensure!(
+        !instance_id.is_empty()
+            && instance_id.len() <= 64
+            && instance_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "invalid expected instance id"
+    );
+    let selected;
+    let id = if id == "auto" {
+        selected = store
+            .list()
+            .map_err(|e| anyhow!("connector credential store: {e:?}"))?
+            .into_iter()
+            .filter(|d| {
+                d.kind == CredentialKind::DashBearer
+                    && d.scopes == [Scope::Connector]
+                    && !d.disabled
+                    && d.created_at <= now()
+                    && now() < d.expires_at
+                    && d.audience == audience_for(&expected, &d.id, &d.audience.repository_id)
+            })
+            .max_by_key(|d| d.expires_at)
+            .ok_or_else(|| {
+                anyhow!("no usable connector grant; run pairing and approve it in Dash")
+            })?
+            .id;
+        selected.as_str()
+    } else {
+        id
+    };
+    ensure!(valid_endpoint_id(id), "invalid connector credential id");
+    let descriptor = store
+        .descriptor(id)
+        .map_err(|e| anyhow!("connector credential unavailable: {e:?}"))?;
+    ensure!(
+        descriptor.kind == CredentialKind::DashBearer && descriptor.scopes == [Scope::Connector],
+        "credential does not have an exclusive connector grant"
+    );
+    let url = url::Url::parse(&descriptor.audience.endpoint)
+        .map_err(|_| anyhow!("invalid connector audience"))?;
+    let dash = Dash::new(&url.origin().ascii_serialization())?;
+    ensure!(
+        dash.origin() == expected.origin(),
+        "connector credential belongs to another Dash origin"
+    );
+    ensure!(
+        descriptor.audience == audience_for(&dash, id, &descriptor.audience.repository_id),
+        "connector credential audience mismatch"
+    );
+    let secret = store
+        .use_secret(id, &descriptor.audience, &Scope::Connector, now())
+        .map_err(|e| {
+            anyhow!("connector credential is locked, expired, disabled or unavailable: {e:?}")
+        })?;
+    let token = std::str::from_utf8(secret.expose())
+        .map_err(|_| anyhow!("unreadable connector credential"))?;
+    ensure!(
+        token.strip_prefix("rbs_").is_some_and(|s| s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+        "invalid paired connector credential"
+    );
+    let (method, name) = match action {
+        ConnectorAction::Pending => ("GET", "pending"),
+        ConnectorAction::Push => ("POST", "push"),
+        ConnectorAction::Results => ("POST", "results"),
+    };
+    ensure!(
+        (method == "GET") == body.is_none(),
+        "connector request body mismatch"
+    );
+    let payload = body.map(|v| serde_json::to_vec(&v)).transpose()?;
+    ensure!(
+        payload.as_ref().is_none_or(|v| v.len() <= 512 * 1024),
+        "connector request exceeds size limit"
+    );
+    let request = dash
+        .agent
+        .request(
+            method,
+            &dash.url(&format!("/api/rbq/{id}/connector/{name}")),
+        )
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .set("X-Rebekah-Instance-Id", instance_id);
+    let response = match payload {
+        Some(bytes) => request
+            .set("Content-Type", "application/json")
+            .send_bytes(&bytes),
+        None => request.call(),
+    };
+    let response = match response {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r,
+        Err(ureq::Error::Transport(_)) => bail!("connector transport failed"),
+    };
+    let status = response.status();
+    let retry_after = response.header("Retry-After").and_then(|s| s.parse().ok());
+    if status == 401 {
+        store
+            .disable(id)
+            .map_err(|e| anyhow!("cannot disable rejected connector credential: {e:?}"))?;
+    }
+    let raw = wire::read_bounded(response.into_reader(), 64 * 1024)?
+        .ok_or_else(|| anyhow!("connector response exceeds size limit"))?;
+    ensure!(
+        !raw.windows(token.len())
+            .any(|part| part == token.as_bytes()),
+        "connector response exposed a credential; refused"
+    );
+    let body = serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()
+        .filter(|v| v.is_object());
+    Ok(ConnectorResponse {
+        status,
+        body,
+        retry_after,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
