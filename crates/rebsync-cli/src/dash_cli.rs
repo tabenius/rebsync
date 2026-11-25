@@ -294,8 +294,12 @@ pub fn run(args: &DashArgs) -> Result<i32> {
                 .into_iter()
                 .filter(|c| {
                     c.audience.account_id == dash.origin()
+                        && c.kind == rebsync_core::credentials::CredentialKind::DashBearer
+                        && c.created_at <= now
                         && !c.disabled
                         && scopes.iter().all(|s| c.scopes.contains(s))
+                        && (!scopes.contains(&rebsync_core::credentials::Scope::Connector)
+                            || c.scopes == [rebsync_core::credentials::Scope::Connector])
                         && c.expires_at > now + renew_days * 86_400
                 })
                 .max_by_key(|c| c.expires_at);
@@ -309,11 +313,11 @@ pub fn run(args: &DashArgs) -> Result<i32> {
             //    on it, rather than piling up requests. Expired ones are gone
             //    at Dash; forget them here.
             let mut resumable = None;
-            for summary in pending_store
-                .list()
-                .into_iter()
-                .filter(|p| p.dash == dash.origin())
-            {
+            for summary in pending_store.list().into_iter().filter(|p| {
+                p.dash == dash.origin()
+                    && p.scopes.iter().all(|s| scopes.contains(s))
+                    && scopes.iter().all(|s| p.scopes.contains(s))
+            }) {
                 if summary.expires_at > now + 30 && resumable.is_none() {
                     resumable = Some(pending_store.load(&summary.pairing_id)?);
                 } else if summary.expires_at <= now {
