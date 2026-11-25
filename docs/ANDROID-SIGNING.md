@@ -58,6 +58,17 @@ A secrets-only repair can retry the original immutable tag.
 
 ## If identity differs
 
+SDK37 reports `V2 Signer` / `V3.0 Signer` rather than legacy `Signer #1`.
+The verifier accepts those known formats, requires `Number of signers: 1`, and
+requires every reported signing-scheme certificate to match the same pinned
+identity. Unknown formats, multiple signers and divergent scheme identities fail
+closed; an unsupported report is not proof of a different private key.
+
+Before compiling the app, CI tests its **actual SDK apksigner** against the
+SHA-256-pinned public v0.2.4 fixture, then signs/verifies only a temporary copy
+using a disposable test key. The fixture is never installed or published as a
+new release. This catches SDK report changes before spending a full app build.
+
 Stop. Compare the public expected/observed fingerprints. Restore the approved
 keystore/alias from custody; do not replace the pin with the observed digest or
 reuse another application's key. If the original private key is unavailable,

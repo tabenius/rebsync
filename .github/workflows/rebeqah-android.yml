@@ -77,6 +77,14 @@ jobs:
           cargo test --manifest-path apps/rebsync-app/logic-tests/Cargo.toml
           python3 scripts/test_android_release.py
           python3 scripts/test_android_signing.py
+          # Public pinned fixture: inspect/sign a temporary copy, never install it.
+          curl --fail --location --retry 2 --max-time 120 --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/signing-fixture.apk" \
+            https://github.com/tabenius/rebsync/releases/download/v0.2.4/rebeqah-0.2.4-universal-release.apk
+          printf '%s  %s\n' d6d8f2607ddbb9082a911e4770f373040ed204814ffe4d92c92afb529817102c "$RUNNER_TEMP/signing-fixture.apk" | sha256sum --check -
+          RBQ_SIGNING_TEST_APK="$RUNNER_TEMP/signing-fixture.apk" \
+          RBQ_SIGNING_TEST_APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner" \
+          PATH="$ANDROID_HOME/build-tools/37.0.0:$PATH" \
           python3 scripts/test_sign_android_release.py
       - name: Build release APK
         if: inputs.signing_preflight_only != true
