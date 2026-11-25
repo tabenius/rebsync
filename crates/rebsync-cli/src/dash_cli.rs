@@ -8,12 +8,31 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// How stored credentials are protected at rest.
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq, Debug)]
+pub enum Seal {
+    /// Encrypt each credential with a key kept in the desktop's Secret
+    /// Service (GNOME Keyring, KWallet, KeePassXC).
+    SecretService,
+    /// Owner-only files only, not encrypted at rest: for headless machines
+    /// without a Secret Service, chosen explicitly.
+    None,
+}
+
 #[derive(Args)]
 pub struct DashArgs {
-    /// Directory of owner-only credential files (mode 0700). Not encrypted at
-    /// rest: anyone who can read it as you can use the credentials in it.
+    /// Directory of owner-only credential files (mode 0700).
     #[arg(long, env = "RBQ_CREDENTIAL_STORE")]
     credential_store: PathBuf,
+    /// Protection at rest: `secret-service` encrypts with a key in your
+    /// desktop keyring; `none` (headless) leaves owner-only plaintext.
+    #[arg(
+        long,
+        env = "RBQ_CREDENTIAL_SEAL",
+        value_enum,
+        default_value = "secret-service"
+    )]
+    seal: Seal,
     #[command(subcommand)]
     command: DashAction,
 }
@@ -76,7 +95,7 @@ pub fn run(args: &DashArgs) -> Result<i32> {
     use rebsync_core::dash_pairing::{self as pairing, Dash, Outcome, PendingStore};
     use std::time::Duration;
 
-    let store = pairing::open_store(&args.credential_store)?;
+    let store = credential_store(&args.credential_store, args.seal)?;
     let pending_store = PendingStore::open(&store)?;
     let print = |value: serde_json::Value| -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -197,6 +216,36 @@ pub fn run(args: &DashArgs) -> Result<i32> {
             print(serde_json::json!({ "key_id": key_id, "disabled": true }))?;
             Ok(0)
         }
+    }
+}
+
+/// The credential store in `dir`, sealed as `seal` says. There is no
+/// fallback: if the Secret Service is unavailable, say so and stop.
+#[cfg(feature = "peer")]
+pub fn credential_store(
+    dir: &std::path::Path,
+    seal: Seal,
+) -> Result<rebsync_core::credentials::files::FileStore> {
+    let store = rebsync_core::dash_pairing::open_store(dir)?;
+    match seal {
+        Seal::None => Ok(store),
+        #[cfg(all(feature = "secret-service", target_os = "linux"))]
+        Seal::SecretService => {
+            use rebsync_core::credentials::secret_service::SecretServiceSealer;
+            let sealer = SecretServiceSealer::for_store(store.dir()).map_err(|error| {
+                anyhow::anyhow!(
+                    "the Secret Service is unavailable or locked ({error:?}). Unlock your keyring, \
+                     or on a headless machine pass --seal none (RBQ_CREDENTIAL_SEAL=none) to keep \
+                     owner-only files that are not encrypted at rest"
+                )
+            })?;
+            Ok(store.with_sealer(std::sync::Arc::new(sealer)))
+        }
+        #[cfg(not(all(feature = "secret-service", target_os = "linux")))]
+        Seal::SecretService => anyhow::bail!(
+            "this rbq has no Secret Service support; pass --seal none (RBQ_CREDENTIAL_SEAL=none) \
+             to keep owner-only files that are not encrypted at rest"
+        ),
     }
 }
 

@@ -21,6 +21,14 @@ pub struct RepositoryArgs {
     /// The credential store `rbq dash pair` wrote to.
     #[arg(long, env = "RBQ_CREDENTIAL_STORE")]
     credential_store: Option<PathBuf>,
+    /// How that store is sealed (as for `rbq dash`).
+    #[arg(
+        long,
+        env = "RBQ_CREDENTIAL_SEAL",
+        value_enum,
+        default_value = "secret-service"
+    )]
+    seal: crate::dash_cli::Seal,
     #[command(subcommand)]
     command: RepositoryAction,
 }
@@ -89,7 +97,7 @@ pub fn run(args: &RepositoryArgs) -> Result<i32> {
         (Some(endpoint), Some(token_file), None, _) => {
             Repository::from_token_file(endpoint, token_file)?
         }
-        (None, None, Some(id), Some(dir)) => stored(dir, id, scope_for(&args.command))?,
+        (None, None, Some(id), Some(dir)) => stored(dir, args.seal, id, scope_for(&args.command))?,
         _ => anyhow::bail!(
             "give --endpoint with --token-file, or --credential with --credential-store"
         ),
@@ -165,11 +173,12 @@ fn scope_for(action: &RepositoryAction) -> rebsync_core::credentials::Scope {
 #[cfg(feature = "peer")]
 fn stored(
     dir: &std::path::Path,
+    seal: crate::dash_cli::Seal,
     id: &str,
     scope: rebsync_core::credentials::Scope,
 ) -> Result<rebsync_core::repository::Repository> {
     use rebsync_core::credentials::CredentialStore;
-    let store = rebsync_core::dash_pairing::open_store(dir)?;
+    let store = crate::dash_cli::credential_store(dir, seal)?;
     let descriptor = store
         .descriptor(id)
         .map_err(|e| anyhow::anyhow!("no usable credential {id} ({e:?})"))?;
@@ -179,10 +188,20 @@ fn stored(
         .unwrap_or_default();
     let secret = store
         .use_secret(id, &descriptor.audience, &scope, now)
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "credential {id} does not allow {scope:?} now (expired, disabled or not granted)"
-            )
+        .map_err(|error| {
+            use rebsync_core::credentials::StoreError;
+            match error {
+                StoreError::Locked => anyhow::anyhow!(
+                    "credential {id} is sealed with a key this run cannot use: unlock your keyring, \
+                     or use the --seal it was stored with"
+                ),
+                StoreError::Invalid => anyhow::anyhow!(
+                    "credential {id} does not open: it was sealed by another key, or altered"
+                ),
+                _ => anyhow::anyhow!(
+                    "credential {id} does not allow {scope:?} now (expired, disabled or not granted)"
+                ),
+            }
         })?;
     let token = std::str::from_utf8(secret.expose())
         .map_err(|_| anyhow::anyhow!("credential {id} is unreadable"))?;

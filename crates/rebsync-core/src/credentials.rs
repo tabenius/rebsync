@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod files;
+#[cfg(all(feature = "secret-service", target_os = "linux"))]
+pub mod secret_service;
 
 /// Trusted native adapters may expose bytes only for an authorized operation.
 /// Intentionally neither Clone nor Serialize; Debug never reveals contents.

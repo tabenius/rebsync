@@ -1,10 +1,17 @@
 //! Owner-only credential files: the explicitly selected headless backend
 //! (RBQ-SERVICE-PLAN.md §1, "Headless Linux").
 //!
-//! **This is not encryption at rest.** Anyone who can read the directory as
-//! this user, or as root, can read the secrets. It is what a headless device
-//! or an app's private storage offers; a keyring or platform keystore backend
-//! can replace it behind the same [`CredentialStore`] trait.
+//! **On its own this is not encryption at rest.** Anyone who can read the
+//! directory as this user, or as root, can read the secrets. With a
+//! [`Sealer`] ([`FileStore::with_sealer`]), each secret is encrypted by a key
+//! the sealer keeps elsewhere (the Android Keystore, or the desktop's Secret
+//! Service), and the files hold only ciphertext plus readable metadata.
+//!
+//! - A sealed secret is bound to its credential id as associated data, so an
+//!   encrypted secret moved onto another entry does not open.
+//! - A store with a sealer upgrades a plaintext entry the first time it is
+//!   used; a store without one refuses sealed entries (`Locked`) rather than
+//!   guessing.
 //!
 //! - The directory is `0700` and owned by this user; every entry is a `0600`
 //!   regular file owned by this user. Anything else is refused, not repaired.
@@ -32,8 +39,49 @@ const MAX_ENTRY: u64 = 64 * 1024;
 struct Entry {
     schema: String,
     descriptor: Descriptor,
-    /// Base64 of the secret bytes.
-    secret: String,
+    /// Base64 of the secret bytes, for an unsealed entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
+    /// The secret encrypted by a [`Sealer`], for a sealed entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed: Option<SealedSecret>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedSecret {
+    /// Which sealer made it ([`Sealer::id`]).
+    sealer: String,
+    /// Base64 of the sealer's output.
+    data: String,
+}
+
+/// Encrypts secrets with a key kept outside the credential files.
+///
+/// `seal` must authenticate `aad` (associated data) and `open` must refuse
+/// anything sealed with different `aad`, by another key, or altered. Errors
+/// are [`StoreError::Locked`] when the key is unavailable right now (a locked
+/// keyring) and [`StoreError::Invalid`] when the data does not open.
+pub trait Sealer: Send + Sync {
+    /// A stable name for this kind of key, stored with each sealed secret.
+    fn id(&self) -> &str;
+    fn seal(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, StoreError>;
+    fn open(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, StoreError>;
+}
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn unb64(text: &str) -> Result<Vec<u8>, StoreError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(|_| StoreError::Invalid)
+}
+
+/// Associated data binding a sealed secret to its entry.
+fn aad_for(id: &str) -> Vec<u8> {
+    format!("{SCHEMA}\0{id}").into_bytes()
 }
 
 /// Credential ids name files: letters, digits, `-` and `_`, 1..=64 bytes.
@@ -44,10 +92,21 @@ pub fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// An explicitly selected directory of owner-only credential files.
-#[derive(Debug, Clone)]
+/// An explicitly selected directory of owner-only credential files,
+/// optionally sealed ([`FileStore::with_sealer`]).
+#[derive(Clone)]
 pub struct FileStore {
     dir: PathBuf,
+    sealer: Option<std::sync::Arc<dyn Sealer>>,
+}
+
+impl std::fmt::Debug for FileStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileStore")
+            .field("dir", &self.dir)
+            .field("sealer", &self.sealer.as_ref().map(|s| s.id().to_owned()))
+            .finish()
+    }
 }
 
 fn io_error(error: std::io::Error) -> StoreError {
@@ -98,7 +157,19 @@ impl FileStore {
         }
         Ok(Self {
             dir: dir.to_path_buf(),
+            sealer: None,
         })
+    }
+
+    /// Seal new secrets with `sealer`, and upgrade plaintext ones when used.
+    pub fn with_sealer(mut self, sealer: std::sync::Arc<dyn Sealer>) -> Self {
+        self.sealer = Some(sealer);
+        self
+    }
+
+    /// The sealer's id, if this store seals.
+    pub fn sealer_id(&self) -> Option<&str> {
+        self.sealer.as_deref().map(|s| s.id())
     }
 
     pub fn dir(&self) -> &Path {
@@ -115,19 +186,52 @@ impl FileStore {
     fn load(&self, id: &str) -> Result<Entry, StoreError> {
         let bytes = read_private(&self.path(id)?)?;
         let entry: Entry = serde_json::from_slice(&bytes).map_err(|_| StoreError::Invalid)?;
-        if entry.schema != SCHEMA || entry.descriptor.id != id {
+        if entry.schema != SCHEMA
+            || entry.descriptor.id != id
+            || entry.secret.is_some() == entry.sealed.is_some()
+        {
             return Err(StoreError::Invalid);
         }
         Ok(entry)
     }
 
-    fn encode(descriptor: Descriptor, secret: &[u8]) -> Result<Vec<u8>, StoreError> {
-        serde_json::to_vec_pretty(&Entry {
+    /// An entry for `secret`: sealed if this store has a sealer.
+    fn entry(&self, descriptor: Descriptor, secret: &[u8]) -> Result<Entry, StoreError> {
+        let (plain, sealed) = match &self.sealer {
+            Some(sealer) => (
+                None,
+                Some(SealedSecret {
+                    sealer: sealer.id().to_owned(),
+                    data: b64(&sealer.seal(secret, &aad_for(&descriptor.id))?),
+                }),
+            ),
+            None => (Some(b64(secret)), None),
+        };
+        Ok(Entry {
             schema: SCHEMA.into(),
             descriptor,
-            secret: base64::engine::general_purpose::STANDARD.encode(secret),
+            secret: plain,
+            sealed,
         })
-        .map_err(|_| StoreError::Invalid)
+    }
+
+    fn encode(entry: &Entry) -> Result<Vec<u8>, StoreError> {
+        serde_json::to_vec_pretty(entry).map_err(|_| StoreError::Invalid)
+    }
+
+    /// The secret in `entry`, opening it with this store's sealer.
+    fn reveal(&self, entry: &Entry) -> Result<Vec<u8>, StoreError> {
+        match (&entry.secret, &entry.sealed) {
+            (Some(plain), None) => unb64(plain),
+            (None, Some(sealed)) => match &self.sealer {
+                Some(sealer) if sealer.id() == sealed.sealer => {
+                    sealer.open(&unb64(&sealed.data)?, &aad_for(&entry.descriptor.id))
+                }
+                // Sealed by a key this store cannot use (none, or another).
+                _ => Err(StoreError::Locked),
+            },
+            _ => Err(StoreError::Invalid),
+        }
     }
 }
 
@@ -240,16 +344,18 @@ impl CredentialStore for FileStore {
 
     fn create(&self, descriptor: Descriptor, secret: Secret) -> Result<(), StoreError> {
         let path = self.path(&descriptor.id)?;
-        create_private(&path, &Self::encode(descriptor, secret.expose())?)
+        create_private(
+            &path,
+            &Self::encode(&self.entry(descriptor, secret.expose())?)?,
+        )
     }
 
+    /// Disabling keeps the secret as it is stored (sealed or not): it needs
+    /// no key, so it works even while a keyring is locked.
     fn disable(&self, id: &str) -> Result<(), StoreError> {
         let mut entry = self.load(id)?;
         entry.descriptor.disabled = true;
-        let secret = base64::engine::general_purpose::STANDARD
-            .decode(&entry.secret)
-            .map_err(|_| StoreError::Invalid)?;
-        replace_private(&self.path(id)?, &Self::encode(entry.descriptor, &secret)?)
+        replace_private(&self.path(id)?, &Self::encode(&entry)?)
     }
 
     fn use_secret(
@@ -263,10 +369,17 @@ impl CredentialStore for FileStore {
         if !entry.descriptor.permits(audience, scope, now) {
             return Err(StoreError::Denied);
         }
-        base64::engine::general_purpose::STANDARD
-            .decode(&entry.secret)
-            .map(Secret::new)
-            .map_err(|_| StoreError::Invalid)
+        let secret = self.reveal(&entry)?;
+        // A plaintext entry in a sealing store is sealed now. If that fails
+        // the secret is still returned: the entry is no worse than before.
+        if entry.secret.is_some()
+            && self.sealer.is_some()
+            && let Ok(sealed) = self.entry(entry.descriptor.clone(), &secret)
+        {
+            let _ =
+                Self::encode(&sealed).and_then(|bytes| replace_private(&self.path(id)?, &bytes));
+        }
+        Ok(Secret::new(secret))
     }
 }
 
@@ -416,5 +529,201 @@ mod tests {
         fs::create_dir(&open).unwrap();
         fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(FileStore::open(&open).map(|_| ()), Err(StoreError::Denied));
+    }
+
+    /// A test-only sealer: SHA-256 keystream with a SHA-256 tag over key,
+    /// associated data, nonce and ciphertext. Not for real use.
+    struct TestSealer {
+        id: &'static str,
+        key: [u8; 32],
+    }
+
+    impl TestSealer {
+        fn stream(&self, nonce: &[u8], len: usize) -> Vec<u8> {
+            use sha2::{Digest, Sha256};
+            (0..len.div_ceil(32))
+                .flat_map(|block| {
+                    Sha256::new()
+                        .chain_update(self.key)
+                        .chain_update(nonce)
+                        .chain_update((block as u64).to_le_bytes())
+                        .finalize()
+                })
+                .take(len)
+                .collect()
+        }
+        fn tag(&self, aad: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> {
+            use sha2::{Digest, Sha256};
+            Sha256::new()
+                .chain_update(self.key)
+                .chain_update((aad.len() as u64).to_le_bytes())
+                .chain_update(aad)
+                .chain_update(nonce)
+                .chain_update(ciphertext)
+                .finalize()
+                .to_vec()
+        }
+    }
+
+    impl Sealer for TestSealer {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn seal(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, StoreError> {
+            let mut nonce = [0_u8; 12];
+            getrandom::getrandom(&mut nonce).unwrap();
+            let ciphertext: Vec<u8> = plaintext
+                .iter()
+                .zip(self.stream(&nonce, plaintext.len()))
+                .map(|(p, k)| p ^ k)
+                .collect();
+            Ok([&nonce[..], &self.tag(aad, &nonce, &ciphertext), &ciphertext].concat())
+        }
+        fn open(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, StoreError> {
+            if sealed.len() < 44 {
+                return Err(StoreError::Invalid);
+            }
+            let (nonce, rest) = sealed.split_at(12);
+            let (tag, ciphertext) = rest.split_at(32);
+            if tag != self.tag(aad, nonce, ciphertext).as_slice() {
+                return Err(StoreError::Invalid);
+            }
+            Ok(ciphertext
+                .iter()
+                .zip(self.stream(nonce, ciphertext.len()))
+                .map(|(c, k)| c ^ k)
+                .collect())
+        }
+    }
+
+    fn sealer(id: &'static str, key: u8) -> std::sync::Arc<dyn Sealer> {
+        std::sync::Arc::new(TestSealer { id, key: [key; 32] })
+    }
+
+    #[test]
+    fn sealed_secrets_are_ciphertext_on_disk_and_need_the_key() {
+        let (_root, plain) = store();
+        let sealed = plain.clone().with_sealer(sealer("test-keystore", 7));
+        let entry = descriptor("key-s");
+        sealed
+            .create(entry.clone(), Secret::new(b"rbs_sealed_secret".to_vec()))
+            .unwrap();
+        let file = fs::read_to_string(sealed.dir().join("key-s.json")).unwrap();
+        assert!(!file.contains("rbs_sealed_secret"));
+        assert!(!file.contains(&b64(b"rbs_sealed_secret")));
+        assert!(file.contains("test-keystore"));
+        let opened = sealed
+            .use_secret("key-s", &entry.audience, &Scope::Read, 150)
+            .unwrap();
+        assert_eq!(opened.expose(), b"rbs_sealed_secret");
+
+        // Without the key: metadata still lists, the secret is Locked.
+        assert_eq!(plain.list().unwrap(), vec![entry.clone()]);
+        assert_eq!(
+            plain
+                .use_secret("key-s", &entry.audience, &Scope::Read, 150)
+                .map(|_| ()),
+            Err(StoreError::Locked)
+        );
+        // Another kind of key: Locked; the same kind with another key: Invalid.
+        let other_kind = plain.clone().with_sealer(sealer("other", 7));
+        assert_eq!(
+            other_kind
+                .use_secret("key-s", &entry.audience, &Scope::Read, 150)
+                .map(|_| ()),
+            Err(StoreError::Locked)
+        );
+        let wrong_key = plain.clone().with_sealer(sealer("test-keystore", 8));
+        assert_eq!(
+            wrong_key
+                .use_secret("key-s", &entry.audience, &Scope::Read, 150)
+                .map(|_| ()),
+            Err(StoreError::Invalid)
+        );
+        // Disabling needs no key.
+        plain.disable("key-s").unwrap();
+        assert!(sealed.descriptor("key-s").unwrap().disabled);
+    }
+
+    #[test]
+    fn a_sealed_secret_moved_to_another_entry_does_not_open() {
+        let (_root, plain) = store();
+        let sealed = plain.clone().with_sealer(sealer("test-keystore", 7));
+        let (a, b) = (descriptor("key-a"), descriptor("key-b"));
+        sealed
+            .create(a.clone(), Secret::new(b"secret-a".to_vec()))
+            .unwrap();
+        sealed
+            .create(b.clone(), Secret::new(b"secret-b".to_vec()))
+            .unwrap();
+        // Graft A's ciphertext into B's file.
+        let a_file: serde_json::Value =
+            serde_json::from_slice(&fs::read(sealed.dir().join("key-a.json")).unwrap()).unwrap();
+        let mut b_file: serde_json::Value =
+            serde_json::from_slice(&fs::read(sealed.dir().join("key-b.json")).unwrap()).unwrap();
+        b_file["sealed"] = a_file["sealed"].clone();
+        replace_private(
+            &sealed.dir().join("key-b.json"),
+            &serde_json::to_vec(&b_file).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sealed
+                .use_secret("key-b", &b.audience, &Scope::Read, 150)
+                .map(|_| ()),
+            Err(StoreError::Invalid)
+        );
+        // An entry claiming both forms, or neither, is refused.
+        let mut both = a_file.clone();
+        both["secret"] = serde_json::json!(b64(b"x"));
+        replace_private(
+            &sealed.dir().join("key-a.json"),
+            &serde_json::to_vec(&both).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sealed.descriptor("key-a").map(|_| ()),
+            Err(StoreError::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_plaintext_entry_is_sealed_the_first_time_a_sealing_store_uses_it() {
+        let (_root, plain) = store();
+        let entry = descriptor("key-p");
+        plain
+            .create(entry.clone(), Secret::new(b"rbs_was_plain".to_vec()))
+            .unwrap();
+        assert!(
+            fs::read_to_string(plain.dir().join("key-p.json"))
+                .unwrap()
+                .contains(&b64(b"rbs_was_plain"))
+        );
+        let sealed = plain.clone().with_sealer(sealer("test-keystore", 7));
+        assert_eq!(
+            sealed
+                .use_secret("key-p", &entry.audience, &Scope::Read, 150)
+                .unwrap()
+                .expose(),
+            b"rbs_was_plain"
+        );
+        let file = fs::read_to_string(plain.dir().join("key-p.json")).unwrap();
+        assert!(!file.contains(&b64(b"rbs_was_plain")), "upgraded to sealed");
+        assert_eq!(
+            sealed
+                .use_secret("key-p", &entry.audience, &Scope::Read, 150)
+                .unwrap()
+                .expose(),
+            b"rbs_was_plain"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(plain.dir().join("key-p.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

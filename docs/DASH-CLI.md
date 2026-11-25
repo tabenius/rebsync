@@ -59,9 +59,16 @@ rbq repository --credential KEY_ID push --store "$HOME/.rbq/objects" --source-id
   `rbq dash cancel PAIRING_ID` later.
 - **Storage.** `$RBQ_CREDENTIAL_STORE` is a `0700` directory of `0600` files,
   one per credential, created atomically and never overwritten; symlinks and
-  files open to others are refused. **This is not encryption at rest**: anyone
-  who can read the directory as you can use the credentials. Pending pairings
-  (with their claim nonces) are kept in `pending/` the same way.
+  files open to others are refused. By default (`--seal secret-service`, or
+  `RBQ_CREDENTIAL_SEAL`) each secret is encrypted with XChaCha20-Poly1305
+  under a random key kept in your desktop's Secret Service (GNOME Keyring,
+  KWallet, KeePassXC), one key per store directory, and bound to its
+  credential id; the files hold ciphertext and readable metadata only. If the
+  Secret Service is unavailable or locked, `rbq` stops and says so; on a
+  headless machine pass `--seal none` to keep owner-only files that are **not
+  encrypted at rest**. Plaintext entries are sealed the first time a sealing
+  run uses them. Pending pairings (with their 10-minute claim nonces) are kept
+  in `pending/`, owner-only and not sealed.
 - **Stopping.** `rbq dash disable KEY_ID` stops this device from using it;
   revoke it in Dash too, which works everywhere at once.
 - Output is JSON on stdout. No command prints a token or nonce.
