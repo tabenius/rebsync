@@ -33,6 +33,8 @@ pub mod serve;
 pub mod status;
 pub mod storage;
 pub mod sync;
+#[cfg(all(unix, feature = "term"))]
+pub mod term;
 #[cfg(feature = "peer-transport")]
 pub mod transport;
 pub mod wire;

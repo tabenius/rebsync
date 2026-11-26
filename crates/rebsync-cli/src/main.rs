@@ -89,6 +89,21 @@ struct InstallCompletionsArgs {
     system: bool,
 }
 #[derive(Subcommand)]
+enum TermAction {
+    /// Serve a login shell to the browser (xterm.js) on a mesh address.
+    /// Operators come from [term].operators; sessions survive dropped links.
+    Serve {
+        /// NetBird/Tailscale address and port, e.g. 100.92.1.7:7681.
+        #[arg(long)]
+        bind: std::net::SocketAddr,
+        /// Also accept 127.0.0.1/::1 as the local operator (for SSH tunnels).
+        #[arg(long)]
+        allow_loopback: bool,
+    },
+    /// Show the mesh identity of a peer address and whether it is an operator.
+    Whois { address: std::net::IpAddr },
+}
+#[derive(Subcommand)]
 enum GiftAction {
     /// Verify an ed25519-jcs-v1 gift envelope (read-only; no key, no acceptance).
     Verify {
@@ -117,6 +132,11 @@ enum Action {
         shell: Option<clap_complete::Shell>,
         #[command(subcommand)]
         install: Option<CompletionAction>,
+    },
+    /// Browser operator terminal over the NetBird/Tailscale mesh.
+    Term {
+        #[command(subcommand)]
+        command: TermAction,
     },
     /// Check signed gifts without reading configuration.
     Gift {
@@ -1790,6 +1810,60 @@ fn gift_action(action: &GiftAction) -> Result<i32> {
     Ok(if outcome.is_ok() { 0 } else { 2 })
 }
 
+#[cfg(all(unix, feature = "term"))]
+fn term_action(config: &rebsync_core::Config, action: TermAction, json: bool) -> Result<i32> {
+    use rebsync_core::term::{Identify, MeshIdentity, ServeOptions, Server};
+    match action {
+        TermAction::Serve {
+            bind,
+            allow_loopback,
+        } => {
+            if config.term.operators.is_empty() && !allow_loopback {
+                bail!(
+                    "[term].operators is empty: add e.g. \"tailscale:you@github\" or \"netbird:laptop.netbird.cloud\""
+                );
+            }
+            let options = ServeOptions {
+                bind,
+                allow_loopback,
+            };
+            Server::new(
+                config.term.clone(),
+                Box::new(MeshIdentity::default()),
+                &options,
+            )?
+            .serve(&options)?;
+            Ok(0)
+        }
+        TermAction::Whois { address } => {
+            let identity = MeshIdentity::default().identify(address);
+            let operator = identity
+                .as_ref()
+                .is_some_and(|id| config.term.operators.contains(id));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"address": address, "identity": identity, "operator": operator})
+                );
+            } else {
+                match &identity {
+                    Some(id) => println!(
+                        "{address} is {id}; operator: {}",
+                        if operator { "yes" } else { "no" }
+                    ),
+                    None => println!("{address} has no Tailscale or NetBird identity here"),
+                }
+            }
+            Ok(if operator { 0 } else { 2 })
+        }
+    }
+}
+
+#[cfg(not(all(unix, feature = "term")))]
+fn term_action(_: &rebsync_core::Config, _: TermAction, _: bool) -> Result<i32> {
+    bail!("rbq was built without the term feature (Unix only); rebuild with --features term")
+}
+
 fn main() {
     match entry() {
         Ok(code) => std::process::exit(code),
@@ -1981,6 +2055,7 @@ fn entry() -> Result<i32> {
         Some(Action::Binaries { command }) => {
             return binaries_action(&config.config, command, cli.json);
         }
+        Some(Action::Term { command }) => return term_action(&config.config, command, cli.json),
         Some(Action::Status { watch }) => {
             return status_action(&config.config, watch, cli.json, cli.verbose);
         }

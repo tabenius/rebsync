@@ -17,6 +17,7 @@ pub struct Config {
     pub backup: Backup,
     pub storage: StorageConfig,
     pub binaries: crate::binaries::BinariesConfig,
+    pub term: TermConfig,
     pub mneme: MnemeConfig,
     pub frog: crate::frog::FrogConfig,
     pub agenda: crate::agenda::AgendaConfig,
@@ -176,6 +177,7 @@ impl Config {
             },
             storage: StorageConfig::default(),
             binaries: crate::binaries::BinariesConfig::default(),
+            term: TermConfig::default(),
             mneme: MnemeConfig::default(),
             frog: Default::default(),
             agenda: Default::default(),
@@ -579,4 +581,17 @@ mod tests {
         assert!(load_config_at(t.path().into(), t.path().join("xdg"), Default::default()).is_err());
         Ok(())
     }
+}
+
+/// `[term]`: the browser operator terminal (`rbq term serve`).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TermConfig {
+    /// Mesh identities allowed to open a shell: `tailscale:<login>` (e.g.
+    /// `tailscale:alice@github`) or `netbird:<peer fqdn>`. Empty means nobody.
+    pub operators: Vec<String>,
+    /// Extra `Host` names the page may be loaded under (e.g. a MagicDNS name).
+    pub hostnames: Vec<String>,
+    /// Login shell; defaults to `$SHELL`, then `/bin/sh`.
+    pub shell: Option<String>,
 }

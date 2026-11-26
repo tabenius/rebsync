@@ -6,10 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["storage", "peer", "serve"]
+default = ["storage", "peer", "serve", "term"]
 storage = ["rebsync-core/storage-object-store"]
 peer = ["storage", "rebsync-core/peer-http", "rebsync-core/peer-transport"]
 serve = ["storage", "rebsync-core/serve"]
+term = ["rebsync-core/term"]
 
 [[bin]]
 name = "rbq"

@@ -655,6 +655,13 @@ it neither walks nor lists local Git repositories. `--watch` is human-only; use
 plain `rbq status --json` from scripts. Exit code `2` means attention is needed
 or bytes are still pending.
 
+## Operator terminal (`rbq term`)
+
+`rbq term serve --bind <mesh address>:7681` serves a login shell to the browser
+(xterm.js) over NetBird or Tailscale. Operators are mesh identities listed in
+`[term].operators`; sessions survive dropped connections and resume without
+losing or repeating output. See [docs/TERM.md](docs/TERM.md).
+
 ## Terminal interface and shell completions
 
 `rbq` uses color when attached to a terminal and honors `NO_COLOR`/`TERM=dumb`.
