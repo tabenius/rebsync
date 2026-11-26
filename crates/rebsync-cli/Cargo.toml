@@ -6,11 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["storage", "peer", "serve", "term"]
+default = ["storage", "peer", "serve", "secret-service", "term"]
 storage = ["rebsync-core/storage-object-store"]
-peer = ["storage", "rebsync-core/peer-http", "rebsync-core/peer-transport"]
+peer = ["storage", "rebsync-core/peer-http", "rebsync-core/peer-transport", "rebsync-core/peer-quic"]
 serve = ["storage", "rebsync-core/serve"]
 term = ["rebsync-core/term"]
+# Seal Dash credentials with a key in the desktop Secret Service (Linux).
+secret-service = ["rebsync-core/secret-service"]
 
 [[bin]]
 name = "rbq"
@@ -26,5 +28,9 @@ rebsync-core = { path = "../rebsync-core", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
+
+[target.'cfg(unix)'.dependencies]
+# Clean shutdown of `rbq peer serve` under systemd and other supervisors.
+signal-hook = "0.3"

@@ -4,8 +4,12 @@
 //! drive), shares it with peers on trusted local networks, and shows what is
 //! connected and how much space remains.
 
+#[cfg(target_os = "android")]
+mod android_keystore;
+mod dash_link;
 mod datastore;
 mod peer;
+mod quic_share;
 mod volumes;
 
 use datastore::{MoveStatus, Settings};
@@ -27,9 +31,16 @@ struct App {
     settings: Arc<Mutex<Settings>>,
     storage: SharedStorage,
     peer: Mutex<Option<Peer>>,
+    /// The encrypted QUIC share, running whenever sharing is on and it could
+    /// start; `quic_error` says why not otherwise.
+    quic: Mutex<Option<quic_share::QuicShare>>,
+    quic_error: Mutex<Option<String>>,
     clients: Arc<Clients>,
     writes_paused: Arc<AtomicBool>,
     moving: Arc<Mutex<MoveStatus>>,
+    /// This phone's link to Dash (passkey-approved credential), or why the
+    /// app's private credential store is unusable.
+    dash: Result<Arc<dash_link::DashLink>, String>,
 }
 
 fn open_storage(settings: &Settings) -> Result<Arc<dyn ObjectStorage>, String> {
@@ -47,11 +58,33 @@ struct Connection {
     kind: String,
     address: String,
     url: String,
+    /// `rbq-peer/0` over HTTPS, pinned to the phone's key.
     pairing: String,
+    /// Encrypted `rbq-peer/1` over QUIC, pinned to this phone's key. The QR
+    /// code carries this one when it exists.
+    quic_pairing: Option<String>,
+    /// A curl command that checks the phone's key (`--pinnedpubkey`).
+    curl: String,
     qr_svg: String,
 }
 
-fn interface_kind(name: &str) -> &'static str {
+/// What kind of network an interface address is on. Overlays come first,
+/// classified by rbq's detector (interface names, and Tailscale's own IPv6
+/// range; Android's VPN apps all appear as `tun0`).
+fn interface_kind(name: &str, ip: std::net::IpAddr) -> &'static str {
+    use rebsync_core::overlay::{self, InterfaceAddress, OverlayKind};
+    let classified = overlay::classify(&[InterfaceAddress {
+        interface: name.to_owned(),
+        address: ip,
+    }]);
+    match classified.first().map(|found| found.kind) {
+        Some(OverlayKind::Tailscale) => return "Tailscale",
+        Some(OverlayKind::Netbird) => return "NetBird",
+        Some(OverlayKind::Unclassified) if name.starts_with("tun") || name.starts_with("wg") => {
+            return "Overlay VPN";
+        }
+        _ => {}
+    }
     match name {
         n if n.starts_with("wlan") => "Wi-Fi",
         n if n.starts_with("swlan") || n.starts_with("ap") || n.starts_with("softap") => "Hotspot",
@@ -81,8 +114,11 @@ fn qr(text: &str) -> String {
         .unwrap_or_default()
 }
 
-fn connections(port: u16, token: &str) -> Vec<Connection> {
-    let mut list: Vec<Connection> = if_addrs::get_if_addrs()
+/// Reachable addresses of this phone: (interface, kind, host as written in
+/// a URL), best first: local networks and overlays before mobile data, IPv4
+/// before IPv6.
+fn hosts() -> Vec<(String, &'static str, String)> {
+    let mut list: Vec<(String, &'static str, String)> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .filter(|i| !i.is_loopback())
@@ -97,34 +133,228 @@ fn connections(port: u16, token: &str) -> Vec<Connection> {
                 }
                 _ => return None,
             };
-            let url = format!("http://{host}:{port}");
-            let pairing = format!("rbq+{url}/v1?token={token}");
-            Some(Connection {
-                kind: interface_kind(&i.name).into(),
-                interface: i.name.clone(),
-                address: host,
-                qr_svg: qr(&pairing),
-                url,
-                pairing,
-            })
+            Some((i.name.clone(), interface_kind(&i.name, ip), host))
         })
         .collect();
-    // Prefer local-network interfaces over mobile data, IPv4 first.
-    let rank = |c: &Connection| {
+    list.sort_by_key(|(_, kind, host)| {
         (
-            match c.kind.as_str() {
+            match *kind {
                 "Wi-Fi" => 0,
+                // Overlays reach the phone from any network.
+                "Tailscale" | "NetBird" | "Overlay VPN" => 1,
                 "Hotspot" => 1,
                 "USB tethering" => 2,
                 "Ethernet" => 3,
                 "Mobile data" => 9,
                 _ => 5,
             },
-            c.address.starts_with('['),
+            host.starts_with('['),
         )
-    };
-    list.sort_by_key(rank);
+    });
     list
+}
+
+fn connections(port: u16, token: &str, pin: &str, quic: Option<(u16, &str)>) -> Vec<Connection> {
+    hosts()
+        .into_iter()
+        .map(|(interface, kind, host)| {
+            let url = format!("https://{host}:{port}");
+            let pairing = format!("rbq+{url}/v1?peer={pin}&token={token}");
+            let quic_pairing = quic
+                .map(|(quic_port, peer_id)| quic_share::pairing(&host, quic_port, peer_id, token));
+            Connection {
+                kind: kind.into(),
+                interface,
+                address: host,
+                qr_svg: qr(quic_pairing.as_deref().unwrap_or(&pairing)),
+                curl: format!(
+                    "curl -k --pinnedpubkey '{}' -H 'Authorization: Bearer TOKEN' {url}/v1/status",
+                    quic_share::curl_pin(pin)
+                ),
+                url,
+                pairing,
+                quic_pairing,
+            }
+        })
+        .collect()
+}
+
+/// A one-time pairing invitation, one string and QR code per address.
+#[derive(Serialize)]
+struct Invitation {
+    valid_minutes: u64,
+    access: &'static str,
+    connections: Vec<InvitationConnection>,
+}
+
+#[derive(Serialize)]
+struct InvitationConnection {
+    interface: String,
+    kind: String,
+    address: String,
+    invitation: String,
+    qr_svg: String,
+}
+
+const INVITATION_MINUTES: u64 = 10;
+
+/// Create a one-time pairing secret (encrypted sharing must be running).
+#[tauri::command]
+fn pair_invite(app: State<'_, App>, read_only: bool) -> Result<Invitation, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    let share = quic
+        .as_ref()
+        .ok_or("Turn sharing on first: pairing uses encrypted (QUIC) sharing")?;
+    let secret = share
+        .trust
+        .invite(
+            rebsync_core::transport::Scopes {
+                read: true,
+                write: !read_only,
+            },
+            INVITATION_MINUTES * 60,
+            Some("rebeqah".into()),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(Invitation {
+        valid_minutes: INVITATION_MINUTES,
+        access: if read_only { "read-only" } else { "read/write" },
+        connections: hosts()
+            .into_iter()
+            .map(|(interface, kind, host)| {
+                let invitation = quic_share::invitation(&host, share.port, &share.peer_id, &secret);
+                InvitationConnection {
+                    interface,
+                    kind: kind.into(),
+                    address: host,
+                    qr_svg: qr(&invitation),
+                    invitation,
+                }
+            })
+            .collect(),
+    })
+}
+
+/// Devices this phone has paired with (signed records it holds).
+#[tauri::command]
+fn paired_devices(
+    app: State<'_, App>,
+) -> Result<Vec<rebsync_core::transport::pairing::Paired>, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    Ok(quic
+        .as_ref()
+        .map(|share| share.trust.list())
+        .unwrap_or_default())
+}
+
+/// Revoke a pairing; the device needs a new invitation or the token.
+#[tauri::command]
+fn unpair(app: State<'_, App>, peer: String) -> Result<usize, String> {
+    let quic = app.quic.lock().map_err(|_| "share lock")?;
+    let share = quic.as_ref().ok_or("Turn sharing on first")?;
+    share.trust.remove(&peer).map_err(|e| format!("{e:#}"))
+}
+
+/// Run blocking Dash work off the main thread.
+async fn with_dash<T: Send + 'static>(
+    app: State<'_, App>,
+    work: impl FnOnce(&dash_link::DashLink) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let link = app.dash.clone()?;
+    tauri::async_runtime::spawn_blocking(move || work(&link))
+        .await
+        .map_err(|e| format!("Dash task failed: {e}"))?
+}
+
+#[derive(Serialize)]
+struct DashStatus {
+    pending: Vec<rebsync_core::dash_pairing::PendingSummary>,
+    credentials: Vec<rebsync_core::credentials::Descriptor>,
+    /// How stored credentials are protected at rest, for the screen.
+    protection: String,
+}
+
+fn protection(link: &dash_link::DashLink) -> String {
+    match link.sealer_id() {
+        #[cfg(target_os = "android")]
+        Some(_) => match android_keystore::KeystoreSealer::hardware_backed() {
+            Some(true) => "Encrypted with a key in this phone's secure hardware (Android Keystore).".into(),
+            Some(false) => "Encrypted with a key in the Android Keystore (software; this phone reports no secure hardware).".into(),
+            None => "Encrypted with a key in the Android Keystore.".into(),
+        },
+        #[cfg(not(target_os = "android"))]
+        Some(id) => format!("Encrypted at rest ({id})."),
+        None => "Kept in this app's private storage, not encrypted at rest by the app.".into(),
+    }
+}
+
+/// Pairings in progress and stored Dash credentials (metadata only).
+#[tauri::command]
+async fn dash_status(app: State<'_, App>) -> Result<DashStatus, String> {
+    with_dash(app, |link| {
+        Ok(DashStatus {
+            pending: link.pending(),
+            credentials: link.credentials()?,
+            protection: protection(link),
+        })
+    })
+    .await
+}
+
+/// Ask Dash to pair this phone. Returns the matching code and approval URL.
+#[tauri::command]
+async fn dash_pair_begin(
+    app: State<'_, App>,
+    dash: String,
+    label: String,
+    read_only: bool,
+    days: u64,
+) -> Result<serde_json::Value, String> {
+    let summary = with_dash(app, move |link| link.begin(&dash, &label, read_only, days)).await?;
+    let mut value = serde_json::to_value(&summary).map_err(|e| e.to_string())?;
+    value["qr_svg"] = qr(&summary.approval_url).into();
+    Ok(value)
+}
+
+/// Check a pairing once; collects and stores the credential once approved.
+#[tauri::command]
+async fn dash_pair_poll(
+    app: State<'_, App>,
+    pairing_id: String,
+) -> Result<dash_link::Progress, String> {
+    with_dash(app, move |link| link.poll(&pairing_id)).await
+}
+
+#[tauri::command]
+async fn dash_pair_cancel(
+    app: State<'_, App>,
+    pairing_id: String,
+) -> Result<rebsync_core::dash_pairing::State, String> {
+    with_dash(app, move |link| link.cancel(&pairing_id)).await
+}
+
+/// Describe the repository a stored credential reaches.
+#[tauri::command]
+async fn dash_check(app: State<'_, App>, key_id: String) -> Result<serde_json::Value, String> {
+    with_dash(app, move |link| link.check(&key_id)).await
+}
+
+/// Send this phone's snapshots to the owner's Dash repository.
+#[tauri::command]
+async fn dash_send(
+    app: State<'_, App>,
+    key_id: String,
+    name: String,
+) -> Result<rebsync_core::repository_sync::Report, String> {
+    // Read through the current data root (it can move between volumes).
+    let storage = quic_share::FollowStorage(app.storage.clone());
+    with_dash(app, move |link| link.send(&key_id, &storage, &name)).await
+}
+
+/// Stop using a credential on this phone (revoke it in Dash too).
+#[tauri::command]
+async fn dash_forget(app: State<'_, App>, key_id: String) -> Result<(), String> {
+    with_dash(app, move |link| link.forget(&key_id)).await
 }
 
 #[derive(Serialize)]
@@ -133,6 +363,9 @@ struct Overview {
     data_root: PathBuf,
     sharing: bool,
     port: u16,
+    quic_port: Option<u16>,
+    /// The phone's key fingerprint that QUIC clients pin.
+    quic_peer_id: Option<String>,
     token_hint: String,
     connections: Vec<Connection>,
     clients: Vec<peer::Client>,
@@ -157,7 +390,20 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         .lock()
         .ok()
         .and_then(|p| p.as_ref().map(|p| p.port));
+    let quic = app
+        .quic
+        .lock()
+        .ok()
+        .and_then(|q| q.as_ref().map(|q| (q.port, q.peer_id.clone())));
     let mut warnings = Vec::new();
+    if peer_port.is_some()
+        && quic.is_none()
+        && let Some(error) = app.quic_error.lock().ok().and_then(|e| e.clone())
+    {
+        warnings.push(format!(
+            "Encrypted sharing over QUIC could not start, so only HTTPS is offered: {error}"
+        ));
+    }
     if !caps.atomic_create_if_absent {
         warnings.push("This volume has no hard links (typical for SD cards and USB drives): writes are safe with one writer at a time, which Rebeqah ensures.".into());
     }
@@ -179,9 +425,22 @@ fn overview(app: State<'_, App>) -> Result<Overview, String> {
         data_root: settings.objects(),
         sharing: peer_port.is_some(),
         port: peer_port.unwrap_or(settings.port),
+        quic_port: quic.as_ref().map(|(port, _)| *port),
+        quic_peer_id: quic.as_ref().map(|(_, id)| id.clone()),
         token_hint: format!("{}…", &settings.token[..6]),
         connections: peer_port
-            .map(|port| connections(port, &settings.token))
+            .map(|port| {
+                connections(
+                    port,
+                    &settings.token,
+                    &rebsync_core::transport::quic::Identity::load_or_create(
+                        &app.internal.join("quic-identity"),
+                    )
+                    .map(|identity| identity.peer_id().to_owned())
+                    .unwrap_or_default(),
+                    quic.as_ref().map(|(port, id)| (*port, id.as_str())),
+                )
+            })
             .unwrap_or_default(),
         clients: app.clients.snapshot(),
         capabilities: serde_json::json!({
@@ -210,21 +469,50 @@ fn start_peer(app: &App, settings: &Settings) -> Result<u16, String> {
     if let Some(peer) = slot.as_ref() {
         return Ok(peer.port);
     }
+    // One key for both servers: HTTPS and QUIC clients pin the same id.
+    let identity = rebsync_core::transport::quic::Identity::load_or_create(
+        &app.internal.join("quic-identity"),
+    )
+    .map_err(|e| format!("{e:#}"))?;
     let peer = Peer::start(
         settings.port,
         settings.token.clone(),
         app.storage.clone(),
         app.clients.clone(),
         app.writes_paused.clone(),
+        &identity,
     )?;
     let port = peer.port;
     *slot = Some(peer);
+    // Encrypted sharing next to HTTP, on the same port number over UDP. A
+    // failure leaves HTTP running and is shown as a warning.
+    let quic = quic_share::QuicShare::start(
+        settings.port,
+        settings.token.clone(),
+        app.storage.clone(),
+        app.writes_paused.clone(),
+        &app.internal.join("quic-identity"),
+        &app.internal.join("paired"),
+        app.clients.clone(),
+    );
+    if let (Ok(mut quic_slot), Ok(mut error)) = (app.quic.lock(), app.quic_error.lock()) {
+        match quic {
+            Ok(share) => {
+                *quic_slot = Some(share);
+                *error = None;
+            }
+            Err(message) => *error = Some(message),
+        }
+    }
     Ok(port)
 }
 
 fn stop_peer(app: &App) {
     if let Some(peer) = app.peer.lock().ok().and_then(|mut slot| slot.take()) {
         peer.stop();
+    }
+    if let Some(share) = app.quic.lock().ok().and_then(|mut slot| slot.take()) {
+        share.stop();
     }
 }
 
@@ -396,18 +684,27 @@ pub fn run() {
             if !settings_path.exists() {
                 datastore::save(&settings_path, &settings).map_err(std::io::Error::other)?;
             }
+            #[cfg(target_os = "android")]
+            let sealer: Option<Arc<dyn rebsync_core::credentials::files::Sealer>> =
+                Some(Arc::new(android_keystore::KeystoreSealer));
+            #[cfg(not(target_os = "android"))]
+            let sealer = None;
+            let dash = dash_link::DashLink::open(&internal, sealer).map(Arc::new);
             let state = App {
                 internal,
                 settings_path,
                 settings: Arc::new(Mutex::new(settings.clone())),
                 storage: Arc::new(RwLock::new(storage)),
                 peer: Mutex::new(None),
+                quic: Mutex::new(None),
+                quic_error: Mutex::new(None),
                 clients: Arc::new(Clients::default()),
                 writes_paused: Arc::new(AtomicBool::new(false)),
                 moving: Arc::new(Mutex::new(MoveStatus {
                     phase: "idle".into(),
                     ..Default::default()
                 })),
+                dash,
             };
             if settings.sharing {
                 let _ = start_peer(&state, &settings);
@@ -421,7 +718,17 @@ pub fn run() {
             set_sharing,
             reveal_token,
             rotate_token,
-            move_data
+            move_data,
+            pair_invite,
+            paired_devices,
+            unpair,
+            dash_status,
+            dash_pair_begin,
+            dash_pair_poll,
+            dash_pair_cancel,
+            dash_check,
+            dash_send,
+            dash_forget
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

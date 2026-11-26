@@ -209,3 +209,143 @@ fn corrupt_existing_chunk_and_competing_create_are_rejected_without_overwrite() 
     assert_eq!(race.get(&key)?, vec![0; original.len()]);
     Ok(())
 }
+
+/// A carrier that counts the objects read from it.
+struct Counting<'a>(Carrier<'a>, std::cell::Cell<usize>);
+impl PeerApi for Counting<'_> {
+    fn base(&self) -> &str {
+        self.0.base()
+    }
+    fn status(&self) -> Result<Value> {
+        self.0.status()
+    }
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.1.set(self.1.get() + 1);
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        self.0.put(key, bytes)
+    }
+}
+
+#[test]
+fn a_push_with_nothing_to_send_reads_each_peer_object_once() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let producer = FsObjectStorage::open(t.path().join("producer"))?;
+    let carrier = FsObjectStorage::open(t.path().join("carrier"))?;
+    // Two snapshots that share their chunk, so the chunk is reachable both
+    // as an object and through each manifest.
+    let dir = t.path().join("export");
+    let first = publish(&producer, &dir)?;
+    fs::write(dir.join("sample.txt"), b"immutable portable bytes")?;
+    let second = layer::publish_files(
+        &producer,
+        "agenda",
+        "again",
+        4096,
+        &dir,
+        &["sample.txt".into()],
+        json!({"fixture": "again"}),
+        None,
+    )?;
+    assert_ne!(first.id, second.id);
+    let selection = ["agenda/".into()];
+    let mut journal = Journal::open(t.path())?;
+    assert!(peer::push(&producer, &Carrier(&carrier), &selection, &mut journal)?.clean());
+
+    let objects = carrier.list_prefix("agenda/", 0)?.len();
+    let counting = Counting(Carrier(&carrier), std::cell::Cell::new(0));
+    let report = peer::push(&producer, &counting, &selection, &mut journal)?;
+    assert!(report.clean());
+    assert_eq!(report.transferred, 0);
+    assert_eq!(report.already_present, objects);
+    // Every object is still verified against the peer, but none twice.
+    assert_eq!(counting.1.get(), objects);
+    Ok(())
+}
+
+/// A carrier that hashes its own copies, like rbq-peer/1 and Rebeqah do.
+struct Hashing<'a>(Counting<'a>);
+impl PeerApi for Hashing<'_> {
+    fn base(&self) -> &str {
+        self.0.base()
+    }
+    fn status(&self) -> Result<Value> {
+        self.0.status()
+    }
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<bool> {
+        self.0.put(key, bytes)
+    }
+    fn hash(&self, key: &str) -> Result<Option<String>> {
+        let bytes = (self.0).0.get(key)?;
+        Ok(Some(format!("{:x}", Sha256::digest(&bytes))))
+    }
+}
+
+#[test]
+fn a_hashing_peer_is_verified_without_downloads_unless_distrusted() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let producer = FsObjectStorage::open(t.path().join("producer"))?;
+    let carrier = FsObjectStorage::open(t.path().join("carrier"))?;
+    publish(&producer, &t.path().join("export"))?;
+    let selection = ["agenda/".into()];
+    let mut journal = Journal::open(t.path())?;
+    assert!(peer::push(&producer, &Carrier(&carrier), &selection, &mut journal)?.clean());
+    let objects = carrier.list_prefix("agenda/", 0)?.len();
+
+    // Trusted by default: every object verified by the peer's hash, none
+    // downloaded.
+    let hashing = Hashing(Counting(Carrier(&carrier), std::cell::Cell::new(0)));
+    let report = peer::push(&producer, &hashing, &selection, &mut journal)?;
+    assert!(report.clean() && report.already_present == objects);
+    assert_eq!((hashing.0).1.get(), 0, "no downloads");
+    let report = peer::pull(&producer, &hashing, &selection, &mut journal)?;
+    assert!(report.clean() && report.already_present == objects);
+    assert_eq!((hashing.0).1.get(), 0, "no downloads on pull either");
+
+    // Opt-in distrust: the peer's hashes are ignored and copies downloaded.
+    let report = peer::push(
+        &producer,
+        &peer::Distrusting(&hashing),
+        &selection,
+        &mut journal,
+    )?;
+    assert!(report.clean());
+    assert_eq!((hashing.0).1.get(), objects);
+    Ok(())
+}
+
+#[test]
+fn a_damaged_replica_is_caught_by_its_hash() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let producer = FsObjectStorage::open(t.path().join("producer"))?;
+    let carrier = FsObjectStorage::open(t.path().join("carrier"))?;
+    let snapshot = publish(&producer, &t.path().join("export"))?;
+    let manifest = layer::load(&producer, "agenda", &snapshot.id)?;
+    let key = layer::chunk_key("agenda/v1", &manifest.files[0].chunks[0].sha256)?;
+    let mut corrupt = producer.get(&key)?;
+    corrupt[0] ^= 1;
+    carrier.put(&key, &corrupt)?;
+    let hashing = Hashing(Counting(Carrier(&carrier), std::cell::Cell::new(0)));
+    let selection = ["agenda/".into()];
+    let mut journal = Journal::open(t.path())?;
+    let report = peer::push(&producer, &hashing, &selection, &mut journal)?;
+    assert!(
+        !report.clean() && !report.conflicts.is_empty(),
+        "{report:?}"
+    );
+    assert!(carrier.list_prefix("agenda/v1/snapshots/", 0)?.is_empty());
+    let report = peer::pull(&producer, &hashing, &selection, &mut journal)?;
+    assert!(!report.rejected.is_empty(), "{report:?}");
+    assert_eq!(carrier.get(&key)?, corrupt, "nothing overwritten");
+    Ok(())
+}

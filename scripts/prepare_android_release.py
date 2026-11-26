@@ -18,17 +18,14 @@ def run(args, cwd=None):
     return subprocess.check_output(args, cwd=cwd, text=True, stderr=subprocess.PIPE)
 
 
-def apk_metadata(badging, certificates, expected, version):
+def apk_shape(badging, expected, version):
     package = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)' versionName='([^']+)'", badging, re.M)
-    signers = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]+)$", certificates, re.M)
     if not package or package[1] != expected['packageName'] or package[3] != version:
         raise ValueError('APK package/version does not match the release')
     if not 0 < int(package[2]) <= 2100000000:
         raise ValueError('APK versionCode is outside the Android/Play update range')
     if 'application-debuggable' in badging:
         raise ValueError('Debuggable APK is not a release')
-    if len(signers) != 1 or signers[0].lower() != expected['certificateSha256']:
-        raise ValueError('APK signing certificate differs from the pinned release identity')
     minimum = re.search(r"^sdkVersion:'([0-9]+)'", badging, re.M)
     target = re.search(r"^targetSdkVersion:'([0-9]+)'", badging, re.M)
     native = re.search(r"^native-code: (.+)$", badging, re.M)
@@ -38,8 +35,28 @@ def apk_metadata(badging, certificates, expected, version):
     return {'schema': 'ragbaz.android-release/1', 'packageName': package[1],
             'versionCode': int(package[2]), 'versionName': package[3],
             'minSdk': int(minimum[1]), 'targetSdk': int(target[1]), 'abis': sorted(abis),
-            'certificateSha256': signers[0].lower(),
             'openpgpFingerprint': expected['openpgpFingerprint']}
+
+
+def apk_metadata(badging, certificates, expected, version):
+    metadata = apk_shape(badging, expected, version)
+    counts = re.findall(r"^Number of signers: ([0-9]+)[ \t]*$", certificates, re.M)
+    if counts != ['1']:
+        raise ValueError('APK must report exactly one signer')
+    # SDK <=36 used "Signer #1"; SDK37 reports scheme-labelled signers such
+    # as "V2 Signer" and "V3.0 Signer". These are signature schemes, not a
+    # count of independent signing identities. Never relax the pinned identity.
+    labels = r"(?:Signer #[0-9]+|V[1-4](?:\.[0-9]+)? Signer(?: #[0-9]+)?)"
+    report = re.compile(r"^" + labels + r":? certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*$")
+    lines = [line for line in certificates.splitlines() if 'certificate SHA-256 digest:' in line]
+    matches = [report.fullmatch(line) for line in lines]
+    if not matches or any(match is None for match in matches):
+        raise ValueError('Unsupported apksigner certificate report; expected legacy or scheme-labelled signer digests')
+    signers = {match[1].lower() for match in matches}
+    if signers != {expected['certificateSha256']}:
+        observed = ', '.join(sorted(signers))
+        raise ValueError(f"APK signing certificate differs from the pinned release identity: expected {expected['certificateSha256']}; observed {observed}")
+    return dict(metadata, certificateSha256=next(iter(signers)))
 
 
 def write_new(path, data):

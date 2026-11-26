@@ -74,3 +74,37 @@ fn serves_page_and_status_without_secrets() {
         & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+#[test]
+fn a_rebound_hostname_is_refused_and_an_ip_literal_is_served() {
+    use std::io::{Read, Write};
+    let t = tempfile::tempdir().unwrap();
+    let mut config = Config::defaults(t.path().to_path_buf());
+    config.storage.root = t.path().join("objects");
+    let storage = FsObjectStorage::open(&config.storage.root).unwrap();
+    let options = serve::ServeOptions {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        tls: false,
+        announce: false,
+    };
+    let running = serve::start(&config, &options).unwrap();
+    let ask = |host: &str| {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", running.port)).unwrap();
+        write!(
+            stream,
+            "GET /v1/status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        running.serve_one(&config, &storage).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply
+    };
+    // A page on evil.example whose DNS now points at 127.0.0.1.
+    let refused = ask("evil.example:8790");
+    assert!(refused.starts_with("HTTP/1.1 421"), "{refused}");
+    assert!(!refused.contains("storage_root"));
+    let served = ask(&format!("127.0.0.1:{}", running.port));
+    assert!(served.starts_with("HTTP/1.1 200"), "{served}");
+}

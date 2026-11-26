@@ -10,12 +10,26 @@ use std::{
     },
 };
 
+/// The phone's key, pinned by every request below (HTTPS only).
+static PIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn tls(port: u16, pin: &str) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    let config = rebsync_core::transport::quic::pinned_tls_client(pin).unwrap();
+    let connection = rustls::ClientConnection::new(
+        Arc::new(config),
+        "rebeqah".try_into().unwrap(),
+    )
+    .unwrap();
+    rustls::StreamOwned::new(connection, TcpStream::connect(("127.0.0.1", port)).unwrap())
+}
+
 fn request(port: u16, raw: &str, body: &[u8]) -> (u16, Vec<u8>) {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut s = tls(port, PIN.get().unwrap());
     s.write_all(raw.as_bytes()).unwrap();
     s.write_all(body).unwrap();
     let mut out = Vec::new();
-    s.read_to_end(&mut out).unwrap();
+    // The server may close without a TLS close_notify; what arrived counts.
+    let _ = s.read_to_end(&mut out);
     let text = String::from_utf8_lossy(&out);
     let status = text[9..12].parse().unwrap();
     let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
@@ -55,8 +69,37 @@ fn peer_api_auth_create_if_absent_and_client_tracking() {
     let clients = Arc::new(Clients::default());
     let paused = Arc::new(AtomicBool::new(false));
     let token = "t0ken".to_string();
-    let peer = Peer::start(0, token.clone(), storage, clients.clone(), paused.clone()).unwrap();
+    let identity = rebsync_core::transport::quic::Identity::generate().unwrap();
+    PIN.set(identity.peer_id().to_owned()).unwrap();
+    let peer = Peer::start(
+        0,
+        token.clone(),
+        storage,
+        clients.clone(),
+        paused.clone(),
+        &identity,
+    )
+    .unwrap();
     let port = peer.port;
+
+    // HTTPS only: plaintext is not spoken, and another key is refused.
+    let mut plain = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    plain
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    plain
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut answer = Vec::new();
+    let _ = plain.read_to_end(&mut answer);
+    assert!(!answer.starts_with(b"HTTP/1.1 200"), "plaintext must not be served");
+    let mut impostor = tls(port, &"ab".repeat(32));
+    assert!(
+        impostor
+            .write_all(b"GET /v1/health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .is_err(),
+        "a pin for another key fails the handshake"
+    );
 
     assert_eq!(get(port, "/v1/health", None).0, 200);
     assert_eq!(get(port, "/v1/status", None).0, 401);
@@ -65,6 +108,9 @@ fn peer_api_auth_create_if_absent_and_client_tracking() {
     assert_eq!(code, 200, "{}", String::from_utf8_lossy(&body));
     assert!(String::from_utf8_lossy(&body).contains("rbq-peer/0"));
     assert_eq!(get(port, &format!("/v1/status?token={token}"), None).0, 200);
+    let (code, body) = get(port, "/v1/status", Some(&token));
+    assert_eq!(code, 200);
+    assert!(String::from_utf8_lossy(&body).contains("\"hashes\":true"));
 
     let digest = format!("{:x}", Sha256::digest(b"hello"));
     let key = format!("mneme/v1/chunks/sha256/{}/{digest}", &digest[..2]);
@@ -79,6 +125,10 @@ fn peer_api_auth_create_if_absent_and_client_tracking() {
         (200, b"hello".to_vec())
     );
     assert_eq!(put(port, &path, &token, b"other").0, 400);
+    // The phone hashes its copy so a client need not download it.
+    let (code, body) = get(port, &format!("/v1/hash/{key}"), Some(&token));
+    assert_eq!(code, 200);
+    assert!(String::from_utf8_lossy(&body).contains(&digest));
     assert_eq!(put(port, "/v1/objects/_probes/x", &token, b"x").0, 400);
     assert_eq!(get(port, &format!("/v1/objects/mneme/v1/chunks/sha256/00/{}", "0".repeat(64)), Some(&token)).0, 404);
     assert_eq!(get(port, "/v1/objects/..%2Fescape", Some(&token)).0, 400);
@@ -119,4 +169,39 @@ fn peer_api_auth_create_if_absent_and_client_tracking() {
         TcpStream::connect(("127.0.0.1", port)).is_err()
     });
     assert!(closed, "listener still open 2s after stop");
+}
+
+#[test]
+fn curl_pins_the_phone_key_with_the_shown_command() {
+    if std::process::Command::new("curl").arg("--version").output().is_err() {
+        eprintln!("curl not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStorage> =
+        Arc::new(FsObjectStorage::open(dir.path().join("objects")).unwrap());
+    let identity = rebsync_core::transport::quic::Identity::generate().unwrap();
+    let peer = Peer::start(
+        0,
+        "t0ken".into(),
+        Arc::new(RwLock::new(store)),
+        Arc::new(Clients::default()),
+        Arc::new(AtomicBool::new(false)),
+        &identity,
+    )
+    .unwrap();
+    let curl = |pin: &str| {
+        std::process::Command::new("curl")
+            .args(["-sS", "-k", "--max-time", "10", "--pinnedpubkey", pin])
+            .arg(format!("https://127.0.0.1:{}/v1/health", peer.port))
+            .output()
+            .unwrap()
+    };
+    let right = curl(&rebeqah_logic_tests::quic_share::curl_pin(identity.peer_id()));
+    assert!(right.status.success(), "{}", String::from_utf8_lossy(&right.stderr));
+    assert!(String::from_utf8_lossy(&right.stdout).contains("rebeqah"));
+    let other = rebsync_core::transport::quic::Identity::generate().unwrap();
+    let wrong = curl(&rebeqah_logic_tests::quic_share::curl_pin(other.peer_id()));
+    assert!(!wrong.status.success(), "curl must refuse another key");
+    peer.stop();
 }

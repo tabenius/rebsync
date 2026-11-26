@@ -13,6 +13,8 @@ jobs:
       - run: python scripts/validate_component.py --schema schemas/ragbaz.component.schema.json
       - run: python scripts/test_component.py --schema schemas/ragbaz.component.schema.json
       - run: python scripts/test_android_release.py
+      - run: python scripts/test_android_signing.py
+      - run: python scripts/test_sign_android_release.py
   check:
     runs-on: ubuntu-latest
     steps:
@@ -23,11 +25,13 @@ jobs:
       - name: Install restore-test dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y restic
+          sudo apt-get install -y restic dbus-daemon gnome-keyring
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test -p rebsync-core --features storage-object-store --locked
       - run: cargo check -p rebsync-cli --no-default-features --locked
+      - name: Credentials sealed by a real Secret Service (GNOME Keyring)
+        run: scripts/with-secret-service.sh cargo test -p rebsync-core --features secret-service --test secret_service --locked -- --ignored
       - name: Rebeqah app logic (no Tauri/GTK needed)
         run: cargo test --manifest-path apps/rebsync-app/logic-tests/Cargo.toml

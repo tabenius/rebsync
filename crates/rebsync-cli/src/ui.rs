@@ -663,8 +663,113 @@ pub fn print_binary_report(value: &serde_json::Value) {
     print_maybe_paged(&format!("{}\n", lines.join("\n")));
 }
 
+/// `rbq peer networks` in human form.
+#[cfg(feature = "peer")]
+fn networks_report(value: &serde_json::Value) {
+    println!("{}", heading("RBQ / NETWORKS"));
+    for (key, label) in [("tailscale", "Tailscale"), ("netbird", "NetBird")] {
+        let status = &value[key];
+        if status.is_null() {
+            println!("  {label:<10} {}", warning("not detected by its CLI"));
+            continue;
+        }
+        let state = match status["connected"].as_bool() {
+            Some(true) => good("connected"),
+            Some(false) => warning("not connected"),
+            None => warning("state unknown"),
+        };
+        println!(
+            "  {label:<10} {state} · {} · {} of {} peers online",
+            status["name"].as_str().unwrap_or("(no name)"),
+            status["peers_connected"],
+            status["peers"]
+        );
+    }
+    let addresses = value["addresses"].as_array().cloned().unwrap_or_default();
+    if addresses.is_empty() {
+        println!("  No overlay addresses on this host's interfaces.");
+    }
+    for address in &addresses {
+        println!(
+            "  {:<16} {:<28} {}",
+            address["interface"].as_str().unwrap_or_default(),
+            address["address"].as_str().unwrap_or_default(),
+            address["evidence"].as_str().unwrap_or_default()
+        );
+    }
+    for listen in value["suggested_listen"].as_array().into_iter().flatten() {
+        println!(
+            "  serve on it:  rbq peer serve --listen {}",
+            listen.as_str().unwrap_or_default()
+        );
+    }
+    println!("  {}", value["note"].as_str().unwrap_or_default());
+}
+
+/// `rbq peer pair list|remove` in human form.
+#[cfg(feature = "peer")]
+fn pairings_report(value: &serde_json::Value) {
+    println!("{}", heading("RBQ / PAIRED DEVICES"));
+    if let Some(removed) = value["removed"].as_u64() {
+        println!(
+            "  removed {removed} pairing(s) with {}",
+            value["peer"].as_str().unwrap_or_default()
+        );
+        return;
+    }
+    println!(
+        "  this device  {}",
+        value["device"].as_str().unwrap_or_default()
+    );
+    let paired = value["paired"].as_array().cloned().unwrap_or_default();
+    if paired.is_empty() {
+        println!(
+            "  No pairings. Exchange cards: rbq peer id > card.json, then rbq peer pair add CARD --as client|server"
+        );
+    }
+    for entry in &paired {
+        let access = match (
+            entry["scopes"]["read"].as_bool(),
+            entry["scopes"]["write"].as_bool(),
+        ) {
+            (Some(true), Some(true)) => "read/write".to_owned(),
+            (Some(true), _) => "read-only".to_owned(),
+            _ => entry["addresses"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default(),
+        };
+        println!(
+            "  {:<7} {:<16} {}…  {}{}",
+            entry["role"].as_str().unwrap_or_default(),
+            entry["name"].as_str().unwrap_or("(unnamed)"),
+            entry["peer"]
+                .as_str()
+                .unwrap_or_default()
+                .get(..16)
+                .unwrap_or_default(),
+            access,
+            entry["expires_at"]
+                .as_u64()
+                .map(|t| format!("  expires at unix {t}"))
+                .unwrap_or_default()
+        );
+    }
+}
+
 #[cfg(feature = "peer")]
 pub fn peer_report(value: &serde_json::Value, code: i32) {
+    if value["kind"] == "networks" {
+        return networks_report(value);
+    }
+    if value["kind"] == "pairings" {
+        return pairings_report(value);
+    }
     println!(
         "{}  {}",
         heading("RBQ / PEER"),

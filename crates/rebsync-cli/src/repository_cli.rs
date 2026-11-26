@@ -5,11 +5,32 @@ use std::path::PathBuf;
 #[derive(Args)]
 pub struct RepositoryArgs {
     /// Token-free HTTPS endpoint returned by Dash's rbq_get_repository MCP tool.
-    #[arg(long)]
-    endpoint: String,
+    #[arg(long, requires = "token_file", conflicts_with = "credential")]
+    endpoint: Option<String>,
     /// Owner-only file containing the bearer token used for your Dash MCP URL.
-    #[arg(long)]
-    token_file: PathBuf,
+    #[arg(long, requires = "endpoint")]
+    token_file: Option<PathBuf>,
+    /// A credential from `rbq dash pair`, by key id, or `auto` for the
+    /// newest usable one in the store (what a renewing `rbq dash ensure`
+    /// keeps current). Its stored grant must cover the command (describe,
+    /// list, read or append).
+    #[arg(
+        long,
+        requires = "credential_store",
+        required_unless_present = "endpoint"
+    )]
+    credential: Option<String>,
+    /// The credential store `rbq dash pair` wrote to.
+    #[arg(long, env = "RBQ_CREDENTIAL_STORE")]
+    credential_store: Option<PathBuf>,
+    /// How that store is sealed (as for `rbq dash`).
+    #[arg(
+        long,
+        env = "RBQ_CREDENTIAL_SEAL",
+        value_enum,
+        default_value = "secret-service"
+    )]
+    seal: crate::dash_cli::Seal,
     #[command(subcommand)]
     command: RepositoryAction,
 }
@@ -65,11 +86,49 @@ enum RepositoryAction {
     },
 }
 
+/// Run the command. If Dash refuses a stored credential (revoked, expired
+/// or unknown), it is disabled here so it is not tried again.
 #[cfg(feature = "peer")]
 pub fn run(args: &RepositoryArgs) -> Result<i32> {
+    let result = run_command(args);
+    if let (Err(error), Some(id), Some(dir)) = (&result, &args.credential, &args.credential_store)
+        && rebsync_core::is_unauthorized(error)
+    {
+        use rebsync_core::credentials::CredentialStore;
+        // Disabling needs no key, so it works even while a keyring is locked.
+        let disabled = rebsync_core::dash_pairing::open_store(dir)
+            .ok()
+            .is_some_and(|store| store.disable(id).is_ok());
+        anyhow::bail!(
+            "Dash no longer accepts credential {id} (revoked or expired). {} Pair again with `rbq dash pair`.",
+            if disabled {
+                "It is disabled on this device."
+            } else {
+                "It could not be marked disabled here; run `rbq dash disable` for it."
+            }
+        );
+    }
+    result
+}
+
+#[cfg(feature = "peer")]
+fn run_command(args: &RepositoryArgs) -> Result<i32> {
     use rebsync_core::repository::{Repository, read_input, write_output};
     use rebsync_core::{FsObjectStorage, repository_sync};
-    let repository = Repository::from_token_file(&args.endpoint, &args.token_file)?;
+    let repository = match (
+        &args.endpoint,
+        &args.token_file,
+        &args.credential,
+        &args.credential_store,
+    ) {
+        (Some(endpoint), Some(token_file), None, _) => {
+            Repository::from_token_file(endpoint, token_file)?
+        }
+        (None, None, Some(id), Some(dir)) => stored(dir, args.seal, id, scope_for(&args.command))?,
+        _ => anyhow::bail!(
+            "give --endpoint with --token-file, or --credential with --credential-store"
+        ),
+    };
     let mut exit = 0;
     let value = match &args.command {
         RepositoryAction::Describe => repository.describe()?,
@@ -122,6 +181,82 @@ pub fn run(args: &RepositoryArgs) -> Result<i32> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(exit)
+}
+
+/// The scope a command needs from a paired credential. Dash enforces each
+/// request's own scope too; this refuses early, before the token is read.
+#[cfg(feature = "peer")]
+fn scope_for(action: &RepositoryAction) -> rebsync_core::credentials::Scope {
+    use rebsync_core::credentials::Scope;
+    match action {
+        RepositoryAction::Describe => Scope::Describe,
+        RepositoryAction::Sources | RepositoryAction::List { .. } => Scope::List,
+        RepositoryAction::Read { .. } | RepositoryAction::Pull { .. } => Scope::Read,
+        RepositoryAction::Append { .. } | RepositoryAction::Push { .. } => Scope::Append,
+    }
+}
+
+/// Connect with a stored credential, after its stored grant allows `scope`.
+#[cfg(feature = "peer")]
+fn stored(
+    dir: &std::path::Path,
+    seal: crate::dash_cli::Seal,
+    id: &str,
+    scope: rebsync_core::credentials::Scope,
+) -> Result<rebsync_core::repository::Repository> {
+    use rebsync_core::credentials::CredentialStore;
+    let store = crate::dash_cli::credential_store(dir, seal)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    // `auto`: the newest credential that may do this now.
+    let chosen;
+    let id = if id == "auto" {
+        chosen = store
+            .list()
+            .map_err(|e| anyhow::anyhow!("credential store: {e:?}"))?
+            .into_iter()
+            .filter(|c| {
+                !c.disabled
+                    && c.created_at <= now
+                    && now < c.expires_at
+                    && c.scopes.contains(&scope)
+            })
+            .max_by_key(|c| c.expires_at)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no usable credential for {scope:?} in the store; run `rbq dash ensure`"
+                )
+            })?
+            .id;
+        chosen.as_str()
+    } else {
+        id
+    };
+    let descriptor = store
+        .descriptor(id)
+        .map_err(|e| anyhow::anyhow!("no usable credential {id} ({e:?})"))?;
+    let secret = store
+        .use_secret(id, &descriptor.audience, &scope, now)
+        .map_err(|error| {
+            use rebsync_core::credentials::StoreError;
+            match error {
+                StoreError::Locked => anyhow::anyhow!(
+                    "credential {id} is sealed with a key this run cannot use: unlock your keyring, \
+                     or use the --seal it was stored with"
+                ),
+                StoreError::Invalid => anyhow::anyhow!(
+                    "credential {id} does not open: it was sealed by another key, or altered"
+                ),
+                _ => anyhow::anyhow!(
+                    "credential {id} does not allow {scope:?} now (expired, disabled or not granted)"
+                ),
+            }
+        })?;
+    let token = std::str::from_utf8(secret.expose())
+        .map_err(|_| anyhow::anyhow!("credential {id} is unreadable"))?;
+    rebsync_core::repository::Repository::connect(&descriptor.audience.endpoint, token)
 }
 
 #[cfg(feature = "peer")]

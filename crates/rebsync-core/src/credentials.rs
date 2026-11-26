@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod files;
+#[cfg(all(feature = "secret-service", target_os = "linux"))]
+pub mod secret_service;
+
 /// Trusted native adapters may expose bytes only for an authorized operation.
 /// Intentionally neither Clone nor Serialize; Debug never reveals contents.
 /// This type does not promise locked memory or zeroization.
@@ -38,6 +42,8 @@ pub enum Scope {
     List,
     Read,
     Append,
+    /// Existing Rebekah instance connector only; no object-storage authority.
+    Connector,
 }
 
 /// An exact, opaque binding established by enrollment, never a URL prefix match.

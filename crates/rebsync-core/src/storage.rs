@@ -205,6 +205,19 @@ pub trait ObjectStorage: Send + Sync {
     /// Deletion is available to storage policy and administration. Callers must
     /// not use it to propagate repository deletions between peers.
     fn delete(&self, key: &ObjectKey) -> Result<(), StorageError>;
+
+    /// Create-if-absent from a local file (e.g. a staged upload) without
+    /// loading it whole where the backend can avoid it. The default reads the
+    /// file into memory; filesystem storage links it into place.
+    fn put_if_absent_file(
+        &self,
+        key: &ObjectKey,
+        file: &std::path::Path,
+    ) -> Result<PutOutcome, StorageError> {
+        let bytes = std::fs::read(file)
+            .map_err(|error| StorageError::Backend(format!("read staged upload: {error}")))?;
+        self.put_if_absent(key, &bytes)
+    }
 }
 
 #[cfg(feature = "storage-object-store")]
@@ -384,6 +397,72 @@ mod object_store_fs {
             let path = Self::path(key)?;
             let result = self.block_on(self.store.put(&path, data.to_vec().into()))?;
             Ok(ObjectMeta::for_input(key, data.len(), result.e_tag))
+        }
+
+        /// What object_store does for `PutMode::Create`, from a file: copy
+        /// into a `#`-named temporary next to the object (object_store skips
+        /// such names when listing), fsync, then hard-link into place, which
+        /// fails if the object exists. Without hard links: check, then rename
+        /// (single writer, as for `put_if_absent`). Memory stays flat however
+        /// large the object.
+        fn put_if_absent_file(
+            &self,
+            key: &ObjectKey,
+            file: &Path,
+        ) -> Result<PutOutcome, StorageError> {
+            let io = |what: &str, error: std::io::Error| {
+                StorageError::Backend(format!("{what} {}: {error}", key.as_str()))
+            };
+            self.guard(key.as_str())?;
+            Self::path(key)?;
+            let target = self.root.join(key.as_str());
+            let parent = target
+                .parent()
+                .ok_or_else(|| StorageError::InvalidKey(key.as_str().into()))?;
+            std::fs::create_dir_all(parent).map_err(|e| io("create directory for", e))?;
+            self.guard(key.as_str())?;
+            let name = target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| StorageError::InvalidKey(key.as_str().into()))?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let temporary =
+                parent.join(format!("{name}#rbq-upload-{}-{nonce}", std::process::id()));
+            let result = (|| {
+                let size = std::fs::copy(file, &temporary).map_err(|e| io("stage", e))?;
+                std::fs::File::open(&temporary)
+                    .and_then(|staged| staged.sync_all())
+                    .map_err(|e| io("sync", e))?;
+                let created = ObjectMeta::for_input(key, size as usize, None);
+                let outcome = if self.hard_links {
+                    match std::fs::hard_link(&temporary, &target) {
+                        Ok(()) => PutOutcome::Created(created),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            PutOutcome::AlreadyExists(self.head(key)?)
+                        }
+                        Err(error) => return Err(io("publish", error)),
+                    }
+                } else {
+                    match self.head(key) {
+                        Ok(meta) => PutOutcome::AlreadyExists(meta),
+                        Err(StorageError::NotFound(_)) => {
+                            std::fs::rename(&temporary, &target).map_err(|e| io("publish", e))?;
+                            PutOutcome::Created(created)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                #[cfg(unix)]
+                if let Ok(directory) = std::fs::File::open(parent) {
+                    let _ = directory.sync_all();
+                }
+                Ok(outcome)
+            })();
+            let _ = std::fs::remove_file(&temporary);
+            result
         }
 
         fn put_if_absent(&self, key: &ObjectKey, data: &[u8]) -> Result<PutOutcome, StorageError> {

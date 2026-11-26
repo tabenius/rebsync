@@ -10,6 +10,7 @@
 # unless --upload is given.
 #
 #   scripts/publish-repos.sh init-fdroid-key        # once: create the repo key
+#   scripts/publish-repos.sh init-apt-key           # once: create an APT archive key
 #   scripts/publish-repos.sh build                   # collect, sign, verify -> dist/repos
 #   scripts/publish-repos.sh build --upload          # ... then upload to R2
 #
@@ -18,7 +19,9 @@
 # Extra local files: RBQ_EXTRA_APKS / RBQ_EXTRA_DEBS (directories).
 #
 # Environment (defaults in brackets):
-#   APT_SIGNING_KEY      [release OpenPGP fingerprint from release/android-signing.json]
+#   APT_SIGNING_KEY      [aptOpenpgpFingerprint from release/android-signing.json]
+#   APT_KEY_UID          [RAGBAZ APT archive signing <ragbaz@proton.me>]  for init-apt-key
+#   APT_KEY_VOUCHED_BY   [unset]  fingerprint of a key that certifies the new APT key
 #   FDROID_KEYSTORE      [~/.config/rebeqah-signing/fdroid-repo.jks]
 #   FDROID_KEY_ALIAS     [ragbaz-fdroid]
 #   FDROID_KEYSTORE_PASS, FDROID_KEY_PASS   [prompted, not echoed]
@@ -39,7 +42,7 @@ die() { printf '  ✗ %s\n' "$1" >&2; [ -n "${2:-}" ] && printf '      fix: %s\n
 : "${FDROID_KEY_ALIAS:=ragbaz-fdroid}"
 : "${ANDROID_HOME:=$HOME/Android/Sdk}"
 : "${R2_BUCKET:=ragbaz-releases}"
-: "${APT_SIGNING_KEY:=$(python3 -c "import json;print(json.load(open('$root/release/android-signing.json'))['openpgpFingerprint'])")}"
+: "${APT_SIGNING_KEY:=$(python3 -c "import json;print(json.load(open('$root/release/android-signing.json'))['aptOpenpgpFingerprint'])")}"
 export FDROID_KEYSTORE FDROID_KEY_ALIAS ANDROID_HOME APT_SIGNING_KEY
 
 ask() { # ask VAR prompt: read a secret without echo unless already set
@@ -60,6 +63,21 @@ init_fdroid_key() {
   keytool -list -v -keystore "$FDROID_KEYSTORE" -alias "$FDROID_KEY_ALIAS" -storepass:env FDROID_KEYSTORE_PASS 2>/dev/null | sed -n 's/^\s*SHA256: /  fingerprint: /p'
 }
 
+init_apt_key() {
+  # ed25519, sign-only, 3-year expiry (extend with: gpg --quick-set-expire FPR 3y), passphrase via pinentry.
+  local uid=${APT_KEY_UID:-RAGBAZ APT archive signing <ragbaz@proton.me>} fpr
+  gpg --list-keys "=$uid" >/dev/null 2>&1 && die "a key for \"$uid\" already exists" "keep it: its fingerprint is what users pinned"
+  gpg --quick-gen-key "$uid" ed25519 sign 3y || die "gpg did not create the key"
+  fpr=$(gpg --with-colons --list-keys "=$uid" | awk -F: '/^fpr:/{print $10; exit}')
+  [ -n "$fpr" ] || die "cannot find the new key for \"$uid\""
+  ok "created APT archive key $fpr (back it up offline: gpg --export-secret-keys --armor $fpr)"
+  if [ -n "${APT_KEY_VOUCHED_BY:-}" ]; then
+    gpg --batch --yes --default-key "$APT_KEY_VOUCHED_BY" --quick-sign-key "$fpr" || die "certification by $APT_KEY_VOUCHED_BY failed"
+    ok "certified by $APT_KEY_VOUCHED_BY (exportable)"
+  fi
+  printf '\n  use it with: APT_SIGNING_KEY=%s scripts/publish-repos.sh build\n' "$fpr"
+}
+
 collect() { # collect DEST: download and verify release assets
   local dest=$1 tags t
   mkdir -p "$dest/apk" "$dest/deb" "$dest/dl"
@@ -67,7 +85,9 @@ collect() { # collect DEST: download and verify release assets
   for t in $tags; do
     mkdir -p "$dest/dl/$t"
     gh release download "$t" -R "$repo" -D "$dest/dl/$t" -p '*.apk' -p 'rbq_*.deb' -p SHA256SUMS --clobber 2>/dev/null || true
-    ls "$dest/dl/$t"/*.apk "$dest/dl/$t"/*.deb >/dev/null 2>&1 || continue
+    # A release may carry APKs, .debs or both; skip only one that has neither.
+    shopt -s nullglob; local pkgs=("$dest/dl/$t"/*.apk "$dest/dl/$t"/rbq_*.deb); shopt -u nullglob
+    [ ${#pkgs[@]} -gt 0 ] || continue
     [ -f "$dest/dl/$t/SHA256SUMS" ] || die "release $t has packages but no SHA256SUMS" "attach SHA256SUMS to the release"
     (cd "$dest/dl/$t" && sha256sum --check --ignore-missing --quiet SHA256SUMS) || die "checksum mismatch in release $t" "re-download or re-upload the release assets"
     cp "$dest/dl/$t"/*.apk "$dest/apk/" 2>/dev/null || true
@@ -97,16 +117,29 @@ upload() {
     case "$1" in
       *.apk) type=application/vnd.android.package-archive ;; *.deb) type=application/vnd.debian.binary-package ;;
       *.json) type=application/json ;; *.jar) type=application/java-archive ;; *.png) type=image/png ;;
-      *.gz) type=application/gzip ;; *.html) type="text/html; charset=utf-8" ;; *.gpg) type=application/pgp-keys ;;
+      *.gz) type=application/gzip ;; *.html) type="text/html; charset=utf-8" ;; *.xml) type=application/xml ;;
+      */Release.gpg) type=application/pgp-signature ;; *.gpg) type=application/pgp-keys ;;
       *) type="text/plain; charset=utf-8" ;;
     esac
     npx --yes wrangler@4 r2 object put "$R2_BUCKET/$2" --file "$1" --content-type "$type" --remote >/dev/null \
       || die "upload of $2 failed" "re-run with --upload; packages are re-sent, indexes go last"
   }
-  # Packages first, indexes last: a client never sees an index naming a file that is not there yet.
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt/pool" "$out/fdroid/repo" -type f \( -name '*.deb' -o -name '*.apk' -o -path '*/icons*' \))
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt" "$out/fdroid/repo" -type f ! -name '*.deb' ! -name '*.apk' ! -path '*/icons*' ! -path '*/dists/*' ! -name 'entry.*' ! -name 'index-v*')
-  while IFS= read -r f; do rel=${f#"$out/"}; put "$f" "repos/$rel"; done < <(find "$out/apt/dists" "$out/fdroid/repo" -type f \( -path '*/dists/*' -o -name 'index-v*' -o -name 'entry.*' \))
+  # Three phases, so a client never sees an index naming a file (or hash) that is not there yet:
+  # 1 packages and other assets, 2 indexes, 3 the signed entry points that pin the indexes' hashes.
+  phase() {
+    case "$1" in
+      */dists/*/InRelease|*/dists/*/Release|*/dists/*/Release.gpg|*/entry.jar|*/entry.json|*/index-v1.jar|*/index.jar) echo 3 ;;
+      */dists/*|*/index-v*|*/index.xml|*/diff/*) echo 2 ;;
+      *) echo 1 ;;
+    esac
+  }
+  local p
+  for p in 1 2 3; do
+    while IFS= read -r f; do
+      [ "$(phase "$f")" = "$p" ] || continue
+      rel=${f#"$out/"}; put "$f" "repos/$rel"
+    done < <(find "$out/apt" "$out/fdroid/repo" -type f | sort)
+  done
   ok "uploaded to r2://$R2_BUCKET/repos/ (served at https://ragbaz.cc/apt and /fdroid/repo)"
 }
 
@@ -138,8 +171,9 @@ build() {
 
 case "${1:-}" in
   init-fdroid-key) init_fdroid_key ;;
+  init-apt-key) init_apt_key ;;
   build) build "${2:-}" ;;
   verify) verify ;;
   upload) upload ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

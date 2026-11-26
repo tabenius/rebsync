@@ -9,9 +9,26 @@ repository.workspace = true
 default = []
 storage-object-store = ["dep:object_store", "dep:futures", "dep:tokio"]
 peer-http = ["dep:ureq", "dep:url"]
-peer-transport = ["storage-object-store"]
+peer-transport = ["storage-object-store", "dep:if-addrs"]
+# rbq-peer/1 over QUIC: TLS 1.3 to a pinned server key, then the same token.
+peer-quic = [
+    "peer-transport",
+    "dep:quinn",
+    "dep:rustls",
+    "dep:rcgen",
+    "dep:webpki",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/time",
+    "tokio/io-util",
+    "tokio/macros",
+    "tokio/sync",
+]
 serve = ["dep:tiny_http", "dep:rcgen", "dep:mdns-sd"]
 term = ["dep:tungstenite"]
+# Seal stored credentials with a key held in the desktop's Secret Service
+# (Linux only; pure Rust over D-Bus, no libdbus).
+secret-service = ["dep:keyring", "dep:chacha20poly1305"]
 
 [dependencies]
 anyhow.workspace = true
@@ -28,6 +45,8 @@ sha2 = "0.10"
 # Gift signatures (ed25519-jcs-v1): strict verification only, no key storage.
 ed25519-dalek = "2"
 base64 = "0.22"
+# Credential-file temporaries and Dash pairing nonces.
+getrandom = "0.2"
 object_store = { version = "0.14.2", default-features = false, features = ["fs"], optional = true }
 futures = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
@@ -37,9 +56,17 @@ tiny_http = { version = "0.12", features = ["ssl-rustls"], optional = true }
 rcgen = { version = "0.14", optional = true }
 mdns-sd = { version = "0.21", optional = true }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
+if-addrs = { version = "0.15", optional = true }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["alloc"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"], optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

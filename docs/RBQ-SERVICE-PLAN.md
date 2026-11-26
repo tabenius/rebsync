@@ -227,6 +227,13 @@ moving secrets into browser WASM; it does not provide a native-keystore boundary
 3. **Dash pairing + Tauri backend**: fresh passkey approval, one-time claim,
    independent revocation, native store integration. Test claim races, approval
    replay, wrong account/audience, expiry, lost delivery and compromised MCP.
+   *Started:* `credentials::files::FileStore` (the explicit headless backend),
+   `dash_pairing` (begin/status/claim/cancel, local matching code, revoke on a
+   lost claim) and `rbq dash`, `rbq repository --credential`. Dash accepts the
+   `rbs_` credential within its scopes. Tested end to end with the real CLI in
+   Dash's `test/rbq-pairing-cli.test.mjs`. Linux credentials are sealed by a
+   Secret Service key (`credentials::secret_service`), tested against a real
+   GNOME Keyring in CI.
 4. **Public registry sync**: verified device/account binding, source preservation,
    tombstones and conflict tests. No private material replicated.
 5. **Unified service adapters**: migrate CLI/Tauri object handlers, then local

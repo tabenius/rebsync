@@ -32,6 +32,9 @@
   .spread { justify-content: space-between; }
   button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-3);
     color: var(--paper); padding: 9px 14px; min-height: 40px; cursor: pointer; }
+  input:not([type]), input[type="text"] { font: inherit; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--ink); color: var(--paper); padding: 8px 10px; margin-top: 4px; box-sizing: border-box; }
+  input:not([type]):focus, input[type="text"]:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
   button.primary { background: var(--amber); color: var(--ink); border-color: var(--amber); font-weight: 650; }
   button:disabled { opacity: .45; }
   code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 12.5px; }
@@ -113,10 +116,37 @@
     <div id="share-on" hidden>
       <div class="row spread small"><span>Token <code id="token">••••••</code></span>
         <span class="row"><button id="reveal">Show</button><button id="copy-token">Copy</button><button id="rotate">New token</button></span></div>
+      <div id="quic-id" class="small muted" hidden></div>
       <div id="connections"></div>
-      <div class="note small">Plain HTTP on the local network: anyone on the same network can see the token.
-        Share over Wi-Fi you control, a hotspot or USB tethering. Mobile-data addresses are usually unreachable.</div>
+      <div class="note small" id="share-note"></div>
+      <div id="pairing" hidden>
+        <h3 class="small" style="margin:14px 0 4px">Paired devices</h3>
+        <p class="muted small" style="margin:0 0 6px">A paired device connects with its own key: no token is
+          shared or sent. Pair one by scanning a one-time code with <code>rbq peer pair join</code>.</p>
+        <div class="row small">
+          <button id="pair-invite">Pair a device</button>
+          <label class="check"><input type="checkbox" id="pair-read-only" /> read-only</label>
+        </div>
+        <div id="invitation"></div>
+        <ul class="clean" id="paired"></ul>
+      </div>
     </div>
+  </section>
+
+  <section id="dash">
+    <h2>Dash</h2>
+    <p class="muted small" style="margin:0 0 8px">Give this phone its own credential to your private RBQ
+      repository at Dash. You approve it in Dash with your passkey; no token is typed or copied.</p>
+    <div class="small" style="display:grid;gap:6px">
+      <label>Dash <input id="dash-url" value="https://dash.ragbaz.cc" autocomplete="off" spellcheck="false" style="width:100%" /></label>
+      <label>This phone's name in Dash <input id="dash-label" value="Rebeqah phone" maxlength="64" style="width:100%" /></label>
+      <div class="row"><button id="dash-pair" class="primary">Pair with Dash</button>
+        <label class="check"><input type="checkbox" id="dash-read-only" /> read-only</label></div>
+    </div>
+    <div id="dash-pairing"></div>
+    <ul class="clean" id="dash-credentials"></ul>
+    <p class="muted small" id="dash-note">Credentials stay in this app's private storage. They are not encrypted
+      at rest by the app; revoke one in Dash if this phone is lost.</p>
   </section>
 
   <section>
@@ -157,7 +187,8 @@
 </main>
 <div id="toast"></div>
 
-<script>
+<script type="module">
+import { copyText } from './ragbaz-dom.js';
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -176,8 +207,8 @@ let toastTimer;
 const toast = (text) => { const t = $("#toast"); t.textContent = text; t.classList.add("show");
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2600); };
 const copy = async (text, what) => {
-  try { await navigator.clipboard.writeText(text); toast(`${what} copied`); }
-  catch { toast("Copy failed; long-press to select instead"); }
+  const result = await copyText(text);
+  toast(result.ok ? `${what} copied` : "Copy failed; long-press to select instead");
 };
 
 let revealed = null;
@@ -190,17 +221,33 @@ function renderOverview(o) {
   $("#share-on").hidden = !o.sharing;
   $("#share-off").hidden = o.sharing;
   $("#token").textContent = revealed ?? `${o.token_hint}`;
+  // The QR code and the first button carry the encrypted QUIC string when it
+  // exists; HTTPS (pinned to the same key) is offered beside it.
+  const quic = o.quic_peer_id != null;
+  $("#quic-id").hidden = !quic;
+  $("#quic-id").innerHTML = quic
+    ? `Encrypted sharing on UDP port ${esc(o.quic_port)}. Phone key <code class="mono">${esc(o.quic_peer_id.slice(0, 16))}…</code>
+       — check it matches <code>peer=</code> on the other device.`
+    : "";
+  $("#share-note").textContent = quic
+    ? "Both strings are encrypted and pin this phone's key (peer=), so the token never crosses the network in clear "
+      + "and no other device can pose as this phone. QUIC resumes better on flaky links; HTTPS works through more firewalls. "
+      + "Mobile-data addresses are usually unreachable."
+    : "HTTPS pinned to this phone's key (peer=): the token never crosses the network in clear. "
+      + "Mobile-data addresses are usually unreachable.";
   const conns = o.connections.map((c) => `
     <div class="conn">
       <div>
-        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+        <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span>
+          <span class="tag ok">encrypted</span></div>
         <div style="margin:6px 0"><code>${esc(c.url)}</code></div>
         <div class="row small">
-          <button data-copy="${esc(c.pairing)}" data-what="Connection string">Copy connection string</button>
-          <button data-copy="curl -H 'Authorization: Bearer TOKEN' ${esc(c.url)}/v1/status" data-what="curl example">curl</button>
+          ${c.quic_pairing ? `<button data-copy="${esc(c.quic_pairing)}" data-what="Encrypted connection string">Copy encrypted connection string</button>` : ""}
+          <button data-copy="${esc(c.pairing)}" data-what="HTTPS connection string">${c.quic_pairing ? "Copy HTTPS string" : "Copy connection string"}</button>
+          <button data-copy="${esc(c.curl)}" data-what="curl example">curl</button>
         </div>
       </div>
-      <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+      <div class="qr" title="${c.quic_pairing ? "Scan to pair (encrypted)" : "Scan to pair"}">${c.qr_svg}</div>
     </div>`).join("");
   $("#connections").innerHTML = o.sharing
     ? (conns || `<div class="note">No network address. Join Wi-Fi, start a hotspot or enable USB tethering.</div>`)
@@ -210,6 +257,9 @@ function renderOverview(o) {
     <li class="client">
       <div class="row spread"><span class="row"><i class="dot ${c.active ? "on" : ""}"></i><b class="mono">${esc(c.address)}</b>
         ${c.authorized ? '<span class="tag ok">paired</span>' : '<span class="tag warn">not paired</span>'}
+        ${(c.transports || []).map((t) => t === "quic"
+          ? '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">QUIC</span>'
+          : '<span class="tag ok" title="Encrypted, pinned to this phone\'s key">HTTPS</span>').join("")}
         ${c.rejected ? `<span class="tag bad">${c.rejected} rejected</span>` : ""}</span>
         <span class="muted small">${ago(c.last_seen_ms)}</span></div>
       <div class="muted small">${c.requests} requests · ↓${bytes(c.bytes_in)} ↑${bytes(c.bytes_out)} · <span class="mono">${esc(c.last_request)}</span></div>
@@ -274,10 +324,111 @@ function renderVolumes(list) {
   }).join("");
 }
 
+function renderPaired(list, quic) {
+  $("#pairing").hidden = !quic;
+  $("#paired").innerHTML = list.length ? list.map((p) => `
+    <li class="client">
+      <div class="row spread"><span class="row"><b>${esc(p.name ?? "(unnamed)")}</b>
+        <span class="tag ${p.role === "client" ? "ok" : ""}">${esc(p.role)}</span>
+        ${p.scopes ? `<span class="tag">${p.scopes.write ? "read/write" : "read-only"}</span>` : ""}</span>
+        <button data-unpair="${esc(p.peer)}" class="small">Remove</button></div>
+      <div class="muted small mono">${esc(p.peer.slice(0, 24))}…</div>
+    </li>`).join("") : '<li class="muted small">No paired devices yet.</li>';
+}
+
+// ── Dash pairing ──
+let dashActive = null, dashTimer = null;
+const dashReports = {}; // credential id → last send report, kept across refreshes
+const dashWhen = (seconds) => new Date(seconds * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+function renderDashPairing(p) {
+  if (!p) { $("#dash-pairing").innerHTML = ""; return; }
+  $("#dash-pairing").innerHTML = `
+    <div class="note small">
+      <div>Matching code <b class="mono" style="font-size:1.4em;letter-spacing:.08em">${esc(p.matching_code)}</b></div>
+      <div style="margin-top:6px">Open this in Dash (signed in), check it shows the same code, and approve with your passkey:</div>
+      <div class="mono" style="word-break:break-all;margin-top:4px">${esc(p.approval_url)}</div>
+      <div class="row" style="margin-top:6px">
+        <button data-copy="${esc(p.approval_url)}" data-what="Approval link">Copy link</button>
+        <button data-dash-cancel="${esc(p.pairing_id)}">Cancel</button>
+        <span class="muted" id="dash-wait">Waiting for approval…</span></div>
+    </div>
+    ${p.qr_svg ? `<div class="qr" title="Scan with a device signed in to Dash">${p.qr_svg}</div>` : ""}`;
+}
+function renderDash(status) {
+  const credentials = status.credentials;
+  $("#dash-credentials").innerHTML = credentials.length ? credentials.map((c) => {
+    const expired = c.expires_at * 1000 <= Date.now();
+    return `<li class="client">
+      <div class="row spread"><span class="row"><b>Paired with ${esc(new URL(c.audience.endpoint).host)}</b>
+        <span class="tag ${c.disabled || expired ? "warn" : "ok"}">${c.disabled ? "forgotten" : expired ? "expired" : "active"}</span>
+        <span class="tag">${c.scopes.includes("append") ? "read/write" : "read-only"}</span></span>
+        ${c.disabled ? "" : `<span class="row">${c.scopes.includes("append") ? `<button data-dash-send="${esc(c.id)}" class="small primary">Send to Dash</button>` : ""}<button data-dash-check="${esc(c.id)}" class="small">Check</button>
+          <button data-dash-forget="${esc(c.id)}" class="small">Forget</button></span>`}</div>
+      <div class="muted small">Expires ${esc(dashWhen(c.expires_at))}</div>
+      <div class="small" data-dash-report="${esc(c.id)}">${esc(dashReports[c.id] ?? "")}</div>
+    </li>`;
+  }).join("") : "";
+  // A pairing left unfinished (app closed): offer to resume it.
+  if (!dashActive && status.pending.length) {
+    const p = status.pending[0];
+    if (p.expires_at * 1000 > Date.now()) startDashPoll(p);
+  }
+}
+function startDashPoll(p) {
+  dashActive = p; renderDashPairing(p);
+  clearInterval(dashTimer);
+  dashTimer = setInterval(async () => {
+    try {
+      const progress = await invoke("dash_pair_poll", { pairingId: p.pairing_id });
+      if (progress.credential) { toast("Paired with Dash"); stopDashPoll(); refresh(); }
+      else if (progress.state !== "pending" && progress.state !== "approved") { toast(`Pairing ${progress.state}`); stopDashPoll(); refresh(); }
+      else if (progress.state === "approved" && $("#dash-wait")) $("#dash-wait").textContent = "Approved; collecting the credential…";
+    } catch (e) { toast(String(e)); stopDashPoll(); refresh(); }
+  }, 3000);
+}
+function stopDashPoll() { clearInterval(dashTimer); dashTimer = null; dashActive = null; renderDashPairing(null); }
+$("#dash-pair").addEventListener("click", async () => {
+  if (dashActive) return toast("A pairing is already waiting for approval");
+  try {
+    const p = await invoke("dash_pair_begin", { dash: $("#dash-url").value.trim(), label: $("#dash-label").value,
+      readOnly: $("#dash-read-only").checked, days: 30 });
+    startDashPoll(p);
+  } catch (e) { toast(String(e)); }
+});
+document.addEventListener("click", async (event) => {
+  const d = event.target?.dataset ?? {};
+  try {
+    if (d.dashCancel) { await invoke("dash_pair_cancel", { pairingId: d.dashCancel }); stopDashPoll(); toast("Pairing cancelled"); refresh(); }
+    else if (d.dashSend) {
+      const id = d.dashSend, button = event.target;
+      const show = (text) => { dashReports[id] = text; const el = document.querySelector(`[data-dash-report="${CSS.escape(id)}"]`); if (el) el.textContent = text; };
+      button.disabled = true; show("Sending… (objects already in Dash are checked, not sent again)");
+      try {
+        const r = await invoke("dash_send", { keyId: d.dashSend, name: $("#dash-label").value });
+        const mib = (r.transferred_bytes / 1048576).toFixed(1);
+        show(`${r.complete ? "Sent" : "Partly sent"}: ${r.transferred} new objects (${mib} MiB), ${r.already_present} already there`
+          + (r.rejected.length ? `, ${r.rejected.length} refused (over Dash's 256 KiB object limit or not a snapshot)` : "")
+          + (r.conflicts.length ? `, ${r.conflicts.length} conflicting` : "") + ".");
+        toast(r.complete ? "Sent to Dash" : "Sent, with some objects refused");
+      } catch (e) { show(""); toast(String(e)); refresh(); } finally { button.disabled = false; }
+    }
+    else if (d.dashCheck) {
+      const r = await invoke("dash_check", { keyId: d.dashCheck });
+      toast(r.matches ? "Dash accepts this phone's credential" : "Dash answered for a different repository");
+    } else if (d.dashForget) {
+      if (!confirm("Stop using this credential on this phone? Revoke it in Dash too, so it stops working everywhere.")) return;
+      await invoke("dash_forget", { keyId: d.dashForget }); toast("Forgotten on this phone"); refresh();
+    }
+  } catch (e) { toast(String(e)); }
+});
+
 async function refresh() {
   try {
-    const [o, v] = await Promise.all([invoke("overview"), invoke("volumes")]);
-    renderOverview(o); renderVolumes(v);
+    const [o, v, paired, dash] = await Promise.all([invoke("overview"), invoke("volumes"), invoke("paired_devices"),
+      invoke("dash_status").catch((e) => ({ error: String(e), pending: [], credentials: [] }))]);
+    renderOverview(o); renderVolumes(v); renderPaired(paired, o.quic_peer_id != null); renderDash(dash);
+    if (dash.error) $("#dash-note").textContent = `Dash pairing is unavailable: ${dash.error}`;
+    else if (dash.protection) $("#dash-note").textContent = `${dash.protection} Revoke a credential in Dash if this phone is lost.`;
     if (lastOverview) document.querySelectorAll("[data-move]").forEach((b) => {
       const m = lastOverview.moving; b.disabled = ["scanning","copying","verifying","switching","cleaning"].includes(m.phase);
     });
@@ -319,6 +470,32 @@ $("#rotate").addEventListener("click", async () => {
   toast("New token active"); refresh();
 });
 $("#refresh").addEventListener("click", refresh);
+let invitationTimer;
+$("#pair-invite").addEventListener("click", async () => {
+  try {
+    const inv = await invoke("pair_invite", { readOnly: $("#pair-read-only").checked });
+    $("#invitation").innerHTML = `
+      <div class="note small">One-time code, ${esc(inv.access)}, valid ${esc(inv.valid_minutes)} minutes. On the other device:
+        <code>rbq peer pair join '&lt;string&gt;'</code>. It works once, then this phone lists the device below.</div>
+      ${inv.connections.map((c) => `
+        <div class="conn">
+          <div>
+            <div class="row"><span class="tag">${esc(c.kind)}</span><span class="muted small mono">${esc(c.interface)}</span></div>
+            <div class="row small" style="margin-top:6px">
+              <button data-copy="${esc(c.invitation)}" data-what="Pairing string">Copy pairing string</button></div>
+          </div>
+          <div class="qr" title="Scan to pair">${c.qr_svg}</div>
+        </div>`).join("")}`;
+    clearTimeout(invitationTimer);
+    invitationTimer = setTimeout(() => { $("#invitation").innerHTML = ""; refresh(); }, inv.valid_minutes * 60000);
+  } catch (e) { toast(String(e)); }
+});
+document.addEventListener("click", async (event) => {
+  const peer = event.target?.dataset?.unpair;
+  if (!peer) return;
+  if (!confirm("Remove this pairing? The device will need a new code or the token.")) return;
+  try { await invoke("unpair", { peer }); toast("Pairing removed"); refresh(); } catch (e) { toast(String(e)); }
+});
 
 const started = Date.now();
 refresh().finally(() => {

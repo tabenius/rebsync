@@ -3,6 +3,7 @@
   "packageName": "com.tabenius.rebeqah",
   "certificateSha256": "b093a27710d4e17361debec5b1020aac11defce0302d7a5d382631068ce0ef4a",
   "openpgpFingerprint": "266E9D54DD9C99B713C3743CB26A758A8EFD36F5",
+  "aptOpenpgpFingerprint": "C83A95D00876011E3388562B841437006C15292B",
   "publicKey": "release/keys/rebeqah-release-public-key.asc",
-  "note": "Rebeqah release identity for com.tabenius.rebeqah. New package and APK signing key; not update-compatible with Rebekah or debug certificates."
+  "note": "Rebeqah release identity for com.tabenius.rebeqah. New package and APK signing key; not update-compatible with Rebekah or debug certificates. aptOpenpgpFingerprint is the RAGBAZ APT archive signing key (ragbaz.cc/apt keyring), separate from the release OpenPGP identity."
 }

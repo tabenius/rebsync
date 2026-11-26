@@ -17,11 +17,29 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   - The endpoint offers read, list and create-if-absent. It has no overwrite
     and no delete.
   - Every network interface gets a URL, a QR code and a copyable connection
-    string: `rbq+http://ADDRESS:PORT/v1?token=…`. Interfaces are Wi-Fi,
+    string: `rbq+https://ADDRESS:PORT/v1?peer=ID&token=…`, served over HTTPS
+    with the phone's own key, which `peer=` pins (no CA; `curl` users get a
+    `--pinnedpubkey` command). Interfaces are Wi-Fi,
     hotspot, USB tethering, Ethernet and VPN; mobile data is listed last.
   - Requests need `Authorization: Bearer TOKEN`, or `?token=` in the URL. The
     token is 192 bits from the system RNG, compared in constant time and
     rotatable from the app.
+  - **Encrypted sharing (QUIC).** Alongside HTTPS, the same object store is
+    served as `rbq-peer/1` over QUIC on the same port number (UDP). Each
+    interface also gets `rbq+quic://ADDRESS:PORT?peer=ID&token=…`, and the QR
+    code carries it. `peer=` is this phone's key fingerprint, which the client
+    pins: a device presenting another key is refused, and the token never
+    crosses the network in clear. The key lives in the app's private storage
+    (`quic-identity/`), so the fingerprint survives restarts and token
+    rotation. Use `rbq peer status|push|pull` with either string. If QUIC
+    cannot start, the app says why and keeps HTTPS running. **Pair a device** shows a one-time code (QR and
+    string, 10 minutes, optionally read-only); `rbq peer pair join` on the
+    other device redeems it, and from then on that device connects with its
+    key alone, no token. Paired devices are listed with Remove (revocation).
+    Tailscale and NetBird interfaces are labelled as such. QUIC clients are listed under Connected clients with
+    HTTP ones, tagged by how they connected, and the same failure throttle
+    applies: after ten wrong tokens in a minute an address cannot connect
+    over either.
   - After ten failed attempts in a minute, an address is throttled.
 - **Connected clients.** Each peer address shows when it was first and last
   seen, an active marker for the last 60 seconds, and request counts. It also
@@ -53,9 +71,9 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
 - **Uninstall deletes the data.** Android deletes the app's folders when
   Rebeqah is uninstalled, including on SD cards and USB drives. Keep another
   copy of anything that matters.
-- **The connection is not encrypted.** Sharing uses plain HTTP, so anyone on
-  the same network can read the token. Use networks you control, a hotspot or
-  USB tethering.
+- **Check the key on first use.** Both HTTPS and QUIC are encrypted and pinned
+  to the phone's key, but the pin is only as good as the channel you copied it
+  over: scan the QR code or compare the fingerprint the app shows.
 - **Removable media has fewer guarantees.** FAT and exFAT have no hard links
   and no Unix permissions, so the core falls back to check-then-rename. That is
   safe with one writer, and Rebeqah is the only writer. The app shows a warning
@@ -66,6 +84,36 @@ It is a Tauri 2 app. It is not part of the production Cargo workspace.
   "detected", not as targets.
 - **Background work is limited.** There is no background service. Sharing runs
   while the app is open.
+
+## Pairing with Dash
+
+**Pair with Dash** gives this phone its own credential to your private RBQ
+repository at Dash, without typing or copying a token:
+
+1. The phone shows a matching code and an approval link (and its QR code).
+2. Open the link in Dash on any device where you are signed in, check that Dash
+   shows the same code, and approve with your passkey.
+3. The phone collects its credential once and lists it with **Send to Dash**,
+   **Check** (asks Dash to describe the repository) and **Forget** (stops
+   using it here).
+
+**Send to Dash** pushes the phone's snapshots (Mneme, Frog, agenda, Git) to
+your Dash repository as this phone's source: a random source id and the
+phone's name, chosen at the first send and kept. It is additive and
+resumable; objects already in Dash are verified, never replaced, and a second
+send transfers nothing new. Dash holds objects up to 256 KiB: larger ones are
+refused, not split, and the report says how many. It needs a read/write
+credential. If Dash answers that the credential is revoked or expired, the
+phone forgets it and asks you to pair again.
+
+Read-only leaves out `append`. Credentials last 30 days. They are kept in the
+app's private storage (`dash-credentials/`), and each secret is encrypted
+(AES-256-GCM) with a key generated in the **Android Keystore**, which never
+leaves it; the app shows whether this phone keeps that key in secure hardware.
+Revoke a credential under *Paired devices* in Dash if the phone is lost.
+If the approval response is lost on the
+way, the phone cancels the pairing, which revokes the credential; pair again.
+Same flow as `rbq dash pair` (see `docs/DASH-CLI.md`).
 
 ## Build
 
@@ -114,11 +162,13 @@ Existing installations signed with another key cannot be upgraded in place.
 
 ### Verified direct-download inventory
 
-From the repository root, after building the exact committed version tag:
+From the repository root, after building the exact committed version tag and
+following the [signing ceremony](../../docs/ANDROID-SIGNING.md), explicitly sign
+the final APK with `scripts/sign_android_release.py`. Then prepare its inventory:
 
 ```bash
-RELEASE_TAG=v0.2.4 python3 scripts/prepare_android_release.py \
-  --apk apps/rebsync-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+RELEASE_TAG=v0.2.7 python3 scripts/prepare_android_release.py \
+  --apk /path/to/approved-final-release.apk \
   --dist /path/to/new-release-directory \
   --apksigner "$ANDROID_HOME/build-tools/37.0.0/apksigner" \
   --aapt "$ANDROID_HOME/build-tools/37.0.0/aapt" \

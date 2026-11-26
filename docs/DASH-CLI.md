@@ -28,6 +28,92 @@ plain HTTP is allowed only on loopback for tests. Redirects are never followed.
 Server error bodies are suppressed. Transfers and MCP responses have size/time
 bounds. Artifact data is returned with `trusted: false` and is never executed.
 
+## Pairing this device (passkey-approved)
+
+Instead of copying a token into a file, a device can ask Dash for its own
+credential and have a person approve it with a passkey in Dash:
+
+```sh
+export RBQ_CREDENTIAL_STORE="$HOME/.config/rbq/credentials"   # chosen explicitly; no default
+rbq dash pair --label laptop                # prints the matching code and approval URL, then waits
+rbq dash credentials                        # metadata only: key id, endpoint, scopes, expiry
+rbq repository --credential KEY_ID describe
+rbq repository --credential KEY_ID push --store "$HOME/.rbq/objects" --source-id laptop --source-name Laptop
+```
+
+- **Approval.** Open the printed URL in Dash, check that Dash shows the same
+  matching code as the device, and approve with your passkey. An email session
+  alone cannot approve. The device computes the code itself and refuses a Dash
+  whose code or approval URL disagrees.
+- **What is requested.** `--scope describe|list|read|append` (repeatable;
+  default all four) and `--days 1..90` (default 30). Dash cannot widen them.
+  Each `rbq repository` command needs one: `describe`; `list` for `list` and
+  `sources`; `read` for `read` and `pull`; `append` for `append` and `push`.
+  The stored grant is checked before the token is read, and Dash checks again.
+- **Waiting.** `rbq dash pair` waits up to `--timeout` seconds (default 600; the
+  request lasts 10 minutes). `--no-wait` only starts it; finish with
+  `rbq dash wait PAIRING_ID`. `rbq dash pending` lists unfinished pairings.
+- **Lost responses.** A credential is issued once. If the claim's response is
+  lost, or the credential cannot be stored, `rbq` cancels the pairing, which
+  revokes the credential at Dash; pair again. If even that fails, run
+  `rbq dash cancel PAIRING_ID` later.
+- **Storage.** `$RBQ_CREDENTIAL_STORE` is a `0700` directory of `0600` files,
+  one per credential, created atomically and never overwritten; symlinks and
+  files open to others are refused. By default (`--seal secret-service`, or
+  `RBQ_CREDENTIAL_SEAL`) each secret is encrypted with XChaCha20-Poly1305
+  under a random key kept in your desktop's Secret Service (GNOME Keyring,
+  KWallet, KeePassXC), one key per store directory, and bound to its
+  credential id; the files hold ciphertext and readable metadata only. If the
+  Secret Service is unavailable or locked, `rbq` stops and says so; on a
+  headless machine pass `--seal none` to keep owner-only files that are **not
+  encrypted at rest**. Plaintext entries are sealed the first time a sealing
+  run uses them. Pending pairings (with their 10-minute claim nonces) are kept
+  in `pending/`, owner-only and not sealed.
+- **Stopping.** `rbq dash disable KEY_ID` stops this device from using it;
+  revoke it in Dash too, which works everywhere at once. When Dash refuses a
+  stored credential (revoked or expired: HTTP 401), `rbq repository` disables
+  it on this device, says so, and asks you to pair again; it is not retried.
+- Output is JSON on stdout. No command prints a token or nonce.
+
+The credential's endpoint is `/api/rbq/KEY_ID`; it reaches only your account
+repository, never MCP or artifacts.
+
+## Pairing automatically (systemd)
+
+`rbq dash ensure` keeps a device paired without anyone typing a command; a
+person still approves each pairing in Dash with a passkey. Each run:
+
+1. does nothing if the store holds a usable credential for this Dash, with
+   the requested scopes and more than `--renew-days` (default 7) left;
+2. otherwise resumes a pairing for this Dash still awaiting approval (it
+   never piles up requests), or starts one;
+3. waits up to `--timeout` seconds (default 600) for approval. `--notify`
+   also shows the matching code and approval link as a desktop notification.
+
+It exits `0` when paired and `2` while a request still awaits approval (run
+it again later). Renewal pairs again before expiry, so the credential id
+changes: use `rbq repository --credential auto`, which picks the newest usable
+credential allowing the command.
+
+`examples/systemd/` has a user service and timer that run it at login and
+daily. For user `xyzzy` on host `kali`, with `rbq` in `~/.local/bin`:
+
+```sh
+mkdir -p ~/.config/systemd/user ~/.config/rbq
+cp examples/systemd/rbq-dash-pair.service examples/systemd/rbq-dash-pair.timer ~/.config/systemd/user/
+cp examples/systemd/rbq-dash.env ~/.config/rbq/dash.env   # RBQ_DASH_LABEL=xyzzy@kali
+systemctl --user daemon-reload
+systemctl --user enable --now rbq-dash-pair.timer
+systemctl --user start rbq-dash-pair      # pair now instead of in 2 minutes
+journalctl --user -u rbq-dash-pair -f     # the matching code and approval link
+```
+
+Open the link in Dash, check the code matches, approve with your passkey; the
+service collects the credential. `RBQ_CREDENTIAL_SEAL=secret-service` needs an
+unlocked keyring in that session (a desktop login); on a headless machine set
+`none` in `dash.env` (owner-only files, not encrypted at rest) and run
+`loginctl enable-linger xyzzy` so the timer runs without a login.
+
 ## Immutable object operations
 
 ```sh
