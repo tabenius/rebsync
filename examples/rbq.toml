@@ -31,6 +31,12 @@ backup_required = true
 # Relative paths resolve against rbq_home. Override with --storage-root.
 root = ".rbq/objects"
 
+[term]
+# Browser operator terminal over the mesh (rbq term serve). Empty = nobody.
+operators = []          # e.g. ["tailscale:you@github", "netbird:laptop.netbird.cloud"]
+hostnames = []          # extra Host names, e.g. MagicDNS
+# shell = "/bin/bash"
+
 [binaries]
 # Self-built executables worth re-fetching instead of rebuilding.
 enabled = false

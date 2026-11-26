@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rbq terminal</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #101418; color: #d8e3e8; font: 13px ui-sans-serif, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #status { padding: 4px 10px; border-bottom: 1px solid #26313a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status[data-state="ok"]::before { content: "● "; color: #8fbc6a; }
+  #status[data-state="wait"]::before { content: "● "; color: #d9b44a; }
+  #status[data-state="off"]::before { content: "● "; color: #e0705f; }
+  #term { flex: 1; min-height: 0; padding: 4px; }
+</style>
+</head>
+<body>
+<div id="status" role="status" aria-live="polite" data-state="wait">starting…</div>
+<div id="term"></div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script src="client.js"></script>
+</body>
+</html>

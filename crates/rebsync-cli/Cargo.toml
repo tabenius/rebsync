@@ -6,10 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["storage", "peer", "serve", "secret-service"]
+default = ["storage", "peer", "serve", "secret-service", "term"]
 storage = ["rebsync-core/storage-object-store"]
 peer = ["storage", "rebsync-core/peer-http", "rebsync-core/peer-transport", "rebsync-core/peer-quic"]
 serve = ["storage", "rebsync-core/serve"]
+term = ["rebsync-core/term"]
 # Seal Dash credentials with a key in the desktop Secret Service (Linux).
 secret-service = ["rebsync-core/secret-service"]
 

@@ -25,6 +25,7 @@ peer-quic = [
     "tokio/sync",
 ]
 serve = ["dep:tiny_http", "dep:rcgen", "dep:mdns-sd"]
+term = ["dep:tungstenite"]
 # Seal stored credentials with a key held in the desktop's Secret Service
 # (Linux only; pure Rust over D-Bus, no libdbus).
 secret-service = ["dep:keyring", "dep:chacha20poly1305"]
@@ -54,6 +55,7 @@ url = { version = "2", optional = true }
 tiny_http = { version = "0.12", features = ["ssl-rustls"], optional = true }
 rcgen = { version = "0.14", optional = true }
 mdns-sd = { version = "0.21", optional = true }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
 if-addrs = { version = "0.15", optional = true }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
@@ -65,3 +67,6 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"], optional = true }
 chacha20poly1305 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
