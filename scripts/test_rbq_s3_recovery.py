@@ -98,7 +98,7 @@ class RecoveryContract(unittest.TestCase):
             destination.parent.mkdir(parents=True)
             shutil.copytree(source, destination)
             return ""
-        with patch.object(recovery, "private_env"), patch.object(recovery.shutil, "which", return_value="/usr/bin/rbq"), patch.object(recovery, "run", side_effect=fake_rest), patch.object(recovery, "fsck") as owner:
+        with patch.object(recovery, "private_env"), patch.object(recovery.shutil, "which", return_value="/usr/bin/rbq"), patch.object(recovery, "run", side_effect=fake_restic), patch.object(recovery, "fsck") as owner:
             recovery.restore(args)
             owner.assert_called_once()
         self.assertEqual(
