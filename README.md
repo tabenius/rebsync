@@ -137,6 +137,17 @@ A filesystem restic repository may be useful for tests or an enrolled USB drive,
 but rbq does not assert that it is independent of this machine. It never
 prunes backups or propagates deletions.
 
+### P0: independent encrypted S3/R2 recovery of storage layers
+
+The [M1 encrypted S3 recovery runbook](docs/M1-ENCRYPTED-S3-RECOVERY.md)
+and `scripts/rbq-s3-recovery.py` back up the *existing Rebeqah content-addressed
+layer store* through client-side encrypted restic, then verify every file and
+run `rbq storage fsck` after an independent restore to a new directory.
+The commands are preflight-only unless `--apply` is specified. This is not
+a plaintext native S3 object-store adapter, and it is not evidence of an
+already completed real-world recovery. Application-owner verification of
+restored Git/Mneme/Frog/Agenda artifacts remains a separate acceptance gate.
+
 ## Serving a restic repository (`rbq restic-serve`)
 
 `rbq restic-serve` exposes rbq's object store as a restic REST repository
