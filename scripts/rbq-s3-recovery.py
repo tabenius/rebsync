@@ -178,8 +178,9 @@ def restore(args: argparse.Namespace) -> None:
     if (not isinstance(identifier, str) or len(identifier) != 64
             or any(c not in "0123456789abcdef" for c in identifier)):
         fail("invalid snapshot identifier")
-    if not source.is_absolute() or str(source) in ("", "/"):
-        fail("invalid source path")
+    if (not source.is_absolute() or str(source) in ("", "/")
+            or ".." in source.parts or source != source.resolve(strict=False)):
+        fail("invalid or non-normalized source path")
     entries = receipt.get("entries")
     if not isinstance(entries, list) or not entries:
         fail("receipt has no file manifest")
@@ -192,7 +193,12 @@ def restore(args: argparse.Namespace) -> None:
     private_env()
     if not shutil.which("rbq"):
         fail("rbq must be installed on the independent recovery machine")
+    if args.into.name in ("", ".", ".."):
+        fail("restore destination must be a named new directory")
     parent = args.into.parent.resolve(strict=True)
+    destination = parent / args.into.name
+    if destination.exists() or destination.is_symlink():
+        fail("restore destination already exists")
     scratch = Path(tempfile.mkdtemp(prefix=".rbq-restic-verify-", dir=parent))
     try:
         run(["restic", "restore", identifier, "--target", str(scratch)])
@@ -201,11 +207,11 @@ def restore(args: argparse.Namespace) -> None:
             fail("restored bytes do not match the owner-side receipt; destination not published")
         fsck(restored_root)
         # Only after byte-for-byte validation and rbq structural verification.
-        scratch.rename(args.into)
+        scratch.rename(destination)
         print(json.dumps({
             "status": "independently-restored-structurally-verified",
             "snapshot_id": identifier, "files": len(entries),
-            "restored_storage_root": str(args.into / source.relative_to("/")),
+            "restored_storage_root": str(destination / source.relative_to("/")),
             "owner_format_validation": "run application-specific validators before claiming owner recovery",
         }))
     except BaseException:
